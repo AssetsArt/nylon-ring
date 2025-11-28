@@ -98,6 +98,73 @@ pub struct NrPluginInfo {
     pub vtable: *const NrPluginVTable,
 }
 
+impl NrStr {
+    pub fn from_str(s: &str) -> Self {
+        Self {
+            ptr: s.as_ptr(),
+            len: s.len() as u32,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        unsafe {
+            let slice = std::slice::from_raw_parts(self.ptr, self.len as usize);
+            std::str::from_utf8_unchecked(slice)
+        }
+    }
+}
+
+impl NrBytes {
+    pub fn from_slice(s: &[u8]) -> Self {
+        Self {
+            ptr: s.as_ptr(),
+            len: s.len() as u64,
+        }
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) }
+    }
+}
+
+impl NrHeader {
+    pub fn new(key: &str, value: &str) -> Self {
+        Self {
+            key: NrStr::from_str(key),
+            value: NrStr::from_str(value),
+        }
+    }
+}
+
+impl NrPluginInfo {
+    pub fn compatible(&self, expected_abi_version: u32) -> bool {
+        self.abi_version == expected_abi_version
+    }
+}
+
+// Safety: These types are ABI-stable data carriers.
+// Users must ensure that the pointers they contain are valid and accessed safely.
+unsafe impl Send for NrStr {}
+unsafe impl Sync for NrStr {}
+
+unsafe impl Send for NrBytes {}
+unsafe impl Sync for NrBytes {}
+
+unsafe impl Send for NrHeader {}
+unsafe impl Sync for NrHeader {}
+
+unsafe impl Send for NrRequest {}
+unsafe impl Sync for NrRequest {}
+
+unsafe impl Send for NrHostVTable {}
+unsafe impl Sync for NrHostVTable {}
+
+unsafe impl Send for NrPluginVTable {}
+unsafe impl Sync for NrPluginVTable {}
+
+unsafe impl Send for NrPluginInfo {}
+unsafe impl Sync for NrPluginInfo {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

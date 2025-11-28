@@ -33,9 +33,6 @@ pub enum NylonRingHostError {
     #[error("failed to receive response from plugin: {0}")]
     ReceiveResponseFailed(String),
 
-    #[error("mutex lock poisoned")]
-    MutexPoisoned,
-
     #[error("oneshot channel closed")]
     OneshotClosed,
 }

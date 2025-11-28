@@ -8,10 +8,11 @@ use nylon_ring::{
     NrBytes, NrHeader, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrRequest, NrStatus,
     NrStr,
 };
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::panic;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 type Result<T> = std::result::Result<T, NylonRingHostError>;
@@ -50,8 +51,8 @@ pub type StreamReceiver = mpsc::UnboundedReceiver<StreamFrame>;
 // Plugins access host_ext field directly, so we need #[repr(C)] for ABI compatibility.
 #[repr(C)]
 struct HostContext {
-    pending_requests: Mutex<HashMap<u64, Pending>>,
-    state_per_sid: Mutex<HashMap<u64, HashMap<String, Vec<u8>>>>,
+    pending_requests: DashMap<u64, Pending>,
+    state_per_sid: DashMap<u64, HashMap<String, Vec<u8>>>,
     host_ext: *const NrHostExt, // Pointer to host extension (stable address)
 }
 
@@ -102,8 +103,8 @@ impl NylonRingHost {
             }
 
             let host_ctx = Arc::new(HostContext {
-                pending_requests: Mutex::new(HashMap::new()),
-                state_per_sid: Mutex::new(HashMap::new()),
+                pending_requests: DashMap::new(),
+                state_per_sid: DashMap::new(),
                 host_ext: std::ptr::null(), // Will be set after creating host_ext
             });
 
@@ -176,13 +177,9 @@ impl NylonRingHost {
                 return;
             }
             let ctx = &*(host_ctx as *const HostContext);
-            let mut map = match ctx.pending_requests.lock() {
-                Ok(guard) => guard,
-                Err(_) => return, // Mutex poisoned, skip this callback
-            };
 
             // Take the entry out of the map so we own it.
-            let should_clear_state = if let Some(entry) = map.remove(&sid) {
+            let should_clear_state = if let Some((_, entry)) = ctx.pending_requests.remove(&sid) {
                 let data = payload.as_slice().to_vec();
                 match entry {
                     Pending::Unary(tx) => {
@@ -201,7 +198,7 @@ impl NylonRingHost {
                                 | NrStatus::StreamEnd
                         );
                         if !is_finished {
-                            map.insert(sid, Pending::Stream(tx));
+                            ctx.pending_requests.insert(sid, Pending::Stream(tx));
                         }
                         is_finished
                     }
@@ -212,9 +209,7 @@ impl NylonRingHost {
 
             // Clear state if request is finished
             if should_clear_state {
-                if let Ok(mut state_map) = ctx.state_per_sid.lock() {
-                    state_map.remove(&sid);
-                }
+                ctx.state_per_sid.remove(&sid);
             }
         }));
 
@@ -235,15 +230,11 @@ impl NylonRingHost {
                 return NrBytes::from_slice(&[]);
             }
             let ctx = &*(host_ctx as *const HostContext);
-            let mut state_map = match ctx.state_per_sid.lock() {
-                Ok(guard) => guard,
-                Err(_) => return NrBytes::from_slice(&[]), // Mutex poisoned
-            };
 
             let key_str = key.as_str().to_string();
             let value_vec = value.as_slice().to_vec();
 
-            state_map
+            ctx.state_per_sid
                 .entry(sid)
                 .or_insert_with(HashMap::new)
                 .insert(key_str, value_vec);
@@ -268,13 +259,9 @@ impl NylonRingHost {
                 return NrBytes::from_slice(&[]);
             }
             let ctx = &*(host_ctx as *const HostContext);
-            let state_map = match ctx.state_per_sid.lock() {
-                Ok(guard) => guard,
-                Err(_) => return NrBytes::from_slice(&[]), // Mutex poisoned
-            };
 
             let key_str = key.as_str();
-            if let Some(sid_state) = state_map.get(&sid) {
+            if let Some(sid_state) = ctx.state_per_sid.get(&sid) {
                 if let Some(value) = sid_state.get(key_str) {
                     return NrBytes::from_slice(value);
                 }
@@ -296,12 +283,7 @@ impl NylonRingHost {
         let (tx, rx) = oneshot::channel();
 
         {
-            let mut map = self
-                .host_ctx
-                .pending_requests
-                .lock()
-                .map_err(|_| NylonRingHostError::MutexPoisoned)?;
-            map.insert(sid, Pending::Unary(tx));
+            self.host_ctx.pending_requests.insert(sid, Pending::Unary(tx));
         }
 
         let method_str = req.method;
@@ -338,21 +320,13 @@ impl NylonRingHost {
         let status = match status {
             Ok(s) => s,
             Err(_) => {
-                let _ = self
-                    .host_ctx
-                    .pending_requests
-                    .lock()
-                    .map(|mut m| m.remove(&sid));
+                let _ = self.host_ctx.pending_requests.remove(&sid);
                 return Err(NylonRingHostError::PluginHandleFailed(NrStatus::Err));
             }
         };
 
         if status != NrStatus::Ok {
-            let _ = self
-                .host_ctx
-                .pending_requests
-                .lock()
-                .map(|mut m| m.remove(&sid));
+            let _ = self.host_ctx.pending_requests.remove(&sid);
             return Err(NylonRingHostError::PluginHandleFailed(status));
         }
 
@@ -371,12 +345,7 @@ impl NylonRingHost {
         let (tx, rx) = mpsc::unbounded_channel::<StreamFrame>();
 
         {
-            let mut map = self
-                .host_ctx
-                .pending_requests
-                .lock()
-                .map_err(|_| NylonRingHostError::MutexPoisoned)?;
-            map.insert(sid, Pending::Stream(tx));
+            self.host_ctx.pending_requests.insert(sid, Pending::Stream(tx));
         }
 
         let method_str = req.method;
@@ -413,21 +382,13 @@ impl NylonRingHost {
         let status = match status {
             Ok(s) => s,
             Err(_) => {
-                let _ = self
-                    .host_ctx
-                    .pending_requests
-                    .lock()
-                    .map(|mut m| m.remove(&sid));
+                let _ = self.host_ctx.pending_requests.remove(&sid);
                 return Err(NylonRingHostError::PluginHandleFailed(NrStatus::Err));
             }
         };
 
         if status != NrStatus::Ok {
-            let _ = self
-                .host_ctx
-                .pending_requests
-                .lock()
-                .map(|mut m| m.remove(&sid));
+            let _ = self.host_ctx.pending_requests.remove(&sid);
             return Err(NylonRingHostError::PluginHandleFailed(status));
         }
 

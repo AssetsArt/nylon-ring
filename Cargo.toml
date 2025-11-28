@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "nylon-ring",
+    "nylon-ring", "nylon-ring-bench",
     "nylon-ring-host",
     "nylon-ring-plugin-example",
 ]

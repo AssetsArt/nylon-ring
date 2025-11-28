@@ -1,0 +1,20 @@
+[package]
+name = "nylon-ring-bench"
+version = "0.1.0"
+edition = "2021"
+
+[[bench]]
+name = "abi_types"
+harness = false
+
+[[bench]]
+name = "host_overhead"
+harness = false
+
+[dependencies]
+nylon-ring = { path = "../nylon-ring" }
+nylon-ring-host = { path = "../nylon-ring-host" }
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio = { version = "1.0", features = ["full"] }
+
+[dev-dependencies]

@@ -1,4 +1,4 @@
-.PHONY: help build build-plugin test test-all examples example-simple example-streaming clean all
+.PHONY: help build build-plugin test test-all examples example-simple example-streaming benchmark benchmark-abi benchmark-host clean all
 
 # Default target
 .DEFAULT_GOAL := help
@@ -43,6 +43,11 @@ help: ## แสดง help message
 	@echo "  $(YELLOW)make examples$(NC)             - Run all examples"
 	@echo "  $(YELLOW)make example-simple$(NC)       - Run simple_host example"
 	@echo "  $(YELLOW)make example-streaming$(NC)   - Run streaming_host example"
+	@echo ""
+	@echo "$(GREEN)Benchmark Commands:$(NC)"
+	@echo "  $(YELLOW)make benchmark$(NC)            - Run all benchmarks"
+	@echo "  $(YELLOW)make benchmark-abi$(NC)        - Run ABI type benchmarks"
+	@echo "  $(YELLOW)make benchmark-host$(NC)       - Run host overhead benchmarks"
 	@echo ""
 	@echo "$(GREEN)Utility Commands:$(NC)"
 	@echo "  $(YELLOW)make clean$(NC)               - Clean build artifacts"
@@ -106,6 +111,19 @@ examples: check-plugin ## Run all examples
 	@cargo run --example streaming_host
 	@echo ""
 	@echo "$(GREEN)✓ All examples complete!$(NC)"
+
+benchmark-abi: ## Run ABI type benchmarks
+	@echo "$(BLUE)Running ABI type benchmarks...$(NC)"
+	@cargo bench --bench abi_types
+	@echo "$(GREEN)✓ ABI benchmarks complete!$(NC)"
+
+benchmark-host: check-plugin ## Run host overhead benchmarks
+	@echo "$(BLUE)Running host overhead benchmarks...$(NC)"
+	@cargo bench --bench host_overhead
+	@echo "$(GREEN)✓ Host benchmarks complete!$(NC)"
+
+benchmark: benchmark-abi benchmark-host ## Run all benchmarks
+	@echo "$(GREEN)✓ All benchmarks complete!$(NC)"
 
 clean: ## Clean build artifacts
 	@echo "$(BLUE)Cleaning build artifacts...$(NC)"

@@ -1,4 +1,4 @@
-use nylon_ring_host::{HighLevelRequest, NylonRingHost, NylonRingHostError};
+use nylon_ring_host::{Extensions, HighLevelRequest, NylonRingHost, NylonRingHostError};
 use std::env;
 use std::path::PathBuf;
 
@@ -34,7 +34,7 @@ async fn main() -> Result<(), NylonRingHostError> {
         query: "".to_string(),
         headers: vec![("User-Agent".to_string(), "NylonHost/1.0".to_string())],
         body: vec![],
-        extensions: std::collections::HashMap::new(),
+        extensions: Extensions::new(),
     };
 
     println!("Sending request...");

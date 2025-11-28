@@ -1,6 +1,6 @@
 // Example demonstrating streaming RPC with NylonRingHost
 use nylon_ring::NrStatus;
-use nylon_ring_host::{HighLevelRequest, NylonRingHost, NylonRingHostError};
+use nylon_ring_host::{Extensions, HighLevelRequest, NylonRingHost, NylonRingHostError};
 use std::env;
 use std::path::PathBuf;
 
@@ -36,7 +36,7 @@ async fn main() -> Result<(), NylonRingHostError> {
         query: "".to_string(),
         headers: vec![("X-Stream-Type".to_string(), "websocket".to_string())],
         body: vec![],
-        extensions: std::collections::HashMap::new(),
+        extensions: Extensions::new(),
     };
 
     println!("Starting streaming request...");

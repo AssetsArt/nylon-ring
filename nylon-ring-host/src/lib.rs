@@ -1,6 +1,8 @@
 mod error;
+mod extensions;
 
 pub use error::NylonRingHostError;
+pub use extensions::Extensions;
 use libloading::{Library, Symbol};
 use nylon_ring::{
     NrBytes, NrHeader, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrRequest, NrStatus,
@@ -20,9 +22,9 @@ pub struct HighLevelRequest {
     pub query: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
-    /// Extensions: key-value pairs for custom metadata.
+    /// Extensions: type-safe key-value storage for custom metadata.
     /// These are not sent to the plugin but can be used by the host for routing, logging, etc.
-    pub extensions: HashMap<String, Vec<u8>>,
+    pub extensions: Extensions,
 }
 
 /// One cell in the pending map:

@@ -210,12 +210,130 @@ Host                    Plugin
   |                       |
 ```
 
+## Performance
+
+We benchmark both the ABI types and the full host–plugin round trip to ensure minimal overhead.
+
+### ABI Types (`nylon-ring`)
+
+The ABI layer itself is extremely lightweight:
+
+* `NrStr::from_str` ≈ **1 ns**
+* `NrStr::as_str` ≈ **1 ns**
+* `NrBytes::from_slice` ≈ **0.5 ns**
+* `NrBytes::as_slice` ≈ **0.8 ns**
+* `NrHeader::new` ≈ **2 ns**
+* `NrRequest::build` ≈ **3 ns**
+
+**Conclusion**: Creating ABI views is essentially free (0.5–3 ns) compared to real-world network or I/O costs. The bottleneck will never be in the ABI struct layer.
+
+### Host Overhead (`nylon-ring-host`)
+
+Full round-trip performance (host → plugin → host callback):
+
+* **Unary call**: ~14.6 µs per call → **~68k calls/sec** on a single core
+* **Unary call with 1KB body**: ~14.6 µs per call → **~68k calls/sec** (body size has negligible impact)
+* **Streaming call** (consume all frames): ~15.5 µs per call → **~64k calls/sec**
+
+The overhead is dominated by:
+* FFI crossing (`extern "C"` calls)
+* Async scheduling (Tokio runtime)
+* Locking the pending-request map (`Mutex<HashMap>`)
+* Plugin's own work
+
+**Scaling**: With 4 cores handling requests, ideal throughput can reach **~280k req/s** in a scale-out scenario, which is well within the range of high-performance reverse proxy systems.
+
+### Benchmarking
+
+Run benchmarks with:
+
+```bash
+make benchmark              # All benchmarks
+make benchmark-abi         # ABI type benchmarks only
+make benchmark-host        # Host overhead benchmarks (requires plugin)
+```
+
+See [BENCHMARKS.md](BENCHMARKS.md) for detailed benchmark results and analysis.
+
+## State Management
+
+nylon-ring supports **per-request and per-stream state** without changing the ABI layout.
+
+### Per-SID State
+
+Host maintains state per request/stream:
+
+```rust
+state_per_sid: Mutex<HashMap<u64, HashMap<String, Vec<u8>>>>
+```
+
+### Host Extension API
+
+Plugins can access state through the `NrHostExt` extension:
+
+```rust
+#[repr(C)]
+pub struct NrHostExt {
+    pub set_state: unsafe extern "C" fn(host_ctx, sid, key: NrStr, value: NrBytes) -> NrBytes,
+    pub get_state: unsafe extern "C" fn(host_ctx, sid, key: NrStr) -> NrBytes,
+}
+```
+
+### Using State in Plugins
+
+```rust
+// Set state
+host_ext.set_state(host_ctx, sid, NrStr::from_str("key"), NrBytes::from_slice(value));
+
+// Get state
+let value = host_ext.get_state(host_ctx, sid, NrStr::from_str("key"));
+```
+
+### State Lifecycle
+
+* Created automatically on first `set_state()` call
+* Persists for the lifetime of the request/stream
+* Automatically cleared when:
+  * Unary call completes
+  * Streaming call ends (via `StreamEnd` or error status)
+
+This enables:
+* WebSocket session management
+* Per-request metadata storage
+* Plugin-local agent state
+* Frame-to-frame data persistence
+
 ## Key Constraints
 
 * **Plugin `handle()` must return immediately** - no blocking operations
 * **All ABI types are `#[repr(C)]`** - do not modify their layout
 * **Host owns request data** - plugin must copy if needed
 * **Thread-safe callbacks** - `send_result` can be called from any thread
+* **Panic-safe FFI** - all `extern "C"` functions catch panics
+* **No `unwrap()` in production** - proper error handling required
+
+## Error Handling
+
+The host adapter uses `NylonRingHostError` (defined with `thiserror`):
+
+* All functions return `Result<T, NylonRingHostError>`
+* Clear, descriptive error messages
+* No `anyhow` dependency
+* Panic-safe callbacks
+
+## Rust Coding Rules
+
+The nylon-ring ecosystem follows strict Rust coding rules for production safety:
+
+1. **No `unwrap()` or `expect()`** in production code (only in tests/benchmarks)
+2. **No `anyhow`** - use `thiserror` for error types
+3. **All fallible functions return `Result`** - no panic as control flow
+4. **Panic-safe `extern "C"` functions** - all FFI boundaries catch panics
+5. **Error consolidation** - single error enum per crate with `thiserror::Error`
+6. **Clear error messages** - descriptive error variants
+7. **Avoid `panic!` and `assert!`** - only in benchmarks/tests
+
+See `nylon-ring-host/src/error.rs` for an example error type implementation.
 
 ## Platform Support
 

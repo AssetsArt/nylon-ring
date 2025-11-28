@@ -394,18 +394,171 @@ nylon-ring supports:
 
 ---
 
-## 13. Benchmark Expectation
+## 13. Performance & Benchmarks
+
+### ABI Types Performance
+
+The ABI layer itself is extremely lightweight:
+
+* `NrStr::from_str` ≈ **1 ns**
+* `NrStr::as_str` ≈ **1 ns**
+* `NrBytes::from_slice` ≈ **0.5 ns**
+* `NrBytes::as_slice` ≈ **0.8 ns**
+* `NrHeader::new` ≈ **2 ns**
+* `NrRequest::build` ≈ **3 ns**
+
+**Conclusion**: Creating ABI views is essentially free (0.5–3 ns). The bottleneck will never be in the ABI struct layer.
+
+### Host Overhead
+
+Full round-trip performance (host → plugin → host callback):
+
+* **Unary call**: ~14.6 µs per call → **~68k calls/sec** on a single core
+* **Unary call with 1KB body**: ~14.6 µs per call → **~68k calls/sec** (body size has negligible impact)
+* **Streaming call**: ~15.5 µs per call → **~64k calls/sec**
+
+The overhead is dominated by:
+* FFI crossing (`extern "C"` calls)
+* Async scheduling (Tokio runtime)
+* Locking the pending-request map (`Mutex<HashMap>`)
+* Plugin's own work
+
+**Scaling**: With 4 cores, ideal throughput can reach **~280k req/s** in scale-out scenarios.
+
+### Benchmark Expectations
 
 Under proper usage:
 
-* High throughput sustained
-* near-zero overhead passing borrowed strings
-* no async work inside handle
-* plugin callback ≈ O(1)
+* High throughput sustained (65–70k req/s per core)
+* Near-zero overhead passing borrowed strings (ABI layer: 0.5–3 ns)
+* No async work inside handle
+* Plugin callback ≈ O(1)
+
+### Optimization Opportunities
+
+If further performance improvements are needed:
+
+1. **Reduce `Mutex<HashMap>` contention**: Use sharded maps (e.g., `DashMap`) or `parking_lot::Mutex`
+2. **Separate unary/stream maps**: Avoid enum matching in hot path
+3. **Plugin-side optimization**: Minimize thread spawning, use thread pools
+4. **Request building**: Reuse buffers/arenas for high-level request construction (~215 ns currently)
+
+The ABI types themselves should not be modified for performance—they are already optimal.
 
 ---
 
-## 14. Naming Conventions
+## 14. State Key/Value Management
+
+nylon-ring supports **per-request and per-stream state** without changing the ABI layout.
+
+### Per-SID State
+
+Host keeps state per request/stream:
+
+```rust
+state_per_sid: Mutex<HashMap<u64, HashMap<String, Vec<u8>>>>
+```
+
+### Host Extension API
+
+```rust
+#[repr(C)]
+pub struct NrHostExt {
+    pub set_state: unsafe extern "C" fn(host_ctx, sid, key: NrStr, value: NrBytes) -> NrBytes,
+    pub get_state: unsafe extern "C" fn(host_ctx, sid, key: NrStr) -> NrBytes,
+}
+```
+
+This allows plugins to:
+
+* Store arbitrary metadata per request / per stream
+* Implement WebSocket/session logic
+* Implement plugin-local agents
+* Persist data between frames
+
+### State Lifecycle
+
+* Created at first `set_state()` call for a `sid`
+* Updated any time via `set_state()`
+* Destroyed automatically when:
+  * Unary call returns (via `send_result`)
+  * Streaming call emits `StreamEnd` (or error status)
+
+### Global State (Optional)
+
+Plugins may use `plugin_ctx` to store global state:
+
+```rust
+struct PluginState {
+    global_map: Mutex<HashMap<String, Vec<u8>>>,
+}
+```
+
+### Accessing State from Plugin
+
+Plugins access state through `HostContext` structure:
+
+```rust
+// In plugin_init, extract host_ext from HostContext
+let ctx = &*(host_ctx as *const HostContext);
+let host_ext = ctx.host_ext;
+
+// Later, use state functions
+host_ext.set_state(host_ctx, sid, NrStr::from_str("key"), NrBytes::from_slice(value));
+let value = host_ext.get_state(host_ctx, sid, NrStr::from_str("key"));
+```
+
+---
+
+## 15. Rust Coding Rules
+
+The nylon-ring ecosystem follows strict Rust coding rules for production safety:
+
+### 1. No `unwrap()` or `expect()` in Production Code
+
+* Only allowed in unit tests and benchmarks
+* All production code must use proper error handling
+
+### 2. No `anyhow` or `anyhow::Context`
+
+* Use `thiserror` for error type definitions
+* Use `Result<T, NylonRingHostError>` or `Result<T, PluginError>`
+* Propagate errors with `?` operator only
+
+### 3. All Fallible Functions Return `Result`
+
+* No panic as control flow
+* Especially critical in FFI and `extern "C"` functions
+
+### 4. Panic-Safe `extern "C"` Functions
+
+* All `extern "C"` and plugin handlers must be panic-safe
+* Use `std::panic::catch_unwind` before crossing FFI boundary
+* Never allow panics to propagate across boundaries
+
+### 5. Error Consolidation
+
+* Use a single error enum per crate (e.g., `NylonRingHostError`)
+* Error enum must `derive(Debug, thiserror::Error)`
+* Do not create custom error structs that pass data through pointers
+
+### 6. Clear Error Messages
+
+Errors must be descriptive:
+
+```rust
+#[error("failed to load plugin library: {0}")]
+FailedToLoadLibrary(#[source] libloading::Error)
+```
+
+### 7. Avoid `panic!` and `assert!`
+
+* Only allowed in benchmarks/tests
+* Production code must handle errors gracefully
+
+---
+
+## 16. Naming Conventions
 
 * Library: **nylon-ring**
 * ABI: **nylon-ring ABI**
@@ -414,7 +567,7 @@ Under proper usage:
 
 ---
 
-## 15. Summary
+## 17. Summary
 
 **nylon-ring** is an ABI-level interface for high-performance proxy systems like Nylon/Pingora that require:
 
@@ -465,7 +618,7 @@ The workspace contains:
 * Tests assert struct layouts (sizes/alignments) - must always pass
 * Assume 64-bit little-endian platform (Linux/macOS)
 
-### Testing
+### Testing & Benchmarking
 
 Run tests and examples:
 ```bash
@@ -473,4 +626,15 @@ make test          # Run all tests
 make examples      # Run all examples
 make example-simple      # Unary example
 make example-streaming   # Streaming example
+make benchmark     # Run all benchmarks
+make benchmark-abi # ABI type benchmarks
+make benchmark-host # Host overhead benchmarks
 ```
+
+### Error Handling
+
+The host adapter uses `NylonRingHostError` (defined with `thiserror`):
+
+* All functions return `Result<T, NylonRingHostError>`
+* No `unwrap()` or `expect()` in production code
+* All `extern "C"` functions are panic-safe

@@ -8,6 +8,8 @@ pub enum NrStatus {
     Err = 1,
     Invalid = 2,
     Unsupported = 3,
+    /// Streaming completed normally.
+    StreamEnd = 4,
 }
 
 /// A UTF-8 string slice with a pointer and length.

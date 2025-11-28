@@ -6,7 +6,7 @@ use nylon_ring::{
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 pub struct HighLevelRequest {
     pub method: String,
@@ -16,8 +16,26 @@ pub struct HighLevelRequest {
     pub body: Vec<u8>,
 }
 
+/// One cell in the pending map:
+/// - Unary: standard request/response
+/// - Stream: streaming / websocket-style
+enum Pending {
+    Unary(oneshot::Sender<(NrStatus, Vec<u8>)>),
+    Stream(mpsc::UnboundedSender<StreamFrame>),
+}
+
+/// One frame in a streaming response.
+#[derive(Debug)]
+pub struct StreamFrame {
+    pub status: NrStatus,
+    pub data: Vec<u8>,
+}
+
+/// Receiver type for streaming.
+pub type StreamReceiver = mpsc::UnboundedReceiver<StreamFrame>;
+
 struct HostContext {
-    pending_requests: Mutex<HashMap<u64, oneshot::Sender<(NrStatus, Vec<u8>)>>>,
+    pending_requests: Mutex<HashMap<u64, Pending>>,
 }
 
 pub struct NylonRingHost {
@@ -30,8 +48,6 @@ pub struct NylonRingHost {
 }
 
 // Safety: The host is responsible for thread safety.
-// libloading::Library is Send/Sync.
-// Pointers need care, but we are designing this for async usage.
 unsafe impl Send for NylonRingHost {}
 unsafe impl Sync for NylonRingHost {}
 
@@ -77,18 +93,13 @@ impl NylonRingHost {
             let mut host = Self {
                 _lib: lib,
                 plugin_vtable,
-                plugin_ctx: std::ptr::null_mut(), // Will be set by plugin if it wants, but actually we pass it from info
+                plugin_ctx: std::ptr::null_mut(), // Will be set from plugin info
                 host_ctx,
                 host_vtable,
                 next_sid: std::sync::atomic::AtomicU64::new(1),
             };
 
-            // The plugin info has a plugin_ctx field, which might be initialized by the plugin itself?
-            // Wait, the ABI says:
-            // pub plugin_ctx: *mut c_void,
-            // pub vtable: *const NrPluginVTable,
-            // And init takes: (plugin_ctx, host_ctx, host_vtable)
-            // Usually the plugin_ctx in NrPluginInfo is the "global" context for that plugin instance.
+            // plugin_ctx from plugin info
             host.plugin_ctx = info.plugin_ctx;
 
             // Initialize plugin
@@ -107,6 +118,7 @@ impl NylonRingHost {
         }
     }
 
+    /// Callback called from plugin (any thread)
     unsafe extern "C" fn send_result_callback(
         host_ctx: *mut c_void,
         sid: u64,
@@ -115,12 +127,33 @@ impl NylonRingHost {
     ) {
         let ctx = &*(host_ctx as *const HostContext);
         let mut map = ctx.pending_requests.lock().unwrap();
-        if let Some(tx) = map.remove(&sid) {
+
+        // Take the entry out of the map so we own it.
+        if let Some(entry) = map.remove(&sid) {
             let data = payload.as_slice().to_vec();
-            let _ = tx.send((status, data));
+            match entry {
+                Pending::Unary(tx) => {
+                    let _ = tx.send((status, data));
+                }
+                Pending::Stream(tx) => {
+                    let _ = tx.send(StreamFrame { status, data });
+                    // If the status indicates the stream is finished, we simply drop the sender.
+                    // Otherwise, re-insert the entry so further frames can be received.
+                    if !matches!(
+                        status,
+                        NrStatus::Err
+                            | NrStatus::Invalid
+                            | NrStatus::Unsupported
+                            | NrStatus::StreamEnd
+                    ) {
+                        map.insert(sid, Pending::Stream(tx));
+                    }
+                }
+            }
         }
     }
 
+    /// Unary RPC: plugin should call send_result exactly once for this sid.
     pub async fn call(&self, req: HighLevelRequest) -> Result<(NrStatus, Vec<u8>)> {
         let sid = self
             .next_sid
@@ -129,21 +162,13 @@ impl NylonRingHost {
 
         {
             let mut map = self.host_ctx.pending_requests.lock().unwrap();
-            map.insert(sid, tx);
+            map.insert(sid, Pending::Unary(tx));
         }
-
-        // Convert HighLevelRequest to NrRequest
-        // We need to keep the owned strings alive during the call
-        // Since handle() must return immediately, we can just keep them in this scope?
-        // Wait, handle() returns immediately, but it might spawn a thread that uses the data?
-        // NO. The ABI says: "Plugin is required to copy what it needs and return immediately."
-        // So we only need to keep them alive for the duration of the `handle` call.
 
         let method_str = req.method;
         let path_str = req.path;
         let query_str = req.query;
 
-        // Convert headers
         let header_objs: Vec<NrHeader> = req
             .headers
             .iter()
@@ -166,7 +191,6 @@ impl NylonRingHost {
         let status = unsafe { handle_fn(self.plugin_ctx, sid, &nr_req, payload) };
 
         if status != NrStatus::Ok {
-            // Remove from map if immediate failure
             let mut map = self.host_ctx.pending_requests.lock().unwrap();
             map.remove(&sid);
             return Err(anyhow!(
@@ -175,8 +199,60 @@ impl NylonRingHost {
             ));
         }
 
-        // Wait for callback
         rx.await.context("Failed to receive response from plugin")
+    }
+
+    /// Streaming call: plugin may call send_result multiple times.
+    /// The stream closes when plugin sends one of:
+    /// - NrStatus::StreamEnd
+    /// - NrStatus::Err / Invalid / Unsupported
+    pub async fn call_stream(&self, req: HighLevelRequest) -> Result<StreamReceiver> {
+        let sid = self
+            .next_sid
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let (tx, rx) = mpsc::unbounded_channel::<StreamFrame>();
+
+        {
+            let mut map = self.host_ctx.pending_requests.lock().unwrap();
+            map.insert(sid, Pending::Stream(tx));
+        }
+
+        let method_str = req.method;
+        let path_str = req.path;
+        let query_str = req.query;
+
+        let header_objs: Vec<NrHeader> = req
+            .headers
+            .iter()
+            .map(|(k, v)| NrHeader::new(k, v))
+            .collect();
+
+        let nr_req = NrRequest {
+            path: NrStr::from_str(&path_str),
+            method: NrStr::from_str(&method_str),
+            query: NrStr::from_str(&query_str),
+            headers: header_objs.as_ptr(),
+            headers_len: header_objs.len() as u32,
+            _reserved0: 0,
+            _reserved1: 0,
+        };
+
+        let payload = NrBytes::from_slice(&req.body);
+
+        let handle_fn = self.plugin_vtable.handle.unwrap();
+        let status = unsafe { handle_fn(self.plugin_ctx, sid, &nr_req, payload) };
+
+        if status != NrStatus::Ok {
+            let mut map = self.host_ctx.pending_requests.lock().unwrap();
+            map.remove(&sid);
+            return Err(anyhow!(
+                "Plugin handle (stream) failed immediately with status {:?}",
+                status
+            ));
+        }
+
+        Ok(rx)
     }
 }
 

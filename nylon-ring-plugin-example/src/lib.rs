@@ -11,7 +11,6 @@ struct HostHandle {
 }
 
 // Safety: The host guarantees that the context and vtable are thread-safe or handles concurrency.
-// In our design, send_result is thread-safe.
 unsafe impl Send for HostHandle {}
 unsafe impl Sync for HostHandle {}
 
@@ -45,21 +44,46 @@ extern "C" fn plugin_handle(
 
     // Spawn background thread
     thread::spawn(move || {
-        // Simulate heavy work
-        thread::sleep(Duration::from_secs(2));
+        if path == "/stream" {
+            // Streaming response: 5 frames, 1 per second
+            if let Some(host) = HOST_HANDLE.get() {
+                let send_result = unsafe { (*host.vtable).send_result };
 
-        let response_string = format!("OK: {} {}", method, path);
-        let response_bytes = response_string.as_bytes();
+                for i in 1..=5 {
+                    thread::sleep(Duration::from_secs(1));
+                    let msg = format!("Frame {}/5 from {}", i, path);
+                    unsafe {
+                        send_result(
+                            host.ctx,
+                            sid,
+                            NrStatus::Ok,
+                            NrBytes::from_slice(msg.as_bytes()),
+                        );
+                    }
+                }
 
-        if let Some(host) = HOST_HANDLE.get() {
-            let send_result = unsafe { (*host.vtable).send_result };
-            unsafe {
-                send_result(
-                    host.ctx,
-                    sid,
-                    NrStatus::Ok,
-                    NrBytes::from_slice(response_bytes),
-                );
+                // End stream
+                unsafe {
+                    send_result(host.ctx, sid, NrStatus::StreamEnd, NrBytes::from_slice(&[]));
+                }
+            }
+        } else {
+            // Unary response
+            thread::sleep(Duration::from_secs(2));
+
+            let response_string = format!("OK: {} {}", method, path);
+            let response_bytes = response_string.as_bytes();
+
+            if let Some(host) = HOST_HANDLE.get() {
+                let send_result = unsafe { (*host.vtable).send_result };
+                unsafe {
+                    send_result(
+                        host.ctx,
+                        sid,
+                        NrStatus::Ok,
+                        NrBytes::from_slice(response_bytes),
+                    );
+                }
             }
         }
     });
@@ -76,6 +100,11 @@ static PLUGIN_VTABLE: NrPluginVTable = NrPluginVTable {
     handle: Some(plugin_handle),
     shutdown: Some(plugin_shutdown),
 };
+
+// Safety: These types are ABI-stable data carriers.
+// Users must ensure that the pointers they contain are valid and accessed safely.
+// We need to implement Sync for NrPluginInfo because it is used in a static.
+// The ABI types in nylon-ring crate already implement Send/Sync unsafe.
 
 static PLUGIN_INFO: NrPluginInfo = NrPluginInfo {
     abi_version: 1,

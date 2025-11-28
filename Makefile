@@ -112,12 +112,17 @@ examples: check-plugin ## Run all examples
 	@echo ""
 	@echo "$(GREEN)✓ All examples complete!$(NC)"
 
+build-bench-plugin: ## Build benchmark plugin (fast response, no sleep)
+	@echo "$(BLUE)Building benchmark plugin...$(NC)"
+	@cargo build --release -p nylon-ring-bench-plugin
+	@echo "$(GREEN)✓ Benchmark plugin built!$(NC)"
+
 benchmark-abi: ## Run ABI type benchmarks
 	@echo "$(BLUE)Running ABI type benchmarks...$(NC)"
 	@cargo bench --bench abi_types
 	@echo "$(GREEN)✓ ABI benchmarks complete!$(NC)"
 
-benchmark-host: check-plugin ## Run host overhead benchmarks
+benchmark-host: build-bench-plugin ## Run host overhead benchmarks
 	@echo "$(BLUE)Running host overhead benchmarks...$(NC)"
 	@cargo bench --bench host_overhead
 	@echo "$(GREEN)✓ Host benchmarks complete!$(NC)"

@@ -7,14 +7,14 @@ fn get_plugin_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.pop(); // Go up to workspace root
     path.push("target");
-    path.push("debug");
+    path.push("release"); // Use release build for benchmarks
     
     #[cfg(target_os = "macos")]
-    path.push("libnylon_ring_plugin_example.dylib");
+    path.push("libnylon_ring_bench_plugin.dylib");
     #[cfg(target_os = "linux")]
-    path.push("libnylon_ring_plugin_example.so");
+    path.push("libnylon_ring_bench_plugin.so");
     #[cfg(target_os = "windows")]
-    path.push("nylon_ring_plugin_example.dll");
+    path.push("nylon_ring_bench_plugin.dll");
     
     path
 }

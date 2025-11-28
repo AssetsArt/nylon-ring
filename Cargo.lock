@@ -315,6 +315,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nylon-ring-bench-plugin"
+version = "0.1.0"
+dependencies = [
+ "nylon-ring",
+]
+
+[[package]]
 name = "nylon-ring-host"
 version = "0.1.0"
 dependencies = [

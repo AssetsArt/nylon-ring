@@ -214,16 +214,18 @@ Host                    Plugin
 
 We benchmark both the ABI types and the full host–plugin round trip to ensure minimal overhead.
 
+> **Note**: All performance numbers below are measured on **Apple M1 Pro (10-core)** with release builds.
+
 ### ABI Types (`nylon-ring`)
 
 The ABI layer itself is extremely lightweight:
 
-* `NrStr::from_str` ≈ **1 ns**
-* `NrStr::as_str` ≈ **1 ns**
-* `NrBytes::from_slice` ≈ **0.5 ns**
-* `NrBytes::as_slice` ≈ **0.8 ns**
-* `NrHeader::new` ≈ **2 ns**
-* `NrRequest::build` ≈ **3 ns**
+* `NrStr::from_str` ≈ **0.99 ns** (M1 Pro 10-core)
+* `NrStr::as_str` ≈ **1.00 ns** (M1 Pro 10-core)
+* `NrBytes::from_slice` ≈ **0.52 ns** (M1 Pro 10-core)
+* `NrBytes::as_slice` ≈ **0.84 ns** (M1 Pro 10-core)
+* `NrHeader::new` ≈ **1.91 ns** (M1 Pro 10-core)
+* `NrRequest::build` ≈ **2.83 ns** (M1 Pro 10-core)
 
 **Conclusion**: Creating ABI views is essentially free (0.5–3 ns) compared to real-world network or I/O costs. The bottleneck will never be in the ABI struct layer.
 
@@ -231,9 +233,10 @@ The ABI layer itself is extremely lightweight:
 
 Full round-trip performance (host → plugin → host callback):
 
-* **Unary call**: ~14.6 µs per call → **~68k calls/sec** on a single core
-* **Unary call with 1KB body**: ~14.6 µs per call → **~68k calls/sec** (body size has negligible impact)
-* **Streaming call** (consume all frames): ~15.5 µs per call → **~64k calls/sec**
+* **Unary call**: ~14.8 µs per call → **~67k calls/sec** on a single core (M1 Pro 10-core)
+* **Unary call with 1KB body**: ~14.9 µs per call → **~67k calls/sec** (M1 Pro 10-core, body size has negligible impact)
+* **Streaming call** (consume all frames): ~16.0 µs per call → **~62k calls/sec** (M1 Pro 10-core)
+* **Build `HighLevelRequest`**: ~216 ns (M1 Pro 10-core)
 
 The overhead is dominated by:
 * FFI crossing (`extern "C"` calls)
@@ -241,7 +244,7 @@ The overhead is dominated by:
 * Locking the pending-request map (`Mutex<HashMap>`)
 * Plugin's own work
 
-**Scaling**: With 4 cores handling requests, ideal throughput can reach **~280k req/s** in a scale-out scenario, which is well within the range of high-performance reverse proxy systems.
+**Scaling**: With multiple cores handling requests, ideal throughput scales linearly. On M1 Pro 10-core, theoretical maximum can reach **~670k req/s** in a scale-out scenario, which is well within the range of high-performance reverse proxy systems.
 
 ### Benchmarking
 
@@ -253,7 +256,7 @@ make benchmark-abi         # ABI type benchmarks only
 make benchmark-host        # Host overhead benchmarks (requires plugin)
 ```
 
-See [BENCHMARKS.md](BENCHMARKS.md) for detailed benchmark results and analysis.
+> **Note**: Benchmark results are hardware-dependent. The numbers above are from **Apple M1 Pro (10-core)**. Your results may vary based on CPU architecture, clock speed, and system load.
 
 ## State Management
 

@@ -8,7 +8,7 @@
 * **Non-blocking** (plugin must not block thread; must callback host when done)
 * **Cross-language** (connects Rust host ↔ Rust/Go plugin seamlessly)
 * **Zero-serialization enforcement** (payload is bytes; you choose JSON, rkyv, FlatBuffers, Cap'nProto)
-* **Safe for high-QPS workloads** (designed for Nylon/Pingora 100k–200k RPS)
+* **Safe for high-QPS workloads** (designed for Nylon/Pingora)
 
 This document explains everything an Agent needs to know to:
 
@@ -398,7 +398,7 @@ nylon-ring supports:
 
 Under proper usage:
 
-* 100k–200k RPS sustained
+* High throughput sustained
 * near-zero overhead passing borrowed strings
 * no async work inside handle
 * plugin callback ≈ O(1)

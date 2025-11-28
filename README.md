@@ -7,7 +7,7 @@
 * **ABI-Stable**: All data structures use C ABI (`#[repr(C)]`), ensuring compatibility across language boundaries
 * **Non-Blocking**: Plugins must return immediately; actual work happens in background tasks
 * **Cross-Language**: Works with Rust, Go, C, Zig, and more
-* **High Performance**: Designed for 100k–200k RPS workloads
+* **High Performance**: Designed for high-throughput, low-latency workloads
 * **Dual Mode**: Supports both unary (request/response) and streaming (WebSocket-style) communication
 * **Zero-Copy**: Efficient data passing using borrowed slices
 

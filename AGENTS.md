@@ -264,9 +264,11 @@ plugin_info.compatible(expected_abi_version)
 ### 7.2 Manage `sid` lifecycle
 
 * Generate unique `sid`
-* For unary: Insert into `HashMap<sid, oneshot::Sender<(NrStatus, Vec<u8>)>>`
-* For streaming: Insert into `HashMap<sid, mpsc::UnboundedSender<StreamFrame>>`
+* For unary: Insert into `DashMap<sid, oneshot::Sender<(NrStatus, Vec<u8>)>>`
+* For streaming: Insert into `DashMap<sid, mpsc::UnboundedSender<StreamFrame>>`
 * Erase when callback returns (unary) or stream ends (streaming)
+
+**Note**: The host uses `DashMap` (not `Mutex<HashMap>`) for better concurrency performance with fine-grained locking.
 
 ### 7.3 Build request & payload
 
@@ -274,12 +276,29 @@ Host owns underlying storage.
 
 ### 7.4 Maintain `host_ctx`
 
-Pointer to any structure host uses (e.g., `Arc<Mutex<HashMap<...>>>`)
+Pointer to any structure host uses (e.g., `Arc<HostContext>` with `DashMap`)
 
 ### 7.5 Support both unary and streaming
 
 * `call()` → unary RPC (single response)
 * `call_stream()` → streaming RPC (multiple frames)
+
+### 7.6 High-Level Request API
+
+The host provides `HighLevelRequest` for convenience:
+
+```rust
+pub struct HighLevelRequest {
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub extensions: Extensions,  // Type-safe metadata storage
+}
+```
+
+The `extensions` field uses a type-safe `Extensions` struct (similar to `http::Extensions`) that allows storing arbitrary types without serialization.
 
 ---
 
@@ -322,8 +341,9 @@ host_vtable.send_result(host_ctx, sid, NrStatus::StreamEnd, empty_bytes);
 ### Host
 
 * Multi-threaded
-* Async
+* Async (Tokio)
 * Never blocked by plugin
+* Uses `DashMap` for concurrent access to pending requests and state
 
 ### Plugin
 
@@ -398,50 +418,56 @@ nylon-ring supports:
 
 ### ABI Types Performance
 
-The ABI layer itself is extremely lightweight:
+The ABI layer itself is extremely lightweight (measured on **Apple M1 Pro 10-core**):
 
-* `NrStr::from_str` ≈ **1 ns**
-* `NrStr::as_str` ≈ **1 ns**
-* `NrBytes::from_slice` ≈ **0.5 ns**
-* `NrBytes::as_slice` ≈ **0.8 ns**
-* `NrHeader::new` ≈ **2 ns**
-* `NrRequest::build` ≈ **3 ns**
+* `NrStr::from_str` ≈ **0.99 ns**
+* `NrStr::as_str` ≈ **1.00 ns**
+* `NrBytes::from_slice` ≈ **0.52 ns**
+* `NrBytes::as_slice` ≈ **0.84 ns**
+* `NrHeader::new` ≈ **1.91 ns**
+* `NrRequest::build` ≈ **2.83 ns**
 
 **Conclusion**: Creating ABI views is essentially free (0.5–3 ns). The bottleneck will never be in the ABI struct layer.
 
 ### Host Overhead
 
-Full round-trip performance (host → plugin → host callback):
+Full round-trip performance (host → plugin → host callback, measured on **Apple M1 Pro 10-core**):
 
-* **Unary call**: ~14.6 µs per call → **~68k calls/sec** on a single core
-* **Unary call with 1KB body**: ~14.6 µs per call → **~68k calls/sec** (body size has negligible impact)
-* **Streaming call**: ~15.5 µs per call → **~64k calls/sec**
+* **Unary call**: ~14.8 µs per call → **~67k calls/sec** on a single core
+* **Unary call with 1KB body**: ~14.9 µs per call → **~67k calls/sec** (body size has negligible impact)
+* **Streaming call** (consume all frames): ~16.0 µs per call → **~62k calls/sec**
+* **Build `HighLevelRequest`**: ~216 ns
 
 The overhead is dominated by:
 * FFI crossing (`extern "C"` calls)
 * Async scheduling (Tokio runtime)
-* Locking the pending-request map (`Mutex<HashMap>`)
+* Concurrent map operations (`DashMap` - fine-grained locking)
 * Plugin's own work
 
-**Scaling**: With 4 cores, ideal throughput can reach **~280k req/s** in scale-out scenarios.
+**Scaling**: With multiple cores handling requests, ideal throughput scales linearly. On M1 Pro 10-core, theoretical maximum can reach **~670k req/s** in a scale-out scenario.
 
 ### Benchmark Expectations
 
 Under proper usage:
 
-* High throughput sustained (65–70k req/s per core)
+* High throughput sustained (62–67k req/s per core)
 * Near-zero overhead passing borrowed strings (ABI layer: 0.5–3 ns)
 * No async work inside handle
 * Plugin callback ≈ O(1)
 
 ### Optimization Opportunities
 
-If further performance improvements are needed:
+The current implementation uses `DashMap` for concurrent access, which provides:
 
-1. **Reduce `Mutex<HashMap>` contention**: Use sharded maps (e.g., `DashMap`) or `parking_lot::Mutex`
-2. **Separate unary/stream maps**: Avoid enum matching in hot path
-3. **Plugin-side optimization**: Minimize thread spawning, use thread pools
-4. **Request building**: Reuse buffers/arenas for high-level request construction (~215 ns currently)
+1. **Fine-grained locking**: Better than `Mutex<HashMap>` for high-concurrency workloads
+2. **Lock-free reads**: Read operations don't require locking
+3. **No poison errors**: Unlike `Mutex`, `DashMap` doesn't have poison errors
+
+Further optimizations if needed:
+
+1. **Separate unary/stream maps**: Avoid enum matching in hot path
+2. **Plugin-side optimization**: Minimize thread spawning, use thread pools
+3. **Request building**: Reuse buffers/arenas for high-level request construction (~216 ns currently)
 
 The ABI types themselves should not be modified for performance—they are already optimal.
 
@@ -453,10 +479,10 @@ nylon-ring supports **per-request and per-stream state** without changing the AB
 
 ### Per-SID State
 
-Host keeps state per request/stream:
+Host keeps state per request/stream using `DashMap`:
 
 ```rust
-state_per_sid: Mutex<HashMap<u64, HashMap<String, Vec<u8>>>>
+state_per_sid: DashMap<u64, HashMap<String, Vec<u8>>>
 ```
 
 ### Host Extension API
@@ -496,12 +522,13 @@ struct PluginState {
 
 ### Accessing State from Plugin
 
-Plugins access state through `HostContext` structure:
+Plugins access state through helper function:
 
 ```rust
-// In plugin_init, extract host_ext from HostContext
-let ctx = &*(host_ctx as *const HostContext);
-let host_ext = ctx.host_ext;
+// In plugin_init, get host_ext using helper function
+let host_ext = unsafe {
+    nylon_ring_host::NylonRingHost::get_host_ext(host_ctx)
+};
 
 // Later, use state functions
 host_ext.set_state(host_ctx, sid, NrStr::from_str("key"), NrBytes::from_slice(value));
@@ -510,7 +537,44 @@ let value = host_ext.get_state(host_ctx, sid, NrStr::from_str("key"));
 
 ---
 
-## 15. Rust Coding Rules
+## 15. Extensions (Type-Safe Metadata)
+
+The host provides an `Extensions` struct for type-safe metadata storage in `HighLevelRequest`:
+
+```rust
+pub struct Extensions {
+    // Type-safe storage using TypeId as keys
+    // Zero-cost when empty (1 word vs 3 words for HashMap)
+}
+```
+
+### Usage
+
+```rust
+let mut req = HighLevelRequest {
+    method: "GET".to_string(),
+    path: "/api".to_string(),
+    query: "".to_string(),
+    headers: vec![],
+    body: vec![],
+    extensions: Extensions::new(),
+};
+
+// Store type-safe metadata
+req.extensions.insert(MyMetadata { user_id: 123 });
+req.extensions.insert("routing_key".to_string());
+
+// Retrieve later
+if let Some(metadata) = req.extensions.get::<MyMetadata>() {
+    println!("User ID: {}", metadata.user_id);
+}
+```
+
+**Note**: Extensions are **not sent to plugins** - they're for host-side use only (routing, logging, etc.).
+
+---
+
+## 16. Rust Coding Rules
 
 The nylon-ring ecosystem follows strict Rust coding rules for production safety:
 
@@ -558,7 +622,7 @@ FailedToLoadLibrary(#[source] libloading::Error)
 
 ---
 
-## 16. Naming Conventions
+## 17. Naming Conventions
 
 * Library: **nylon-ring**
 * ABI: **nylon-ring ABI**
@@ -567,16 +631,36 @@ FailedToLoadLibrary(#[source] libloading::Error)
 
 ---
 
-## 17. Summary
+## 18. Project Structure
+
+The workspace contains:
+
+1. **`nylon-ring`** - Core ABI types + helper functions
+2. **`nylon-ring-host`** - Host adapter with:
+   - `NylonRingHost::load()` - Load plugin
+   - `NylonRingHost::call()` - Unary RPC
+   - `NylonRingHost::call_stream()` - Streaming RPC
+   - `HighLevelRequest` - High-level request builder
+   - `Extensions` - Type-safe metadata storage
+3. **`nylon-ring-plugin-example`** - Example plugin supporting both unary and streaming
+4. **`nylon-ring-bench`** - Benchmark suite using Criterion.rs
+5. **`nylon-ring-bench-plugin`** - Lightweight plugin for benchmarking
+
+---
+
+## 19. Summary
 
 **nylon-ring** is an ABI-level interface for high-performance proxy systems like Nylon/Pingora that require:
 
-* High performance
+* High performance (67k+ req/s per core)
 * High stability (ABI stable)
 * Multi-language plugin support
 * Async / background task support
 * Zero-copy interface between host ↔ plugin
 * Both unary and streaming/WebSocket-style communication
+* Type-safe metadata storage (Extensions)
+* Per-request/stream state management
+* Fine-grained concurrent access (DashMap)
 
 ---
 
@@ -594,6 +678,7 @@ The core ABI types are defined in `nylon-ring/src/lib.rs`. These are the source 
 * `NrHeader` - Key-value header pair
 * `NrRequest` - Request metadata
 * `NrHostVTable` - Host callback table
+* `NrHostExt` - Host extension table (state management)
 * `NrPluginVTable` - Plugin function table
 * `NrPluginInfo` - Plugin metadata
 
@@ -608,15 +693,22 @@ The workspace contains:
    - `NylonRingHost::load()` - Load plugin
    - `NylonRingHost::call()` - Unary RPC
    - `NylonRingHost::call_stream()` - Streaming RPC
+   - `HighLevelRequest` - High-level request builder with `Extensions`
+   - `Extensions` - Type-safe metadata storage (similar to `http::Extensions`)
+   - Uses `DashMap` for concurrent access (not `Mutex<HashMap>`)
 3. **`nylon-ring-plugin-example`** - Example plugin supporting both unary and streaming
+4. **`nylon-ring-bench`** - Benchmark suite using Criterion.rs
+5. **`nylon-ring-bench-plugin`** - Lightweight plugin for benchmarking
 
 ### Key Constraints
 
 * All structs must remain `#[repr(C)]` and ABI-stable
 * Plugin `handle()` must return immediately (non-blocking)
 * Host uses `oneshot` for unary, `mpsc::UnboundedSender` for streaming
+* Host uses `DashMap` for concurrent access (fine-grained locking)
 * Tests assert struct layouts (sizes/alignments) - must always pass
 * Assume 64-bit little-endian platform (Linux/macOS)
+* All `extern "C"` functions must be panic-safe
 
 ### Testing & Benchmarking
 
@@ -638,3 +730,11 @@ The host adapter uses `NylonRingHostError` (defined with `thiserror`):
 * All functions return `Result<T, NylonRingHostError>`
 * No `unwrap()` or `expect()` in production code
 * All `extern "C"` functions are panic-safe
+* No `MutexPoisoned` error (using `DashMap` instead)
+
+### Performance Notes
+
+* All performance numbers are measured on **Apple M1 Pro (10-core)**
+* ABI layer: 0.5–3 ns per operation
+* Host overhead: ~14.8–16.0 µs per call (67k–62k calls/sec per core)
+* Uses `DashMap` for better concurrency than `Mutex<HashMap>`

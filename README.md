@@ -33,8 +33,10 @@ The system relies on a few key concepts:
 This workspace contains:
 
 * `nylon-ring`: The core ABI library with helper functions
-* `nylon-ring-host`: A Rust host adapter using `tokio` and `libloading`
+* `nylon-ring-host`: A Rust host adapter using `tokio`, `libloading`, and `DashMap` for concurrent access
 * `nylon-ring-plugin-example`: An example Rust plugin demonstrating both unary and streaming modes
+* `nylon-ring-bench`: Benchmark suite using Criterion.rs
+* `nylon-ring-bench-plugin`: Lightweight plugin optimized for benchmarking
 
 ## Quick Start
 
@@ -136,6 +138,7 @@ let req = HighLevelRequest {
     query: "".to_string(),
     headers: vec![("User-Agent".to_string(), "MyApp/1.0".to_string())],
     body: vec![],
+    extensions: Extensions::new(),  // Type-safe metadata storage
 };
 
 // Async call - does not block the thread
@@ -156,6 +159,7 @@ let req = HighLevelRequest {
     query: "".to_string(),
     headers: vec![],
     body: vec![],
+    extensions: Extensions::new(),  // Type-safe metadata storage
 };
 
 // Get stream receiver
@@ -241,7 +245,7 @@ Full round-trip performance (host → plugin → host callback):
 The overhead is dominated by:
 * FFI crossing (`extern "C"` calls)
 * Async scheduling (Tokio runtime)
-* Locking the pending-request map (`Mutex<HashMap>`)
+* Concurrent map operations (`DashMap` - fine-grained locking)
 * Plugin's own work
 
 **Scaling**: With multiple cores handling requests, ideal throughput scales linearly. On M1 Pro 10-core, theoretical maximum can reach **~670k req/s** in a scale-out scenario, which is well within the range of high-performance reverse proxy systems.
@@ -264,10 +268,10 @@ nylon-ring supports **per-request and per-stream state** without changing the AB
 
 ### Per-SID State
 
-Host maintains state per request/stream:
+Host maintains state per request/stream using `DashMap` for concurrent access:
 
 ```rust
-state_per_sid: Mutex<HashMap<u64, HashMap<String, Vec<u8>>>>
+state_per_sid: DashMap<u64, HashMap<String, Vec<u8>>>
 ```
 
 ### Host Extension API
@@ -284,7 +288,14 @@ pub struct NrHostExt {
 
 ### Using State in Plugins
 
+Plugins can access state through the helper function:
+
 ```rust
+// In plugin_init, get host_ext
+let host_ext = unsafe {
+    nylon_ring_host::NylonRingHost::get_host_ext(host_ctx)
+};
+
 // Set state
 host_ext.set_state(host_ctx, sid, NrStr::from_str("key"), NrBytes::from_slice(value));
 
@@ -306,6 +317,34 @@ This enables:
 * Plugin-local agent state
 * Frame-to-frame data persistence
 
+## Extensions (Type-Safe Metadata)
+
+The `HighLevelRequest` includes an `extensions` field for type-safe metadata storage:
+
+```rust
+use nylon_ring_host::{Extensions, HighLevelRequest};
+
+let mut req = HighLevelRequest {
+    method: "GET".to_string(),
+    path: "/api".to_string(),
+    query: "".to_string(),
+    headers: vec![],
+    body: vec![],
+    extensions: Extensions::new(),
+};
+
+// Store type-safe metadata (not sent to plugin)
+req.extensions.insert(MyMetadata { user_id: 123 });
+req.extensions.insert("routing_key".to_string());
+
+// Retrieve later
+if let Some(metadata) = req.extensions.get::<MyMetadata>() {
+    println!("User ID: {}", metadata.user_id);
+}
+```
+
+**Note**: Extensions are **host-side only** - they're not sent to plugins. Use them for routing, logging, or other host-side metadata.
+
 ## Key Constraints
 
 * **Plugin `handle()` must return immediately** - no blocking operations
@@ -314,6 +353,7 @@ This enables:
 * **Thread-safe callbacks** - `send_result` can be called from any thread
 * **Panic-safe FFI** - all `extern "C"` functions catch panics
 * **No `unwrap()` in production** - proper error handling required
+* **Concurrent access** - Host uses `DashMap` for fine-grained locking
 
 ## Error Handling
 

@@ -36,6 +36,7 @@ async fn main() -> Result<(), NylonRingHostError> {
         query: "".to_string(),
         headers: vec![("X-Stream-Type".to_string(), "websocket".to_string())],
         body: vec![],
+        extensions: std::collections::HashMap::new(),
     };
 
     println!("Starting streaming request...");

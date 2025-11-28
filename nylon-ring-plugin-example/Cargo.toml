@@ -8,3 +8,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 nylon-ring = { path = "../nylon-ring" }
+nylon-ring-host = { path = "../nylon-ring-host" }

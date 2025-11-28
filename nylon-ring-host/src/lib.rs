@@ -20,6 +20,9 @@ pub struct HighLevelRequest {
     pub query: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// Extensions: key-value pairs for custom metadata.
+    /// These are not sent to the plugin but can be used by the host for routing, logging, etc.
+    pub extensions: HashMap<String, Vec<u8>>,
 }
 
 /// One cell in the pending map:
@@ -41,6 +44,9 @@ pub struct StreamFrame {
 /// Receiver type for streaming.
 pub type StreamReceiver = mpsc::UnboundedReceiver<StreamFrame>;
 
+// Note: This struct must match the layout expected by plugins.
+// Plugins access host_ext field directly, so we need #[repr(C)] for ABI compatibility.
+#[repr(C)]
 struct HostContext {
     pending_requests: Mutex<HashMap<u64, Pending>>,
     state_per_sid: Mutex<HashMap<u64, HashMap<String, Vec<u8>>>>,
@@ -177,8 +183,9 @@ impl NylonRingHost {
             let should_clear_state = if let Some(entry) = map.remove(&sid) {
                 let data = payload.as_slice().to_vec();
                 match entry {
-                    Pending::Unary(_) => {
-                        // Unary: always clear state when done
+                    Pending::Unary(tx) => {
+                        // Unary: send result and always clear state when done
+                        let _ = tx.send((status, data));
                         true
                     }
                     Pending::Stream(tx) => {

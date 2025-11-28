@@ -50,6 +50,7 @@ fn bench_host_call_overhead(c: &mut Criterion) {
                         "Benchmark/1.0".to_string(),
                     )]),
                     body: black_box(vec![]),
+                    extensions: std::collections::HashMap::new(),
                 };
 
                 let _result = host.call(req).await;
@@ -70,6 +71,7 @@ fn bench_host_call_overhead(c: &mut Criterion) {
                         "application/json".to_string(),
                     )]),
                     body: black_box(body),
+                    extensions: std::collections::HashMap::new(),
                 };
 
                 let _result = host.call(req).await;
@@ -86,6 +88,7 @@ fn bench_host_call_overhead(c: &mut Criterion) {
                     query: black_box("".to_string()),
                     headers: black_box(vec![]),
                     body: black_box(vec![]),
+                    extensions: std::collections::HashMap::new(),
                 };
 
                 let mut stream = host.call_stream(req).await.unwrap();
@@ -113,6 +116,7 @@ fn bench_request_building(c: &mut Criterion) {
                     ("User-Agent".to_string(), "NylonRing/1.0".to_string()),
                 ]),
                 body: black_box(vec![0u8; 512]),
+                extensions: std::collections::HashMap::new(),
             });
         })
     });

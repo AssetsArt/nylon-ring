@@ -34,6 +34,7 @@ async fn main() -> Result<(), NylonRingHostError> {
         query: "".to_string(),
         headers: vec![("User-Agent".to_string(), "NylonHost/1.0".to_string())],
         body: vec![],
+        extensions: std::collections::HashMap::new(),
     };
 
     println!("Sending request...");

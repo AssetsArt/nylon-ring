@@ -27,17 +27,17 @@ extern "C" fn plugin_init(
 ) -> NrStatus {
     // Panic-safe: catch any panics before they cross FFI boundary
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        // Get host extension from host_ctx
-        // For now, we'll get it from HostContext structure
-        // In a real implementation, this would be passed through init or retrieved differently
+        // Get host extension using the helper function from host
+        // This is safer than accessing HostContext directly
         let host_ext = unsafe {
             if host_ctx.is_null() {
                 std::ptr::null()
             } else {
-                // Access host_ext from HostContext
-                // This is a simplified approach - in production, you might want a different mechanism
-                let ctx = &*(host_ctx as *const HostContext);
-                ctx.host_ext
+                // Use the helper function from nylon_ring_host crate
+                // Note: This requires linking against nylon_ring_host, which is fine for examples
+                // In production, plugins should use a different mechanism or the host should
+                // provide this function via a shared library
+                nylon_ring_host::NylonRingHost::get_host_ext(host_ctx)
             }
         };
 
@@ -53,14 +53,6 @@ extern "C" fn plugin_init(
     }));
 
     result.unwrap_or(NrStatus::Err)
-}
-
-// Helper struct to access HostContext (must match host implementation)
-#[repr(C)]
-struct HostContext {
-    _pending_requests: *mut std::ffi::c_void, // Mutex<HashMap> - opaque
-    _state_per_sid: *mut std::ffi::c_void,    // Mutex<HashMap> - opaque
-    host_ext: *const NrHostExt,
 }
 
 extern "C" fn plugin_handle(

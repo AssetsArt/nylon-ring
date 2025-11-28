@@ -1,12 +1,11 @@
 // Example demonstrating streaming RPC with NylonRingHost
-use anyhow::Result;
 use nylon_ring::NrStatus;
-use nylon_ring_host::{HighLevelRequest, NylonRingHost};
+use nylon_ring_host::{HighLevelRequest, NylonRingHost, NylonRingHostError};
 use std::env;
 use std::path::PathBuf;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), NylonRingHostError> {
     // Determine the path to the plugin library
     let mut plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     plugin_path.pop(); // Go up to workspace root
@@ -22,7 +21,13 @@ async fn main() -> Result<()> {
 
     println!("Loading plugin from: {:?}", plugin_path);
 
-    let host = NylonRingHost::load(plugin_path.to_str().unwrap())?;
+    let plugin_path_str = plugin_path.to_str().ok_or_else(|| {
+        NylonRingHostError::InvalidPluginPath(format!(
+            "Path contains invalid UTF-8: {:?}",
+            plugin_path
+        ))
+    })?;
+    let host = NylonRingHost::load(plugin_path_str)?;
     println!("Plugin loaded successfully!");
 
     let req = HighLevelRequest {
@@ -35,7 +40,7 @@ async fn main() -> Result<()> {
 
     println!("Starting streaming request...");
     let mut stream = host.call_stream(req).await?;
-    
+
     println!("Receiving stream frames:");
     while let Some(frame) = stream.recv().await {
         println!(
@@ -43,7 +48,7 @@ async fn main() -> Result<()> {
             frame.status,
             String::from_utf8_lossy(&frame.data)
         );
-        
+
         // Stream ends when we receive StreamEnd, Err, Invalid, or Unsupported
         if matches!(
             frame.status,

@@ -7,5 +7,5 @@ edition = "2021"
 nylon-ring = { path = "../nylon-ring" }
 tokio = { version = "1.0", features = ["full"] }
 libloading = "0.8"
-anyhow = "1.0"
+thiserror = "1.0"
 log = "0.4"

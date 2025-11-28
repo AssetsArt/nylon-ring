@@ -1,6 +1,7 @@
 use nylon_ring::{NrBytes, NrHostVTable, NrPluginInfo, NrPluginVTable, NrRequest, NrStatus, NrStr};
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::panic;
 use std::sync::OnceLock;
 
 struct HostHandle {
@@ -19,14 +20,17 @@ extern "C" fn plugin_init(
     host_ctx: *mut c_void,
     host_vtable: *const NrHostVTable,
 ) -> NrStatus {
-    let handle = HostHandle {
-        ctx: host_ctx,
-        vtable: host_vtable,
-    };
-    if HOST_HANDLE.set(handle).is_err() {
-        return NrStatus::Err;
-    }
-    NrStatus::Ok
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let handle = HostHandle {
+            ctx: host_ctx,
+            vtable: host_vtable,
+        };
+        if HOST_HANDLE.set(handle).is_err() {
+            return NrStatus::Err;
+        }
+        NrStatus::Ok
+    }));
+    result.unwrap_or(NrStatus::Err)
 }
 
 extern "C" fn plugin_handle(
@@ -35,53 +39,66 @@ extern "C" fn plugin_handle(
     req: *const NrRequest,
     _payload: NrBytes,
 ) -> NrStatus {
-    // Copy minimal data needed
-    let req_ref = unsafe { &*req };
-    let path = req_ref.path.as_str().to_string();
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        if req.is_null() {
+            return NrStatus::Invalid;
+        }
+        // Copy minimal data needed
+        let req_ref = unsafe { &*req };
+        let path = match std::str::from_utf8(unsafe {
+            std::slice::from_raw_parts(req_ref.path.ptr, req_ref.path.len as usize)
+        }) {
+            Ok(s) => s.to_string(),
+            Err(_) => return NrStatus::Invalid,
+        };
 
-    // Spawn background thread that responds immediately (no sleep)
-    std::thread::spawn(move || {
-        if let Some(host) = HOST_HANDLE.get() {
-            let send_result = unsafe { (*host.vtable).send_result };
+        // Spawn background thread that responds immediately (no sleep)
+        std::thread::spawn(move || {
+            if let Some(host) = HOST_HANDLE.get() {
+                let send_result = unsafe { (*host.vtable).send_result };
 
-            // For streaming requests, send multiple frames quickly
-            if path == "/stream" {
-                for i in 1..=5 {
-                    let msg = format!("Frame {}", i);
+                // For streaming requests, send multiple frames quickly
+                if path == "/stream" {
+                    for i in 1..=5 {
+                        let msg = format!("Frame {}", i);
+                        unsafe {
+                            send_result(
+                                host.ctx,
+                                sid,
+                                NrStatus::Ok,
+                                NrBytes::from_slice(msg.as_bytes()),
+                            );
+                        }
+                    }
+                    // End stream
+                    unsafe {
+                        send_result(host.ctx, sid, NrStatus::StreamEnd, NrBytes::from_slice(&[]));
+                    }
+                } else {
+                    // Unary response - respond immediately
+                    let response_string = format!("OK: {}", path);
+                    let response_bytes = response_string.as_bytes();
                     unsafe {
                         send_result(
                             host.ctx,
                             sid,
                             NrStatus::Ok,
-                            NrBytes::from_slice(msg.as_bytes()),
+                            NrBytes::from_slice(response_bytes),
                         );
                     }
                 }
-                // End stream
-                unsafe {
-                    send_result(host.ctx, sid, NrStatus::StreamEnd, NrBytes::from_slice(&[]));
-                }
-            } else {
-                // Unary response - respond immediately
-                let response_string = format!("OK: {}", path);
-                let response_bytes = response_string.as_bytes();
-                unsafe {
-                    send_result(
-                        host.ctx,
-                        sid,
-                        NrStatus::Ok,
-                        NrBytes::from_slice(response_bytes),
-                    );
-                }
             }
-        }
-    });
+        });
 
-    NrStatus::Ok
+        NrStatus::Ok
+    }));
+    result.unwrap_or(NrStatus::Err)
 }
 
 extern "C" fn plugin_shutdown(_plugin_ctx: *mut c_void) {
-    // No cleanup needed
+    let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        // No cleanup needed
+    }));
 }
 
 static PLUGIN_VTABLE: NrPluginVTable = NrPluginVTable {

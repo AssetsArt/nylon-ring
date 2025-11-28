@@ -1,12 +1,18 @@
-use anyhow::{anyhow, Context, Result};
+mod error;
+
+pub use error::NylonRingHostError;
 use libloading::{Library, Symbol};
 use nylon_ring::{
-    NrBytes, NrHeader, NrHostVTable, NrPluginInfo, NrPluginVTable, NrRequest, NrStatus, NrStr,
+    NrBytes, NrHeader, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrRequest, NrStatus,
+    NrStr,
 };
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::panic;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
+
+type Result<T> = std::result::Result<T, NylonRingHostError>;
 
 pub struct HighLevelRequest {
     pub method: String,
@@ -20,6 +26,7 @@ pub struct HighLevelRequest {
 /// - Unary: standard request/response
 /// - Stream: streaming / websocket-style
 enum Pending {
+    #[allow(dead_code)]
     Unary(oneshot::Sender<(NrStatus, Vec<u8>)>),
     Stream(mpsc::UnboundedSender<StreamFrame>),
 }
@@ -36,6 +43,8 @@ pub type StreamReceiver = mpsc::UnboundedReceiver<StreamFrame>;
 
 struct HostContext {
     pending_requests: Mutex<HashMap<u64, Pending>>,
+    state_per_sid: Mutex<HashMap<u64, HashMap<String, Vec<u8>>>>,
+    host_ext: *const NrHostExt, // Pointer to host extension (stable address)
 }
 
 pub struct NylonRingHost {
@@ -44,6 +53,8 @@ pub struct NylonRingHost {
     plugin_ctx: *mut c_void,
     host_ctx: Arc<HostContext>,
     host_vtable: Box<NrHostVTable>, // Stable address
+    #[allow(dead_code)]
+    host_ext: Box<NrHostExt>, // Stable address for state extension
     next_sid: std::sync::atomic::AtomicU64,
 }
 
@@ -54,35 +65,38 @@ unsafe impl Sync for NylonRingHost {}
 impl NylonRingHost {
     pub fn load(path: &str) -> Result<Self> {
         unsafe {
-            let lib = Library::new(path).context("Failed to load plugin library")?;
-            let get_plugin: Symbol<extern "C" fn() -> *const NrPluginInfo> = lib
-                .get(b"nylon_ring_get_plugin_v1\0")
-                .context("Missing nylon_ring_get_plugin_v1 symbol")?;
+            let lib = Library::new(path).map_err(NylonRingHostError::FailedToLoadLibrary)?;
+            let get_plugin: Symbol<extern "C" fn() -> *const NrPluginInfo> =
+                lib.get(b"nylon_ring_get_plugin_v1\0").map_err(|_| {
+                    NylonRingHostError::MissingSymbol("nylon_ring_get_plugin_v1".to_string())
+                })?;
 
             let info_ptr = get_plugin();
             if info_ptr.is_null() {
-                return Err(anyhow!("Plugin info pointer is null"));
+                return Err(NylonRingHostError::NullPluginInfo);
             }
             let info = &*info_ptr;
 
             if !info.compatible(1) {
-                return Err(anyhow!(
-                    "Incompatible ABI version. Expected 1, got {}",
-                    info.abi_version
-                ));
+                return Err(NylonRingHostError::IncompatibleAbiVersion {
+                    expected: 1,
+                    actual: info.abi_version,
+                });
             }
 
             if info.vtable.is_null() {
-                return Err(anyhow!("Plugin vtable is null"));
+                return Err(NylonRingHostError::NullPluginVTable);
             }
             let plugin_vtable = &*info.vtable;
 
             if plugin_vtable.init.is_none() || plugin_vtable.handle.is_none() {
-                return Err(anyhow!("Plugin vtable missing required functions"));
+                return Err(NylonRingHostError::MissingRequiredFunctions);
             }
 
             let host_ctx = Arc::new(HostContext {
                 pending_requests: Mutex::new(HashMap::new()),
+                state_per_sid: Mutex::new(HashMap::new()),
+                host_ext: std::ptr::null(), // Will be set after creating host_ext
             });
 
             // Create host vtable
@@ -90,12 +104,26 @@ impl NylonRingHost {
                 send_result: Self::send_result_callback,
             });
 
+            // Create host extension for state management
+            let host_ext = Box::new(NrHostExt {
+                set_state: Self::set_state_callback,
+                get_state: Self::get_state_callback,
+            });
+            let host_ext_ptr = &*host_ext as *const NrHostExt;
+
+            // Update host_ctx with host_ext pointer
+            {
+                let ctx_ptr = Arc::as_ptr(&host_ctx) as *mut HostContext;
+                (*ctx_ptr).host_ext = host_ext_ptr;
+            }
+
             let mut host = Self {
                 _lib: lib,
                 plugin_vtable,
                 plugin_ctx: std::ptr::null_mut(), // Will be set from plugin info
                 host_ctx,
                 host_vtable,
+                host_ext,
                 next_sid: std::sync::atomic::AtomicU64::new(1),
             };
 
@@ -103,14 +131,23 @@ impl NylonRingHost {
             host.plugin_ctx = info.plugin_ctx;
 
             // Initialize plugin
+            // Note: We pass host_ext as a pointer that plugins can optionally use
+            // For backward compatibility, plugins that don't need state can ignore it
             if let Some(init_fn) = plugin_vtable.init {
-                let status = init_fn(
-                    host.plugin_ctx,
-                    Arc::as_ptr(&host.host_ctx) as *mut c_void,
-                    &*host.host_vtable,
-                );
-                if status != NrStatus::Ok {
-                    return Err(anyhow!("Plugin init failed with status {:?}", status));
+                let status = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                    init_fn(
+                        host.plugin_ctx,
+                        Arc::as_ptr(&host.host_ctx) as *mut c_void,
+                        &*host.host_vtable,
+                    )
+                }));
+
+                match status {
+                    Ok(NrStatus::Ok) => {}
+                    Ok(other) => return Err(NylonRingHostError::PluginInitFailed(other)),
+                    Err(_) => {
+                        return Err(NylonRingHostError::PluginInitFailed(NrStatus::Err));
+                    }
                 }
             }
 
@@ -119,38 +156,127 @@ impl NylonRingHost {
     }
 
     /// Callback called from plugin (any thread)
+    /// This function is panic-safe and will not propagate panics across FFI boundary.
     unsafe extern "C" fn send_result_callback(
         host_ctx: *mut c_void,
         sid: u64,
         status: NrStatus,
         payload: NrBytes,
     ) {
-        let ctx = &*(host_ctx as *const HostContext);
-        let mut map = ctx.pending_requests.lock().unwrap();
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            if host_ctx.is_null() {
+                return;
+            }
+            let ctx = &*(host_ctx as *const HostContext);
+            let mut map = match ctx.pending_requests.lock() {
+                Ok(guard) => guard,
+                Err(_) => return, // Mutex poisoned, skip this callback
+            };
 
-        // Take the entry out of the map so we own it.
-        if let Some(entry) = map.remove(&sid) {
-            let data = payload.as_slice().to_vec();
-            match entry {
-                Pending::Unary(tx) => {
-                    let _ = tx.send((status, data));
-                }
-                Pending::Stream(tx) => {
-                    let _ = tx.send(StreamFrame { status, data });
-                    // If the status indicates the stream is finished, we simply drop the sender.
-                    // Otherwise, re-insert the entry so further frames can be received.
-                    if !matches!(
-                        status,
-                        NrStatus::Err
-                            | NrStatus::Invalid
-                            | NrStatus::Unsupported
-                            | NrStatus::StreamEnd
-                    ) {
-                        map.insert(sid, Pending::Stream(tx));
+            // Take the entry out of the map so we own it.
+            let should_clear_state = if let Some(entry) = map.remove(&sid) {
+                let data = payload.as_slice().to_vec();
+                match entry {
+                    Pending::Unary(_) => {
+                        // Unary: always clear state when done
+                        true
+                    }
+                    Pending::Stream(tx) => {
+                        let _ = tx.send(StreamFrame { status, data });
+                        // If the status indicates the stream is finished, clear state
+                        let is_finished = matches!(
+                            status,
+                            NrStatus::Err
+                                | NrStatus::Invalid
+                                | NrStatus::Unsupported
+                                | NrStatus::StreamEnd
+                        );
+                        if !is_finished {
+                            map.insert(sid, Pending::Stream(tx));
+                        }
+                        is_finished
                     }
                 }
+            } else {
+                false
+            };
+
+            // Clear state if request is finished
+            if should_clear_state {
+                if let Ok(mut state_map) = ctx.state_per_sid.lock() {
+                    state_map.remove(&sid);
+                }
             }
-        }
+        }));
+
+        // Ignore panics - we don't want to propagate them across FFI boundary
+        let _ = result;
+    }
+
+    /// Callback for setting state (called from plugin)
+    /// This function is panic-safe and will not propagate panics across FFI boundary.
+    unsafe extern "C" fn set_state_callback(
+        host_ctx: *mut c_void,
+        sid: u64,
+        key: NrStr,
+        value: NrBytes,
+    ) -> NrBytes {
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            if host_ctx.is_null() {
+                return NrBytes::from_slice(&[]);
+            }
+            let ctx = &*(host_ctx as *const HostContext);
+            let mut state_map = match ctx.state_per_sid.lock() {
+                Ok(guard) => guard,
+                Err(_) => return NrBytes::from_slice(&[]), // Mutex poisoned
+            };
+
+            let key_str = key.as_str().to_string();
+            let value_vec = value.as_slice().to_vec();
+
+            state_map
+                .entry(sid)
+                .or_insert_with(HashMap::new)
+                .insert(key_str, value_vec);
+
+            // Return empty bytes on success
+            NrBytes::from_slice(&[])
+        }));
+
+        // Return empty bytes on panic (safe fallback)
+        result.unwrap_or_else(|_| NrBytes::from_slice(&[]))
+    }
+
+    /// Callback for getting state (called from plugin)
+    /// This function is panic-safe and will not propagate panics across FFI boundary.
+    unsafe extern "C" fn get_state_callback(
+        host_ctx: *mut c_void,
+        sid: u64,
+        key: NrStr,
+    ) -> NrBytes {
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            if host_ctx.is_null() {
+                return NrBytes::from_slice(&[]);
+            }
+            let ctx = &*(host_ctx as *const HostContext);
+            let state_map = match ctx.state_per_sid.lock() {
+                Ok(guard) => guard,
+                Err(_) => return NrBytes::from_slice(&[]), // Mutex poisoned
+            };
+
+            let key_str = key.as_str();
+            if let Some(sid_state) = state_map.get(&sid) {
+                if let Some(value) = sid_state.get(key_str) {
+                    return NrBytes::from_slice(value);
+                }
+            }
+
+            // Return empty bytes if not found
+            NrBytes::from_slice(&[])
+        }));
+
+        // Return empty bytes on panic (safe fallback)
+        result.unwrap_or_else(|_| NrBytes::from_slice(&[]))
     }
 
     /// Unary RPC: plugin should call send_result exactly once for this sid.
@@ -161,7 +287,11 @@ impl NylonRingHost {
         let (tx, rx) = oneshot::channel();
 
         {
-            let mut map = self.host_ctx.pending_requests.lock().unwrap();
+            let mut map = self
+                .host_ctx
+                .pending_requests
+                .lock()
+                .map_err(|_| NylonRingHostError::MutexPoisoned)?;
             map.insert(sid, Pending::Unary(tx));
         }
 
@@ -187,19 +317,37 @@ impl NylonRingHost {
 
         let payload = NrBytes::from_slice(&req.body);
 
-        let handle_fn = self.plugin_vtable.handle.unwrap();
-        let status = unsafe { handle_fn(self.plugin_ctx, sid, &nr_req, payload) };
+        let handle_fn = match self.plugin_vtable.handle {
+            Some(f) => f,
+            None => return Err(NylonRingHostError::MissingRequiredFunctions),
+        };
+
+        let status = panic::catch_unwind(panic::AssertUnwindSafe(|| unsafe {
+            handle_fn(self.plugin_ctx, sid, &nr_req, payload)
+        }));
+
+        let status = match status {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = self
+                    .host_ctx
+                    .pending_requests
+                    .lock()
+                    .map(|mut m| m.remove(&sid));
+                return Err(NylonRingHostError::PluginHandleFailed(NrStatus::Err));
+            }
+        };
 
         if status != NrStatus::Ok {
-            let mut map = self.host_ctx.pending_requests.lock().unwrap();
-            map.remove(&sid);
-            return Err(anyhow!(
-                "Plugin handle failed immediately with status {:?}",
-                status
-            ));
+            let _ = self
+                .host_ctx
+                .pending_requests
+                .lock()
+                .map(|mut m| m.remove(&sid));
+            return Err(NylonRingHostError::PluginHandleFailed(status));
         }
 
-        rx.await.context("Failed to receive response from plugin")
+        rx.await.map_err(|_| NylonRingHostError::OneshotClosed)
     }
 
     /// Streaming call: plugin may call send_result multiple times.
@@ -214,7 +362,11 @@ impl NylonRingHost {
         let (tx, rx) = mpsc::unbounded_channel::<StreamFrame>();
 
         {
-            let mut map = self.host_ctx.pending_requests.lock().unwrap();
+            let mut map = self
+                .host_ctx
+                .pending_requests
+                .lock()
+                .map_err(|_| NylonRingHostError::MutexPoisoned)?;
             map.insert(sid, Pending::Stream(tx));
         }
 
@@ -240,19 +392,48 @@ impl NylonRingHost {
 
         let payload = NrBytes::from_slice(&req.body);
 
-        let handle_fn = self.plugin_vtable.handle.unwrap();
-        let status = unsafe { handle_fn(self.plugin_ctx, sid, &nr_req, payload) };
+        let handle_fn = match self.plugin_vtable.handle {
+            Some(f) => f,
+            None => return Err(NylonRingHostError::MissingRequiredFunctions),
+        };
+
+        let status = panic::catch_unwind(panic::AssertUnwindSafe(|| unsafe {
+            handle_fn(self.plugin_ctx, sid, &nr_req, payload)
+        }));
+
+        let status = match status {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = self
+                    .host_ctx
+                    .pending_requests
+                    .lock()
+                    .map(|mut m| m.remove(&sid));
+                return Err(NylonRingHostError::PluginHandleFailed(NrStatus::Err));
+            }
+        };
 
         if status != NrStatus::Ok {
-            let mut map = self.host_ctx.pending_requests.lock().unwrap();
-            map.remove(&sid);
-            return Err(anyhow!(
-                "Plugin handle (stream) failed immediately with status {:?}",
-                status
-            ));
+            let _ = self
+                .host_ctx
+                .pending_requests
+                .lock()
+                .map(|mut m| m.remove(&sid));
+            return Err(NylonRingHostError::PluginHandleFailed(status));
         }
 
         Ok(rx)
+    }
+
+    /// Get host extension pointer from host_ctx.
+    /// Plugins can use this to access state management functions.
+    /// Returns null pointer if host_ext is not available.
+    pub unsafe fn get_host_ext(host_ctx: *mut c_void) -> *const NrHostExt {
+        if host_ctx.is_null() {
+            return std::ptr::null();
+        }
+        let ctx = &*(host_ctx as *const HostContext);
+        ctx.host_ext
     }
 }
 

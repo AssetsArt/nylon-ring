@@ -29,7 +29,8 @@ fn bench_nrbytes_from_slice(c: &mut Criterion) {
 }
 
 fn bench_nrbytes_as_slice(c: &mut Criterion) {
-    let nr_bytes = NrBytes::from_slice(b"Hello, World! This is test data for benchmarking byte operations.");
+    let nr_bytes =
+        NrBytes::from_slice(b"Hello, World! This is test data for benchmarking byte operations.");
     c.bench_function("NrBytes::as_slice", |b| {
         b.iter(|| {
             black_box(black_box(&nr_bytes).as_slice());
@@ -52,13 +53,13 @@ fn bench_nrrequest_build(c: &mut Criterion) {
     let path_str = "/api/v1/users";
     let method_str = "GET";
     let query_str = "page=1&limit=10";
-    
+
     let headers: Vec<NrHeader> = vec![
         NrHeader::new("Content-Type", "application/json"),
         NrHeader::new("Authorization", "Bearer token123"),
         NrHeader::new("User-Agent", "NylonRing/1.0"),
     ];
-    
+
     c.bench_function("NrRequest::build", |b| {
         b.iter(|| {
             black_box(NrRequest {
@@ -84,4 +85,3 @@ criterion_group!(
     bench_nrrequest_build
 );
 criterion_main!(benches);
-

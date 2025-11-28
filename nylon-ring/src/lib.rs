@@ -62,6 +62,29 @@ pub struct NrHostVTable {
         unsafe extern "C" fn(host_ctx: *mut c_void, sid: u64, status: NrStatus, payload: NrBytes),
 }
 
+/// Host extension table for state management.
+/// This is an optional extension that does not modify the core ABI.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct NrHostExt {
+    /// Set state for a given sid and key.
+    /// Returns empty NrBytes on success, or error bytes on failure.
+    pub set_state: unsafe extern "C" fn(
+        host_ctx: *mut c_void,
+        sid: u64,
+        key: NrStr,
+        value: NrBytes,
+    ) -> NrBytes,
+
+    /// Get state for a given sid and key.
+    /// Returns empty NrBytes if not found.
+    pub get_state: unsafe extern "C" fn(host_ctx: *mut c_void, sid: u64, key: NrStr) -> NrBytes,
+}
+
+// Safety: NrHostExt is ABI-stable data carrier.
+unsafe impl Send for NrHostExt {}
+unsafe impl Sync for NrHostExt {}
+
 /// Plugin function table.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

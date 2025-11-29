@@ -38,7 +38,7 @@ async fn main() -> Result<(), NylonRingHostError> {
     };
 
     println!("Sending request...");
-    let (status, payload) = host.call(req).await?;
+    let (status, payload) = host.call("unary", req).await?;
 
     println!("Response received!");
     println!("Status: {:?}", status);

@@ -53,7 +53,7 @@ fn bench_host_call_overhead(c: &mut Criterion) {
                     extensions: Extensions::new(),
                 };
 
-                let _result = host.call(req).await;
+                let _result = host.call("unary", req).await;
             });
         });
     });
@@ -74,7 +74,7 @@ fn bench_host_call_overhead(c: &mut Criterion) {
                     extensions: Extensions::new(),
                 };
 
-                let _result = host.call(req).await;
+                let _result = host.call("unary", req).await;
             });
         });
     });
@@ -91,7 +91,7 @@ fn bench_host_call_overhead(c: &mut Criterion) {
                     extensions: Extensions::new(),
                 };
 
-                let mut stream = host.call_stream(req).await.unwrap();
+                let mut stream = host.call_stream("stream", req).await.unwrap();
                 // Consume all frames
                 while let Some(_frame) = stream.recv().await {
                     // Consume frame

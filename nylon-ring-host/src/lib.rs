@@ -1,6 +1,7 @@
 mod error;
 mod extensions;
 
+use dashmap::DashMap;
 pub use error::NylonRingHostError;
 pub use extensions::Extensions;
 use libloading::{Library, Symbol};
@@ -8,7 +9,6 @@ use nylon_ring::{
     NrBytes, NrHeader, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrRequest, NrStatus,
     NrStr,
 };
-use dashmap::DashMap;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::panic;
@@ -276,14 +276,16 @@ impl NylonRingHost {
     }
 
     /// Unary RPC: plugin should call send_result exactly once for this sid.
-    pub async fn call(&self, req: HighLevelRequest) -> Result<(NrStatus, Vec<u8>)> {
+    pub async fn call(&self, entry: &str, req: HighLevelRequest) -> Result<(NrStatus, Vec<u8>)> {
         let sid = self
             .next_sid
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
 
         {
-            self.host_ctx.pending_requests.insert(sid, Pending::Unary(tx));
+            self.host_ctx
+                .pending_requests
+                .insert(sid, Pending::Unary(tx));
         }
 
         let method_str = req.method;
@@ -314,7 +316,13 @@ impl NylonRingHost {
         };
 
         let status = panic::catch_unwind(panic::AssertUnwindSafe(|| unsafe {
-            handle_fn(self.plugin_ctx, sid, &nr_req, payload)
+            handle_fn(
+                self.plugin_ctx,
+                NrStr::from_str(entry),
+                sid,
+                &nr_req,
+                payload,
+            )
         }));
 
         let status = match status {
@@ -337,7 +345,7 @@ impl NylonRingHost {
     /// The stream closes when plugin sends one of:
     /// - NrStatus::StreamEnd
     /// - NrStatus::Err / Invalid / Unsupported
-    pub async fn call_stream(&self, req: HighLevelRequest) -> Result<StreamReceiver> {
+    pub async fn call_stream(&self, entry: &str, req: HighLevelRequest) -> Result<StreamReceiver> {
         let sid = self
             .next_sid
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -345,7 +353,9 @@ impl NylonRingHost {
         let (tx, rx) = mpsc::unbounded_channel::<StreamFrame>();
 
         {
-            self.host_ctx.pending_requests.insert(sid, Pending::Stream(tx));
+            self.host_ctx
+                .pending_requests
+                .insert(sid, Pending::Stream(tx));
         }
 
         let method_str = req.method;
@@ -376,7 +386,13 @@ impl NylonRingHost {
         };
 
         let status = panic::catch_unwind(panic::AssertUnwindSafe(|| unsafe {
-            handle_fn(self.plugin_ctx, sid, &nr_req, payload)
+            handle_fn(
+                self.plugin_ctx,
+                NrStr::from_str(entry),
+                sid,
+                &nr_req,
+                payload,
+            )
         }));
 
         let status = match status {

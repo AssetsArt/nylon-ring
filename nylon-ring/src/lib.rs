@@ -100,6 +100,7 @@ pub struct NrPluginVTable {
     pub handle: Option<
         unsafe extern "C" fn(
             plugin_ctx: *mut c_void,
+            entry: NrStr,
             sid: u64,
             req: *const NrRequest,
             payload: NrBytes,
@@ -107,6 +108,65 @@ pub struct NrPluginVTable {
     >,
 
     pub shutdown: Option<unsafe extern "C" fn(plugin_ctx: *mut c_void)>,
+}
+
+#[macro_export]
+macro_rules! define_plugin {
+    (
+        init: $init_fn:expr,
+        shutdown: $shutdown_fn:expr,
+        entries: {
+            $($entry_name:literal => $handler_fn:path),* $(,)?
+        }
+    ) => {
+        // Static VTable
+        static PLUGIN_VTABLE: $crate::NrPluginVTable = $crate::NrPluginVTable {
+            init: Some($init_fn),
+            handle: Some(plugin_handle_wrapper),
+            shutdown: Some($shutdown_fn),
+        };
+
+        // Static Plugin Info
+        static PLUGIN_INFO: $crate::NrPluginInfo = $crate::NrPluginInfo {
+            abi_version: 1,
+            struct_size: std::mem::size_of::<$crate::NrPluginInfo>() as u32,
+            name: $crate::NrStr {
+                ptr: env!("CARGO_PKG_NAME").as_ptr(),
+                len: env!("CARGO_PKG_NAME").len() as u32,
+            },
+            version: $crate::NrStr {
+                ptr: env!("CARGO_PKG_VERSION").as_ptr(),
+                len: env!("CARGO_PKG_VERSION").len() as u32,
+            },
+            plugin_ctx: std::ptr::null_mut(),
+            vtable: &PLUGIN_VTABLE,
+        };
+
+        // Exported Entry Point
+        #[unsafe(no_mangle)]
+        pub extern "C" fn nylon_ring_get_plugin_v1() -> *const $crate::NrPluginInfo {
+            &PLUGIN_INFO
+        }
+
+        // Dispatcher
+        unsafe extern "C" fn plugin_handle_wrapper(
+            plugin_ctx: *mut std::ffi::c_void,
+            entry: $crate::NrStr,
+            sid: u64,
+            req: *const $crate::NrRequest,
+            payload: $crate::NrBytes,
+        ) -> $crate::NrStatus {
+            let entry_str = entry.as_str();
+            match entry_str {
+                $(
+                    $entry_name => {
+                        $handler_fn(plugin_ctx, sid, req, payload)
+                    }
+                )*
+                _ => $crate::NrStatus::Invalid,
+            }
+        }
+    };
 }
 
 /// Metadata exported by the plugin.

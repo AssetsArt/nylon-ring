@@ -33,6 +33,8 @@ help: ## แสดง help message
 	@echo "$(GREEN)Build Commands:$(NC)"
 	@echo "  $(YELLOW)make build$(NC)              - Build all crates"
 	@echo "  $(YELLOW)make build-plugin$(NC)        - Build plugin library (cdylib)"
+	@echo "  $(YELLOW)make build-go-plugin$(NC)     - Build Go plugin example (low-level)"
+	@echo "  $(YELLOW)make build-go-plugin-simple$(NC) - Build Go plugin example (with SDK)"
 	@echo "  $(YELLOW)make all$(NC)                 - Build everything (default: debug)"
 	@echo ""
 	@echo "$(GREEN)Test Commands:$(NC)"
@@ -130,8 +132,43 @@ benchmark-host: build-bench-plugin ## Run host overhead benchmarks
 benchmark: benchmark-abi benchmark-host ## Run all benchmarks
 	@echo "$(GREEN)✓ All benchmarks complete!$(NC)"
 
+build-go-plugin: ## Build Go plugin example (low-level)
+	@echo "$(BLUE)Building Go plugin (low-level)...$(NC)"
+	@cd nylon-ring-go/plugin-example && \
+		if [ -f build.sh ]; then \
+			chmod +x build.sh && ./build.sh; \
+		else \
+			echo "$(YELLOW)⚠ build.sh not found, building manually...$(NC)"; \
+			go build -buildmode=c-shared -o nylon_ring_go_plugin.so . || \
+			go build -buildmode=c-shared -o nylon_ring_go_plugin.dylib . || \
+			go build -buildmode=c-shared -o nylon_ring_go_plugin.dll .; \
+		fi
+	@echo "$(GREEN)✓ Go plugin build complete!$(NC)"
+
+build-go-plugin-simple: ## Build Go plugin example (with SDK)
+	@echo "$(BLUE)Building Go plugin with SDK...$(NC)"
+	@cd nylon-ring-go/plugin-example-simple && \
+		if [ -f build.sh ]; then \
+			chmod +x build.sh && ./build.sh; \
+		else \
+			echo "$(YELLOW)⚠ build.sh not found, building manually...$(NC)"; \
+			go build -buildmode=c-shared -o nylon_ring_go_plugin_simple.so . || \
+			go build -buildmode=c-shared -o nylon_ring_go_plugin_simple.dylib . || \
+			go build -buildmode=c-shared -o nylon_ring_go_plugin_simple.dll .; \
+		fi
+	@echo "$(GREEN)✓ Go plugin (SDK) build complete!$(NC)"
+
 clean: ## Clean build artifacts
 	@echo "$(BLUE)Cleaning build artifacts...$(NC)"
 	@cargo clean
+	@if [ -f nylon-ring-go/plugin-example/nylon_ring_go_plugin.so ]; then \
+		rm nylon-ring-go/plugin-example/nylon_ring_go_plugin.so; \
+	fi
+	@if [ -f nylon-ring-go/plugin-example/nylon_ring_go_plugin.dylib ]; then \
+		rm nylon-ring-go/plugin-example/nylon_ring_go_plugin.dylib; \
+	fi
+	@if [ -f nylon-ring-go/plugin-example/nylon_ring_go_plugin.dll ]; then \
+		rm nylon-ring-go/plugin-example/nylon_ring_go_plugin.dll; \
+	fi
 	@echo "$(GREEN)✓ Clean complete!$(NC)"
 

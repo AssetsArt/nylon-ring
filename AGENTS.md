@@ -52,11 +52,11 @@ Goal: Make plugins "external modules" that can:
 [Host]
   1) Build NrRequest + NrBytes
   2) sid = next_id()
-  3) vtable.handle(plugin_ctx, sid, req, payload)
+  3) vtable.handle(plugin_ctx, entry, sid, req, payload)
   4) Wait sid via tokio::oneshot (async)
   
 [Plugin]
-  A) handle(…) → MUST return immediately
+  A) handle(entry, sid, req, payload) → MUST return immediately
   B) spawn background task
   C) run heavy logic (DB, network…)
   D) call host_vtable.send_result(host_ctx, sid, status, bytes)
@@ -67,15 +67,17 @@ Goal: Make plugins "external modules" that can:
 [Host]
   1) Build NrRequest + NrBytes
   2) sid = next_id()
-  3) vtable.handle(plugin_ctx, sid, req, payload)
+  3) vtable.handle(plugin_ctx, entry, sid, req, payload)
   4) Return StreamReceiver immediately
   
 [Plugin]
-  A) handle(…) → MUST return immediately
+  A) handle(entry, sid, req, payload) → MUST return immediately
   B) spawn background task
   C) loop: send multiple frames via send_result(host_ctx, sid, Ok, frame_bytes)
   D) call send_result(host_ctx, sid, StreamEnd, empty) to close
 ```
+
+**Note**: The `entry` parameter allows plugins to support multiple entry points. The host calls `host.call("entry_name", req)` or `host.call_stream("entry_name", req)` to route to specific handlers.
 
 ### Non-blocking guarantee:
 
@@ -199,7 +201,7 @@ pub struct NrPluginVTable {
     >,
 
     pub handle: Option<
-        unsafe extern "C" fn(plugin_ctx, sid, req, payload) -> NrStatus
+        unsafe extern "C" fn(plugin_ctx, entry: NrStr, sid, req, payload) -> NrStatus
     >,
 
     pub shutdown: Option<
@@ -207,6 +209,8 @@ pub struct NrPluginVTable {
     >,
 }
 ```
+
+**Note**: The `handle` function takes an `entry: NrStr` parameter for entry-based routing. Plugins can support multiple entry points (e.g., "unary", "stream", "state").
 
 ### Contract (CRITICAL):
 
@@ -220,6 +224,53 @@ Plugin must:
 4. When done → call `host_vtable.send_result(...)`.
    - For unary: call once with final status.
    - For streaming: call multiple times with `Ok`, then once with `StreamEnd`.
+
+### Plugin Creation with `define_plugin!` Macro
+
+The `nylon-ring` crate provides a `define_plugin!` macro that simplifies plugin creation:
+
+```rust
+use nylon_ring::define_plugin;
+
+unsafe fn plugin_init(
+    _plugin_ctx: *mut c_void,
+    host_ctx: *mut c_void,
+    host_vtable: *const NrHostVTable,
+) -> NrStatus {
+    // Initialize plugin state
+    NrStatus::Ok
+}
+
+unsafe fn handle_unary(
+    _plugin_ctx: *mut c_void,
+    sid: u64,
+    req: *const NrRequest,
+    payload: NrBytes,
+) -> NrStatus {
+    // Non-blocking handler for "unary" entry
+    NrStatus::Ok
+}
+
+unsafe fn plugin_shutdown(_plugin_ctx: *mut c_void) {
+    // Cleanup
+}
+
+define_plugin! {
+    init: plugin_init,
+    shutdown: plugin_shutdown,
+    entries: {
+        "unary" => handle_unary,
+        "stream" => handle_stream,
+        "state" => handle_state,
+    }
+}
+```
+
+The macro automatically:
+- Creates the `NrPluginVTable` with panic-safe wrappers
+- Exports `nylon_ring_get_plugin_v1()` entry point
+- Routes requests to the correct handler based on entry name
+- Handles panics safely across FFI boundaries
 
 ---
 
@@ -280,8 +331,10 @@ Pointer to any structure host uses (e.g., `Arc<HostContext>` with `DashMap`)
 
 ### 7.5 Support both unary and streaming
 
-* `call()` → unary RPC (single response)
-* `call_stream()` → streaming RPC (multiple frames)
+* `call(entry, req)` → unary RPC (single response)
+* `call_stream(entry, req)` → streaming RPC (multiple frames)
+
+The `entry` parameter is a string that routes to the correct handler in the plugin.
 
 ### 7.6 High-Level Request API
 
@@ -308,7 +361,11 @@ Plugin must:
 
 ### 8.1 Implement `nylon_ring_get_plugin_v1()`
 
+This is automatically handled by the `define_plugin!` macro.
+
 ### 8.2 Implement fast-returning `handle()`
+
+The `handle()` function receives an `entry: NrStr` parameter that identifies which handler to use. Plugins can support multiple entry points (e.g., "unary", "stream", "state").
 
 Must NOT:
 
@@ -317,7 +374,25 @@ Must NOT:
 * do DB call inside handle
 * await anything
 
-### 8.3 Background task callback
+### 8.3 Entry-Based Routing
+
+Plugins use entry-based routing to support multiple handlers:
+
+```rust
+define_plugin! {
+    init: plugin_init,
+    shutdown: plugin_shutdown,
+    entries: {
+        "unary" => handle_unary,      // Handles unary RPC calls
+        "stream" => handle_stream,    // Handles streaming calls
+        "state" => handle_state,      // Handles state management demo
+    }
+}
+```
+
+The host calls `host.call("unary", req)` or `host.call_stream("stream", req)` to route to specific handlers. If an entry doesn't exist, the plugin returns `NrStatus::Invalid`.
+
+### 8.4 Background task callback
 
 **Unary:**
 ```rust
@@ -530,10 +605,35 @@ let host_ext = unsafe {
     nylon_ring_host::NylonRingHost::get_host_ext(host_ctx)
 };
 
-// Later, use state functions
-host_ext.set_state(host_ctx, sid, NrStr::from_str("key"), NrBytes::from_slice(value));
-let value = host_ext.get_state(host_ctx, sid, NrStr::from_str("key"));
+// Store host_ext for later use (e.g., in a static OnceLock)
+static HOST_HANDLE: OnceLock<HostHandle> = OnceLock::new();
+
+struct HostHandle {
+    ctx: *mut c_void,
+    vtable: *const NrHostVTable,
+    ext: *const NrHostExt,
+}
+
+// In plugin_init:
+HOST_HANDLE.set(HostHandle {
+    ctx: host_ctx,
+    vtable: host_vtable,
+    ext: host_ext,
+});
+
+// Later in handlers, use state functions:
+if let Some(host) = HOST_HANDLE.get() {
+    if !host.ext.is_null() {
+        let set_state = (*host.ext).set_state;
+        set_state(host.ctx, sid, NrStr::from_str("key"), NrBytes::from_slice(value));
+        
+        let get_state = (*host.ext).get_state;
+        let value = get_state(host.ctx, sid, NrStr::from_str("key"));
+    }
+}
 ```
+
+**Note**: The `host_ext` pointer may be null if the host doesn't support state management. Always check for null before using.
 
 ---
 
@@ -658,9 +758,11 @@ The workspace contains:
 * Async / background task support
 * Zero-copy interface between host ↔ plugin
 * Both unary and streaming/WebSocket-style communication
+* Entry-based routing (plugins support multiple handlers)
 * Type-safe metadata storage (Extensions)
 * Per-request/stream state management
 * Fine-grained concurrent access (DashMap)
+* Panic-safe FFI boundaries (via `define_plugin!` macro)
 
 ---
 
@@ -688,27 +790,31 @@ The core ABI types are defined in `nylon-ring/src/lib.rs`. These are the source 
 
 The workspace contains:
 
-1. **`nylon-ring`** - Core ABI types + helper functions
+1. **`nylon-ring`** - Core ABI types + helper functions + `define_plugin!` macro
 2. **`nylon-ring-host`** - Host adapter with:
    - `NylonRingHost::load()` - Load plugin
-   - `NylonRingHost::call()` - Unary RPC
-   - `NylonRingHost::call_stream()` - Streaming RPC
+   - `NylonRingHost::call(entry, req)` - Unary RPC with entry-based routing
+   - `NylonRingHost::call_stream(entry, req)` - Streaming RPC with entry-based routing
    - `HighLevelRequest` - High-level request builder with `Extensions`
    - `Extensions` - Type-safe metadata storage (similar to `http::Extensions`)
    - Uses `DashMap` for concurrent access (not `Mutex<HashMap>`)
-3. **`nylon-ring-plugin-example`** - Example plugin supporting both unary and streaming
+3. **`nylon-ring-plugin-example`** - Example plugin supporting:
+   - Multiple entry points ("unary", "stream", "state")
+   - Both unary and streaming modes
+   - State management demonstration
 4. **`nylon-ring-bench`** - Benchmark suite using Criterion.rs
 5. **`nylon-ring-bench-plugin`** - Lightweight plugin for benchmarking
 
 ### Key Constraints
 
 * All structs must remain `#[repr(C)]` and ABI-stable
-* Plugin `handle()` must return immediately (non-blocking)
+* Plugin `handle(entry, sid, req, payload)` must return immediately (non-blocking)
+* Entry-based routing: plugins support multiple handlers via entry names
 * Host uses `oneshot` for unary, `mpsc::UnboundedSender` for streaming
 * Host uses `DashMap` for concurrent access (fine-grained locking)
 * Tests assert struct layouts (sizes/alignments) - must always pass
 * Assume 64-bit little-endian platform (Linux/macOS)
-* All `extern "C"` functions must be panic-safe
+* All `extern "C"` functions must be panic-safe (handled by `define_plugin!` macro)
 
 ### Testing & Benchmarking
 

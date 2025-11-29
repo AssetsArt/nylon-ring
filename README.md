@@ -32,9 +32,15 @@ The system relies on a few key concepts:
 
 This workspace contains:
 
-* `nylon-ring`: The core ABI library with helper functions
+* `nylon-ring`: The core ABI library with helper functions and `define_plugin!` macro
 * `nylon-ring-host`: A Rust host adapter using `tokio`, `libloading`, and `DashMap` for concurrent access
-* `nylon-ring-plugin-example`: An example Rust plugin demonstrating both unary and streaming modes
+  - `NylonRingHost` - Main host interface
+  - `HighLevelRequest` - High-level request builder with `Extensions`
+  - `Extensions` - Type-safe metadata storage (host-side only)
+* `nylon-ring-plugin-example`: An example Rust plugin demonstrating:
+  - Unary calls (single request/response)
+  - Streaming calls (multiple frames)
+  - State management (per-request/stream state)
 * `nylon-ring-bench`: Benchmark suite using Criterion.rs
 * `nylon-ring-bench-plugin`: Lightweight plugin optimized for benchmarking
 
@@ -75,52 +81,102 @@ make test-all
 
 ## Usage
 
+### Entry-Based Routing
+
+nylon-ring uses **entry-based routing** to allow plugins to support multiple handlers. When calling a plugin, you specify an entry name:
+
+- `host.call("unary", req)` - Routes to the "unary" handler
+- `host.call_stream("stream", req)` - Routes to the "stream" handler
+
+Plugins define their entry points using the `define_plugin!` macro's `entries` field. If a requested entry doesn't exist, the plugin returns `NrStatus::Invalid`.
+
 ### Implementing a Plugin
 
-Create a `cdylib` crate and implement the required VTable functions:
+The easiest way to create a plugin is using the `define_plugin!` macro:
 
 ```rust
-use nylon_ring::{NrPluginInfo, NrPluginVTable, NrStatus, NrRequest, NrBytes};
+use nylon_ring::{define_plugin, NrBytes, NrHostExt, NrHostVTable, NrRequest, NrStatus, NrStr};
 use std::ffi::c_void;
+use std::sync::OnceLock;
+use std::thread;
+use std::time::Duration;
 
-extern "C" fn plugin_handle(
+struct HostHandle {
+    ctx: *mut c_void,
+    vtable: *const NrHostVTable,
+    ext: *const NrHostExt,
+}
+
+unsafe impl Send for HostHandle {}
+unsafe impl Sync for HostHandle {}
+
+static HOST_HANDLE: OnceLock<HostHandle> = OnceLock::new();
+
+unsafe fn plugin_init(
+    _plugin_ctx: *mut c_void,
+    host_ctx: *mut c_void,
+    host_vtable: *const NrHostVTable,
+) -> NrStatus {
+    let host_ext = nylon_ring_host::NylonRingHost::get_host_ext(host_ctx);
+    let handle = HostHandle {
+        ctx: host_ctx,
+        vtable: host_vtable,
+        ext: host_ext,
+    };
+    HOST_HANDLE.set(handle).map_or(NrStatus::Err, |_| NrStatus::Ok)
+}
+
+unsafe fn handle_unary(
     _plugin_ctx: *mut c_void,
     sid: u64,
     req: *const NrRequest,
     _payload: NrBytes,
 ) -> NrStatus {
-    // 1. Read request (copy data if needed)
-    let req_ref = unsafe { &*req };
+    if req.is_null() {
+        return NrStatus::Invalid;
+    }
+    let req_ref = &*req;
     let path = req_ref.path.as_str().to_string();
     
-    // 2. Spawn background task
-    std::thread::spawn(move || {
-        // 3. Do actual work (DB, network, etc.)
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        
-        // 4. Send result back
-        let response = format!("OK: {}", path);
-        // ... get host_vtable and host_ctx from stored state ...
-        // unsafe {
-        //     host_vtable.send_result(
-        //         host_ctx,
-        //         sid,
-        //         NrStatus::Ok,
-        //         NrBytes::from_slice(response.as_bytes()),
-        //     );
-        // }
+    thread::spawn(move || {
+        if let Some(host) = HOST_HANDLE.get() {
+            // Do actual work (DB, network, etc.)
+            thread::sleep(Duration::from_secs(1));
+            
+            // Send result back
+            let response = format!("OK: {}", path);
+            let send_result = (*host.vtable).send_result;
+            send_result(
+                host.ctx,
+                sid,
+                NrStatus::Ok,
+                NrBytes::from_slice(response.as_bytes()),
+            );
+        }
     });
     
-    // 5. Return immediately (non-blocking)
     NrStatus::Ok
 }
 
-// Export the plugin info
-#[no_mangle]
-pub extern "C" fn nylon_ring_get_plugin_v1() -> *const NrPluginInfo {
-    &PLUGIN_INFO
+unsafe fn plugin_shutdown(_plugin_ctx: *mut c_void) {
+    // Cleanup if needed
+}
+
+define_plugin! {
+    init: plugin_init,
+    shutdown: plugin_shutdown,
+    entries: {
+        "unary" => handle_unary,
+        "stream" => handle_stream,
+    }
 }
 ```
+
+The `define_plugin!` macro automatically:
+- Creates the plugin vtable with panic-safe wrappers
+- Exports the `nylon_ring_get_plugin_v1()` entry point
+- Routes requests to handlers based on entry name
+- Handles panics safely across FFI boundaries
 
 ### Loading a Plugin (Host)
 
@@ -128,7 +184,7 @@ Use `nylon-ring-host` to load and call the plugin:
 
 **Unary Call:**
 ```rust
-use nylon_ring_host::{NylonRingHost, HighLevelRequest};
+use nylon_ring_host::{Extensions, HighLevelRequest, NylonRingHost};
 
 let host = NylonRingHost::load("path/to/plugin.so")?;
 
@@ -142,14 +198,15 @@ let req = HighLevelRequest {
 };
 
 // Async call - does not block the thread
-let (status, payload) = host.call(req).await?;
+// The "unary" entry routes to the unary handler in the plugin
+let (status, payload) = host.call("unary", req).await?;
 println!("Status: {:?}, Response: {}", status, String::from_utf8_lossy(&payload));
 ```
 
 **Streaming Call:**
 ```rust
-use nylon_ring::{NrStatus};
-use nylon_ring_host::{NylonRingHost, HighLevelRequest};
+use nylon_ring::NrStatus;
+use nylon_ring_host::{Extensions, HighLevelRequest, NylonRingHost};
 
 let host = NylonRingHost::load("path/to/plugin.so")?;
 
@@ -163,7 +220,8 @@ let req = HighLevelRequest {
 };
 
 // Get stream receiver
-let mut stream = host.call_stream(req).await?;
+// The "stream" entry routes to the streaming handler in the plugin
+let mut stream = host.call_stream("stream", req).await?;
 
 // Receive frames
 while let Some(frame) = stream.recv().await {
@@ -182,37 +240,41 @@ while let Some(frame) = stream.recv().await {
 }
 ```
 
+**Note**: The first parameter to `call()` and `call_stream()` is the entry name, which routes to the corresponding handler in the plugin. Plugins can support multiple entry points (e.g., "unary", "stream", "state").
+
 ## Architecture
 
 ### Unary Flow
 
 ```
-Host                    Plugin
-  |                       |
-  |-- handle(sid, req) -->|
-  |<-- return Ok -------- |
-  |                       | [spawn background task]
-  |                       | [do work...]
-  |                       |
-  |<-- send_result(sid) --|
-  |                       |
+Host                           Plugin
+  |                              |
+  |-- handle(entry, sid, req) -->|
+  |<--------- return Ok ---------|
+  |                              | [spawn background task]
+  |                              | [do work...]
+  |                              |
+  |<----- send_result(sid) ------|
+  |                              |
 ```
 
 ### Streaming Flow
 
 ```
-Host                    Plugin
-  |                       |
-  |-- handle(sid, req) -->|
-  |<-- return Ok -------- |
-  |                       | [spawn background task]
-  |                       |
-  |<-- send_result(sid) --| [frame 1]
-  |<-- send_result(sid) --| [frame 2]
-  |<-- send_result(sid) --| [frame 3]
-  |<-- send_result(sid) --| [StreamEnd]
-  |                       |
+Host                           Plugin
+  |                              |
+  |-- handle(entry, sid, req) -->|
+  |<--------- return Ok ---------|
+  |                              | [spawn background task]
+  |                              |
+  |<----- send_result(sid) ------| [frame 1]
+  |<----- send_result(sid) ------| [frame 2]
+  |<----- send_result(sid) ------| [frame 3]
+  |<----- send_result(sid) ------| [StreamEnd]
+  |                              |
 ```
+
+**Note**: The `entry` parameter allows plugins to support multiple entry points. The host routes requests to specific handlers based on the entry name.
 
 ## Performance
 
@@ -351,9 +413,10 @@ if let Some(metadata) = req.extensions.get::<MyMetadata>() {
 * **All ABI types are `#[repr(C)]`** - do not modify their layout
 * **Host owns request data** - plugin must copy if needed
 * **Thread-safe callbacks** - `send_result` can be called from any thread
-* **Panic-safe FFI** - all `extern "C"` functions catch panics
+* **Panic-safe FFI** - all `extern "C"` functions catch panics (handled by `define_plugin!` macro)
 * **No `unwrap()` in production** - proper error handling required
 * **Concurrent access** - Host uses `DashMap` for fine-grained locking
+* **Entry-based routing** - Plugins support multiple entry points via the `entry` parameter
 
 ## Error Handling
 

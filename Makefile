@@ -1,4 +1,4 @@
-.PHONY: help build build-plugin test test-all examples example-simple example-streaming benchmark benchmark-abi benchmark-host clean all
+.PHONY: help build example test test-all example-simple example-streaming example-go-plugin example-go-plugin-lowlevel benchmark benchmark-abi benchmark-host clean
 
 # Default target
 .DEFAULT_GOAL := help
@@ -31,22 +31,18 @@ help: ## แสดง help message
 	@echo "$(BLUE)Nylon Ring - Makefile Commands$(NC)"
 	@echo ""
 	@echo "$(GREEN)Build Commands:$(NC)"
-	@echo "  $(YELLOW)make build$(NC)              - Build all crates"
-	@echo "  $(YELLOW)make build-plugin$(NC)        - Build plugin library (cdylib)"
-	@echo "  $(YELLOW)make build-go-plugin$(NC)     - Build Go plugin example (low-level)"
-	@echo "  $(YELLOW)make build-go-plugin-simple$(NC) - Build Go plugin example (with SDK)"
-	@echo "  $(YELLOW)make all$(NC)                 - Build everything (default: debug)"
+	@echo "  $(YELLOW)make build$(NC)              - Build everything (Rust crates + Rust plugin + Go plugins)"
+	@echo ""
+	@echo "$(GREEN)Example Commands:$(NC)"
+	@echo "  $(YELLOW)make example$(NC)            - Build everything and run all examples (Rust + Go)"
+	@echo "  $(YELLOW)make example-simple$(NC)       - Run simple_host example (Rust plugin)"
+	@echo "  $(YELLOW)make example-streaming$(NC)   - Run streaming_host example (Rust plugin)"
+	@echo "  $(YELLOW)make example-go-plugin$(NC)    - Run go_plugin_host example (Go plugin with SDK)"
+	@echo "  $(YELLOW)make example-go-plugin-lowlevel$(NC) - Run go_plugin_host_lowlevel example (low-level Go plugin)"
 	@echo ""
 	@echo "$(GREEN)Test Commands:$(NC)"
 	@echo "  $(YELLOW)make test$(NC)                - Run all tests"
 	@echo "  $(YELLOW)make test-all$(NC)            - Run all tests with verbose output"
-	@echo ""
-	@echo "$(GREEN)Example Commands:$(NC)"
-	@echo "  $(YELLOW)make examples$(NC)             - Run all examples"
-	@echo "  $(YELLOW)make example-simple$(NC)       - Run simple_host example"
-	@echo "  $(YELLOW)make example-streaming$(NC)   - Run streaming_host example"
-	@echo "  $(YELLOW)make example-go-plugin$(NC)    - Run go_plugin_host example (tests Go plugin with SDK)"
-	@echo "  $(YELLOW)make example-go-plugin-lowlevel$(NC) - Run go_plugin_host_lowlevel example (tests low-level Go plugin)"
 	@echo ""
 	@echo "$(GREEN)Benchmark Commands:$(NC)"
 	@echo "  $(YELLOW)make benchmark$(NC)            - Run all benchmarks"
@@ -55,24 +51,36 @@ help: ## แสดง help message
 	@echo ""
 	@echo "$(GREEN)Utility Commands:$(NC)"
 	@echo "  $(YELLOW)make clean$(NC)               - Clean build artifacts"
-	@echo "  $(YELLOW)make check-plugin$(NC)        - Check if plugin exists"
 	@echo ""
 
-build: ## Build all crates
-	@echo "$(BLUE)Building all crates...$(NC)"
+build: ## Build everything (Rust crates + Rust plugin + Go plugins)
+	@echo "$(BLUE)Building everything...$(NC)"
+	@echo ""
+	@echo "$(YELLOW)=== Building Rust crates ===$(NC)"
 	@cargo build
-	@echo "$(GREEN)✓ Build complete!$(NC)"
-
-build-plugin: ## Build plugin library (cdylib)
-	@echo "$(BLUE)Building plugin library...$(NC)"
+	@echo ""
+	@echo "$(YELLOW)=== Building Rust plugin ===$(NC)"
 	@cargo build -p nylon-ring-plugin-example
 	@if [ -f "$(PLUGIN_PATH)" ]; then \
-		echo "$(GREEN)✓ Plugin built: $(PLUGIN_PATH)$(NC)"; \
+		echo "$(GREEN)✓ Rust plugin built: $(PLUGIN_PATH)$(NC)"; \
 	else \
-		echo "$(YELLOW)⚠ Plugin not found at expected path: $(PLUGIN_PATH)$(NC)"; \
+		echo "$(YELLOW)⚠ Rust plugin not found at expected path: $(PLUGIN_PATH)$(NC)"; \
 	fi
-
-all: build build-plugin ## Build everything (all crates + plugin)
+	@echo ""
+	@echo "$(YELLOW)=== Building Go plugin (low-level) ===$(NC)"
+	@cd nylon-ring-go/plugin-example && \
+		if [ -f build.sh ]; then \
+			chmod +x build.sh && ./build.sh; \
+		else \
+			echo "$(YELLOW)⚠ build.sh not found, building manually...$(NC)"; \
+			go build -buildmode=c-shared -o nylon_ring_go_plugin.so . || \
+			go build -buildmode=c-shared -o nylon_ring_go_plugin.dylib . || \
+			go build -buildmode=c-shared -o nylon_ring_go_plugin.dll .; \
+		fi
+	@echo ""
+	@echo "$(YELLOW)=== Building Go plugin (with SDK) ===$(NC)"
+	@cd nylon-ring-go/plugin-example-simple && chmod +x build.sh && ./build.sh
+	@echo ""
 	@echo "$(GREEN)✓ All builds complete!$(NC)"
 
 test: ## Run all tests
@@ -85,46 +93,42 @@ test-all: ## Run all tests with verbose output
 	@cargo test --workspace --lib -- --nocapture
 	@echo "$(GREEN)✓ Tests complete!$(NC)"
 
-check-plugin: ## Check if plugin library exists
-	@if [ -f "$(PLUGIN_PATH)" ]; then \
-		echo "$(GREEN)✓ Plugin found: $(PLUGIN_PATH)$(NC)"; \
-		ls -lh "$(PLUGIN_PATH)"; \
-	else \
-		echo "$(YELLOW)⚠ Plugin not found: $(PLUGIN_PATH)$(NC)"; \
-		echo "$(YELLOW)Run 'make build-plugin' first$(NC)"; \
-		exit 1; \
-	fi
+example: build ## Build everything and run all examples (Rust + Go)
+	@echo "$(BLUE)Running all examples...$(NC)"
+	@echo ""
+	@echo "$(YELLOW)=== Example 1: simple_host (Rust plugin) ===$(NC)"
+	@cargo run --example simple_host
+	@echo ""
+	@echo "$(YELLOW)=== Example 2: streaming_host (Rust plugin) ===$(NC)"
+	@cargo run --example streaming_host
+	@echo ""
+	@echo "$(YELLOW)=== Example 3: go_plugin_host (Go plugin with SDK) ===$(NC)"
+	@cargo run --example go_plugin_host
+	@echo ""
+	@echo "$(YELLOW)=== Example 4: go_plugin_host_lowlevel (low-level Go plugin) ===$(NC)"
+	@cargo run --example go_plugin_host_lowlevel
+	@echo ""
+	@echo "$(GREEN)✓ All examples complete!$(NC)"
 
-example-simple: check-plugin ## Run simple_host example
+example-simple: build ## Run simple_host example (Rust plugin)
 	@echo "$(BLUE)Running simple_host example...$(NC)"
 	@cargo run --example simple_host
 	@echo "$(GREEN)✓ Example complete!$(NC)"
 
-example-streaming: check-plugin ## Run streaming_host example
+example-streaming: build ## Run streaming_host example (Rust plugin)
 	@echo "$(BLUE)Running streaming_host example...$(NC)"
 	@cargo run --example streaming_host
 	@echo "$(GREEN)✓ Example complete!$(NC)"
 
-example-go-plugin: build-go-plugin-simple ## Run go_plugin_host example (tests Go plugin with SDK)
+example-go-plugin: build ## Run go_plugin_host example (Go plugin with SDK)
 	@echo "$(BLUE)Running go_plugin_host example (SDK)...$(NC)"
 	@cargo run --example go_plugin_host
 	@echo "$(GREEN)✓ Example complete!$(NC)"
 
-example-go-plugin-lowlevel: build-go-plugin ## Run go_plugin_host_lowlevel example (tests low-level Go plugin)
+example-go-plugin-lowlevel: build ## Run go_plugin_host_lowlevel example (low-level Go plugin)
 	@echo "$(BLUE)Running go_plugin_host_lowlevel example...$(NC)"
 	@cargo run --example go_plugin_host_lowlevel
 	@echo "$(GREEN)✓ Example complete!$(NC)"
-
-examples: check-plugin ## Run all examples
-	@echo "$(BLUE)Running all examples...$(NC)"
-	@echo ""
-	@echo "$(YELLOW)=== Example 1: simple_host ===$(NC)"
-	@cargo run --example simple_host
-	@echo ""
-	@echo "$(YELLOW)=== Example 2: streaming_host ===$(NC)"
-	@cargo run --example streaming_host
-	@echo ""
-	@echo "$(GREEN)✓ All examples complete!$(NC)"
 
 build-bench-plugin: ## Build benchmark plugin (fast response, no sleep)
 	@echo "$(BLUE)Building benchmark plugin...$(NC)"
@@ -144,35 +148,11 @@ benchmark-host: build-bench-plugin ## Run host overhead benchmarks
 benchmark: benchmark-abi benchmark-host ## Run all benchmarks
 	@echo "$(GREEN)✓ All benchmarks complete!$(NC)"
 
-build-go-plugin: ## Build Go plugin example (low-level)
-	@echo "$(BLUE)Building Go plugin (low-level)...$(NC)"
-	@cd nylon-ring-go/plugin-example && \
-		if [ -f build.sh ]; then \
-			chmod +x build.sh && ./build.sh; \
-		else \
-			echo "$(YELLOW)⚠ build.sh not found, building manually...$(NC)"; \
-			go build -buildmode=c-shared -o nylon_ring_go_plugin.so . || \
-			go build -buildmode=c-shared -o nylon_ring_go_plugin.dylib . || \
-			go build -buildmode=c-shared -o nylon_ring_go_plugin.dll .; \
-		fi
-	@echo "$(GREEN)✓ Go plugin build complete!$(NC)"
-
-build-go-plugin-simple: ## Build Go plugin example (with SDK)
-	@echo "$(BLUE)Building Go plugin with SDK...$(NC)"
-	@cd nylon-ring-go/plugin-example-simple && chmod +x build.sh && ./build.sh;
-	@echo "$(GREEN)✓ Go plugin (SDK) build complete!$(NC)"
-
 clean: ## Clean build artifacts
 	@echo "$(BLUE)Cleaning build artifacts...$(NC)"
 	@cargo clean
-	@if [ -f nylon-ring-go/plugin-example/nylon_ring_go_plugin.so ]; then \
-		rm nylon-ring-go/plugin-example/nylon_ring_go_plugin.so; \
-	fi
-	@if [ -f nylon-ring-go/plugin-example/nylon_ring_go_plugin.dylib ]; then \
-		rm nylon-ring-go/plugin-example/nylon_ring_go_plugin.dylib; \
-	fi
-	@if [ -f nylon-ring-go/plugin-example/nylon_ring_go_plugin.dll ]; then \
-		rm nylon-ring-go/plugin-example/nylon_ring_go_plugin.dll; \
-	fi
+	@rm -f target/go/*.so target/go/*.dylib target/go/*.dll
+	@rm -f nylon-ring-go/plugin-example/*.so nylon-ring-go/plugin-example/*.dylib nylon-ring-go/plugin-example/*.dll
+	@rm -f nylon-ring-go/plugin-example-simple/*.so nylon-ring-go/plugin-example-simple/*.dylib nylon-ring-go/plugin-example-simple/*.dll
 	@echo "$(GREEN)✓ Clean complete!$(NC)"
 

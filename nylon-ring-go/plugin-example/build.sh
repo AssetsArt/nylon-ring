@@ -3,7 +3,7 @@
 
 set -e
 
-PLUGIN_NAME="nylon_ring_go_plugin"
+PLUGIN_NAME="./../../target/go/nylon_ring_go_plugin"
 
 echo "Building Go plugin..."
 

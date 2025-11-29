@@ -76,19 +76,6 @@ static void call_send_result(NrHostVTable* vtable, void* host_ctx, uint64_t sid,
 extern NrStatus go_plugin_init(void* plugin_ctx, void* host_ctx, NrHostVTable* host_vtable);
 extern NrStatus go_plugin_handle(void* plugin_ctx, NrStr entry, uint64_t sid, NrRequest* req, NrBytes payload);
 extern void go_plugin_shutdown(void* plugin_ctx);
-
-// C wrapper functions that call Go functions
-static NrStatus c_plugin_init(void* plugin_ctx, void* host_ctx, NrHostVTable* host_vtable) {
-	return go_plugin_init(plugin_ctx, host_ctx, host_vtable);
-}
-
-static NrStatus c_plugin_handle(void* plugin_ctx, NrStr entry, uint64_t sid, NrRequest* req, NrBytes payload) {
-	return go_plugin_handle(plugin_ctx, entry, sid, req, payload);
-}
-
-static void c_plugin_shutdown(void* plugin_ctx) {
-	go_plugin_shutdown(plugin_ctx);
-}
 */
 import "C"
 import (
@@ -372,11 +359,11 @@ func nylon_ring_get_plugin_v1() *C.NrPluginInfo {
 func init() {
 	runtime.LockOSThread()
 
-	// Initialize static vtable with function pointers to C wrapper functions
-	// These C functions call the Go exported functions
+	// Initialize static vtable with function pointers to Go exported functions
+	// Go compiler will handle the function pointer conversion
 	staticVTable = C.NrPluginVTable{
-		init:     (*[0]byte)(C.c_plugin_init),
-		handle:   (*[0]byte)(C.c_plugin_handle),
-		shutdown: (*[0]byte)(C.c_plugin_shutdown),
+		init:     (*[0]byte)(C.go_plugin_init),
+		handle:   (*[0]byte)(C.go_plugin_handle),
+		shutdown: (*[0]byte)(C.go_plugin_shutdown),
 	}
 }

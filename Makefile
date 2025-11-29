@@ -147,15 +147,7 @@ build-go-plugin: ## Build Go plugin example (low-level)
 
 build-go-plugin-simple: ## Build Go plugin example (with SDK)
 	@echo "$(BLUE)Building Go plugin with SDK...$(NC)"
-	@cd nylon-ring-go/plugin-example-simple && \
-		if [ -f build.sh ]; then \
-			chmod +x build.sh && ./build.sh; \
-		else \
-			echo "$(YELLOW)⚠ build.sh not found, building manually...$(NC)"; \
-			go build -buildmode=c-shared -o nylon_ring_go_plugin_simple.so . || \
-			go build -buildmode=c-shared -o nylon_ring_go_plugin_simple.dylib . || \
-			go build -buildmode=c-shared -o nylon_ring_go_plugin_simple.dll .; \
-		fi
+	@cd nylon-ring-go/plugin-example-simple && chmod +x build.sh && ./build.sh;
 	@echo "$(GREEN)✓ Go plugin (SDK) build complete!$(NC)"
 
 clean: ## Clean build artifacts

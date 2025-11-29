@@ -45,7 +45,8 @@ help: ## แสดง help message
 	@echo "  $(YELLOW)make examples$(NC)             - Run all examples"
 	@echo "  $(YELLOW)make example-simple$(NC)       - Run simple_host example"
 	@echo "  $(YELLOW)make example-streaming$(NC)   - Run streaming_host example"
-	@echo "  $(YELLOW)make example-go-plugin$(NC)    - Run go_plugin_host example (tests Go plugin)"
+	@echo "  $(YELLOW)make example-go-plugin$(NC)    - Run go_plugin_host example (tests Go plugin with SDK)"
+	@echo "  $(YELLOW)make example-go-plugin-lowlevel$(NC) - Run go_plugin_host_lowlevel example (tests low-level Go plugin)"
 	@echo ""
 	@echo "$(GREEN)Benchmark Commands:$(NC)"
 	@echo "  $(YELLOW)make benchmark$(NC)            - Run all benchmarks"
@@ -104,9 +105,14 @@ example-streaming: check-plugin ## Run streaming_host example
 	@cargo run --example streaming_host
 	@echo "$(GREEN)✓ Example complete!$(NC)"
 
-example-go-plugin: build-go-plugin-simple ## Run go_plugin_host example (tests Go plugin)
-	@echo "$(BLUE)Running go_plugin_host example...$(NC)"
+example-go-plugin: build-go-plugin-simple ## Run go_plugin_host example (tests Go plugin with SDK)
+	@echo "$(BLUE)Running go_plugin_host example (SDK)...$(NC)"
 	@cargo run --example go_plugin_host
+	@echo "$(GREEN)✓ Example complete!$(NC)"
+
+example-go-plugin-lowlevel: build-go-plugin ## Run go_plugin_host_lowlevel example (tests low-level Go plugin)
+	@echo "$(BLUE)Running go_plugin_host_lowlevel example...$(NC)"
+	@cargo run --example go_plugin_host_lowlevel
 	@echo "$(GREEN)✓ Example complete!$(NC)"
 
 examples: check-plugin ## Run all examples

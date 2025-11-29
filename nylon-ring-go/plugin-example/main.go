@@ -188,14 +188,19 @@ func handle_stream(pluginCtx unsafe.Pointer, entry C.NrStr, sid uint64, req *C.N
 			C.free(cFrame)
 		}
 
-		// End stream via C helper
-		C.call_send_result(
-			hostHandle.vtable,
-			hostHandle.ctx,
-			C.uint64_t(sid),
-			C.NR_STATUS_STREAM_END,
-			C.NrBytes{ptr: nil, len: 0},
-		)
+		// End stream via C helper (use empty bytes, not nil pointer)
+		// Allocate at least 1 byte to avoid null pointer issues
+		emptyPtr := C.malloc(1)
+		if emptyPtr != nil {
+			C.call_send_result(
+				hostHandle.vtable,
+				hostHandle.ctx,
+				C.uint64_t(sid),
+				C.NR_STATUS_STREAM_END,
+				C.NrBytes{ptr: emptyPtr, len: 0},
+			)
+			C.free(emptyPtr)
+		}
 	}()
 
 	return C.NR_STATUS_OK
@@ -220,18 +225,43 @@ func plugin_shutdown(pluginCtx unsafe.Pointer) {
 	// Cleanup if needed
 }
 
-// Static plugin info and vtable
-var (
-	pluginName    = C.CString("nylon-ring-go-plugin")
-	pluginVersion = C.CString("1.0.0")
+// Static vtable (function pointers are set at init time)
+var pluginVTable C.NrPluginVTable
 
+func init() {
+	// Initialize vtable with function pointers to exported functions
 	pluginVTable = C.NrPluginVTable{
 		init:     (*[0]byte)(C.plugin_init),
 		handle:   (*[0]byte)(C.plugin_handle),
 		shutdown: (*[0]byte)(C.plugin_shutdown),
 	}
+}
 
-	pluginInfo = C.NrPluginInfo{
+//export nylon_ring_get_plugin_v1
+func nylon_ring_get_plugin_v1() *C.NrPluginInfo {
+	// Allocate plugin info in C memory (required by CGO pinning rules)
+	// We need to create a new instance each time to avoid Go pointer issues
+	pluginInfoPtr := (*C.NrPluginInfo)(C.malloc(C.size_t(unsafe.Sizeof(C.NrPluginInfo{}))))
+	if pluginInfoPtr == nil {
+		return nil
+	}
+
+	// Allocate vtable in C memory
+	vtablePtr := (*C.NrPluginVTable)(C.malloc(C.size_t(unsafe.Sizeof(C.NrPluginVTable{}))))
+	if vtablePtr == nil {
+		C.free(unsafe.Pointer(pluginInfoPtr))
+		return nil
+	}
+
+	// Copy vtable
+	*vtablePtr = pluginVTable
+
+	// Create new plugin name and version strings (they need to persist)
+	pluginName := C.CString("nylon-ring-go-plugin")
+	pluginVersion := C.CString("1.0.0")
+
+	// Fill plugin info
+	*pluginInfoPtr = C.NrPluginInfo{
 		abi_version: 1,
 		struct_size: C.uint32_t(unsafe.Sizeof(C.NrPluginInfo{})),
 		name: C.NrStr{
@@ -243,13 +273,10 @@ var (
 			len: C.uint32_t(C.strlen(pluginVersion)),
 		},
 		plugin_ctx: nil,
-		vtable:     &pluginVTable,
+		vtable:     vtablePtr,
 	}
-)
 
-//export nylon_ring_get_plugin_v1
-func nylon_ring_get_plugin_v1() *C.NrPluginInfo {
-	return &pluginInfo
+	return pluginInfoPtr
 }
 
 func main() {

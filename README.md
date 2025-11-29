@@ -37,10 +37,15 @@ This workspace contains:
   - `NylonRingHost` - Main host interface
   - `HighLevelRequest` - High-level request builder with `Extensions`
   - `Extensions` - Type-safe metadata storage (host-side only)
+  - Examples: `simple_host`, `streaming_host`, `go_plugin_host`, `go_plugin_host_lowlevel`
 * `nylon-ring-plugin-example`: An example Rust plugin demonstrating:
   - Unary calls (single request/response)
   - Streaming calls (multiple frames)
   - State management (per-request/stream state)
+* `nylon-ring-go/`: Go implementation with high-level SDK
+  - `sdk/` - Go SDK package (simple API similar to Rust's `define_plugin!` macro)
+  - `plugin-example-simple/` - Simple example using SDK
+  - `plugin-example/` - Low-level CGO example (advanced)
 * `nylon-ring-bench`: Benchmark suite using Criterion.rs
 * `nylon-ring-bench-plugin`: Lightweight plugin optimized for benchmarking
 
@@ -49,8 +54,8 @@ This workspace contains:
 ### Building
 
 ```bash
-# Build everything
-make all
+# Build everything (Rust crates + Rust plugin + Go plugins)
+make build
 
 # Or build individually
 cargo build
@@ -59,14 +64,14 @@ cargo build
 ### Running Examples
 
 ```bash
-# Run all examples
-make examples
+# Build everything and run all examples (Rust + Go)
+make example
 
-# Run unary example
-make example-simple
-
-# Run streaming example
-make example-streaming
+# Run individual examples (will build if needed)
+make example-simple          # Rust plugin - unary
+make example-streaming        # Rust plugin - streaming
+make example-go-plugin        # Go plugin with SDK
+make example-go-plugin-lowlevel # Go plugin low-level
 ```
 
 ### Running Tests
@@ -88,9 +93,11 @@ nylon-ring uses **entry-based routing** to allow plugins to support multiple han
 - `host.call("unary", req)` - Routes to the "unary" handler
 - `host.call_stream("stream", req)` - Routes to the "stream" handler
 
-Plugins define their entry points using the `define_plugin!` macro's `entries` field. If a requested entry doesn't exist, the plugin returns `NrStatus::Invalid`.
+Plugins define their entry points using the `define_plugin!` macro's `entries` field (Rust) or `plugin.Handle()` method (Go SDK). If a requested entry doesn't exist, the plugin returns `NrStatus::Invalid`.
 
 ### Implementing a Plugin
+
+#### Rust Plugin
 
 The easiest way to create a plugin is using the `define_plugin!` macro:
 
@@ -178,9 +185,48 @@ The `define_plugin!` macro automatically:
 - Routes requests to handlers based on entry name
 - Handles panics safely across FFI boundaries
 
+#### Go Plugin
+
+**Using SDK (Recommended):**
+
+The Go SDK provides a simple API similar to Rust's `define_plugin!` macro:
+
+```go
+package main
+
+import (
+	"time"
+	"github.com/AssetsArt/nylon-ring/nylon-ring-go/sdk"
+)
+
+func init() {
+	plugin := sdk.NewPlugin("my-plugin", "1.0.0")
+	
+	plugin.Handle("unary", func(req sdk.Request, payload []byte, callback func(sdk.Response)) {
+		// SDK automatically calls this in a goroutine - you can do blocking work
+		time.Sleep(2 * time.Second)
+		callback(sdk.Response{Status: sdk.StatusOk, Data: []byte("OK")})
+	})
+	
+	plugin.Handle("stream", func(req sdk.Request, payload []byte, callback func(sdk.Response)) {
+		for i := 1; i <= 5; i++ {
+			time.Sleep(1 * time.Second)
+			callback(sdk.Response{Status: sdk.StatusOk, Data: []byte("Frame " + string(rune('0'+i)))})
+		}
+		callback(sdk.Response{Status: sdk.StatusStreamEnd, Data: []byte{}})
+	})
+	
+	sdk.BuildPlugin(plugin)
+}
+```
+
+**Low-Level CGO (Advanced):**
+
+For full control, you can use CGO directly. See `nylon-ring-go/plugin-example/` for a complete example.
+
 ### Loading a Plugin (Host)
 
-Use `nylon-ring-host` to load and call the plugin:
+Use `nylon-ring-host` to load and call plugins (works with both Rust and Go plugins):
 
 **Unary Call:**
 ```rust
@@ -440,6 +486,26 @@ The nylon-ring ecosystem follows strict Rust coding rules for production safety:
 7. **Avoid `panic!` and `assert!`** - only in benchmarks/tests
 
 See `nylon-ring-host/src/error.rs` for an example error type implementation.
+
+## Multi-Language Support
+
+nylon-ring supports plugins written in multiple languages:
+
+### Rust
+* Easiest integration with `define_plugin!` macro
+* Zero overhead, full ABI control
+* See `nylon-ring-plugin-example/` for examples
+
+### Go
+* High-level SDK available (`nylon-ring-go/sdk/`)
+* Simple API similar to Rust's `define_plugin!` macro
+* Low-level CGO support for advanced use cases
+* See `nylon-ring-go/` for examples
+
+### Other Languages
+* C / C++ - Direct C ABI match
+* Zig - Perfect C ABI support
+* Any language with C FFI support
 
 ## Platform Support
 

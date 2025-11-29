@@ -475,9 +475,31 @@ nylon-ring supports:
 
 ### Go Plugin
 
-* using `cgo`
-* plugin exports `extern "C"` functions
-* uses same ABI structs
+nylon-ring provides a **high-level Go SDK** that makes plugin creation as easy as Rust's `define_plugin!` macro:
+
+**Using SDK (Recommended):**
+```go
+package main
+
+import "github.com/AssetsArt/nylon-ring/nylon-ring-go/sdk"
+
+func init() {
+	plugin := sdk.NewPlugin("my-plugin", "1.0.0")
+	
+	plugin.Handle("unary", func(req sdk.Request, payload []byte, callback func(sdk.Response)) {
+		// SDK automatically calls this in a goroutine - you can do blocking work
+		callback(sdk.Response{Status: sdk.StatusOk, Data: []byte("OK")})
+	})
+	
+	sdk.BuildPlugin(plugin)
+}
+```
+
+**Low-Level CGO (Advanced):**
+* Using `cgo` directly
+* Plugin exports `extern "C"` functions
+* Uses same ABI structs
+* See `nylon-ring-go/plugin-example/` for full example
 
 ### Zig Plugin
 
@@ -735,16 +757,24 @@ FailedToLoadLibrary(#[source] libloading::Error)
 
 The workspace contains:
 
-1. **`nylon-ring`** - Core ABI types + helper functions
+1. **`nylon-ring`** - Core ABI types + helper functions + `define_plugin!` macro
 2. **`nylon-ring-host`** - Host adapter with:
    - `NylonRingHost::load()` - Load plugin
-   - `NylonRingHost::call()` - Unary RPC
-   - `NylonRingHost::call_stream()` - Streaming RPC
-   - `HighLevelRequest` - High-level request builder
-   - `Extensions` - Type-safe metadata storage
-3. **`nylon-ring-plugin-example`** - Example plugin supporting both unary and streaming
-4. **`nylon-ring-bench`** - Benchmark suite using Criterion.rs
-5. **`nylon-ring-bench-plugin`** - Lightweight plugin for benchmarking
+   - `NylonRingHost::call(entry, req)` - Unary RPC with entry-based routing
+   - `NylonRingHost::call_stream(entry, req)` - Streaming RPC with entry-based routing
+   - `HighLevelRequest` - High-level request builder with `Extensions`
+   - `Extensions` - Type-safe metadata storage (similar to `http::Extensions`)
+   - Uses `DashMap` for concurrent access (not `Mutex<HashMap>`)
+3. **`nylon-ring-plugin-example`** - Example Rust plugin supporting:
+   - Multiple entry points ("unary", "stream", "state")
+   - Both unary and streaming modes
+   - State management demonstration
+4. **`nylon-ring-go/`** - Go implementation:
+   - **`sdk/`** - High-level Go SDK (similar to Rust's `define_plugin!` macro)
+   - **`plugin-example-simple/`** - Simple example using SDK
+   - **`plugin-example/`** - Low-level CGO example (advanced)
+5. **`nylon-ring-bench`** - Benchmark suite using Criterion.rs
+6. **`nylon-ring-bench-plugin`** - Lightweight plugin for benchmarking
 
 ---
 
@@ -798,12 +828,17 @@ The workspace contains:
    - `HighLevelRequest` - High-level request builder with `Extensions`
    - `Extensions` - Type-safe metadata storage (similar to `http::Extensions`)
    - Uses `DashMap` for concurrent access (not `Mutex<HashMap>`)
-3. **`nylon-ring-plugin-example`** - Example plugin supporting:
+   - Examples: `simple_host`, `streaming_host`, `go_plugin_host`, `go_plugin_host_lowlevel`
+3. **`nylon-ring-plugin-example`** - Example Rust plugin supporting:
    - Multiple entry points ("unary", "stream", "state")
    - Both unary and streaming modes
    - State management demonstration
-4. **`nylon-ring-bench`** - Benchmark suite using Criterion.rs
-5. **`nylon-ring-bench-plugin`** - Lightweight plugin for benchmarking
+4. **`nylon-ring-go/`** - Go implementation:
+   - **`sdk/`** - High-level Go SDK with simple API (similar to Rust's `define_plugin!` macro)
+   - **`plugin-example-simple/`** - Simple example using SDK
+   - **`plugin-example/`** - Low-level CGO example (advanced, full control)
+5. **`nylon-ring-bench`** - Benchmark suite using Criterion.rs
+6. **`nylon-ring-bench-plugin`** - Lightweight plugin for benchmarking
 
 ### Key Constraints
 
@@ -820,10 +855,13 @@ The workspace contains:
 
 Run tests and examples:
 ```bash
+make build         # Build everything (Rust + Go plugins)
+make example       # Build and run all examples (Rust + Go)
+make example-simple      # Run unary example (Rust plugin)
+make example-streaming   # Run streaming example (Rust plugin)
+make example-go-plugin   # Run Go plugin example (with SDK)
+make example-go-plugin-lowlevel # Run Go plugin example (low-level)
 make test          # Run all tests
-make examples      # Run all examples
-make example-simple      # Unary example
-make example-streaming   # Streaming example
 make benchmark     # Run all benchmarks
 make benchmark-abi # ABI type benchmarks
 make benchmark-host # Host overhead benchmarks

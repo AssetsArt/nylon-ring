@@ -45,6 +45,7 @@ help: ## แสดง help message
 	@echo "  $(YELLOW)make examples$(NC)             - Run all examples"
 	@echo "  $(YELLOW)make example-simple$(NC)       - Run simple_host example"
 	@echo "  $(YELLOW)make example-streaming$(NC)   - Run streaming_host example"
+	@echo "  $(YELLOW)make example-go-plugin$(NC)    - Run go_plugin_host example (tests Go plugin)"
 	@echo ""
 	@echo "$(GREEN)Benchmark Commands:$(NC)"
 	@echo "  $(YELLOW)make benchmark$(NC)            - Run all benchmarks"
@@ -101,6 +102,11 @@ example-simple: check-plugin ## Run simple_host example
 example-streaming: check-plugin ## Run streaming_host example
 	@echo "$(BLUE)Running streaming_host example...$(NC)"
 	@cargo run --example streaming_host
+	@echo "$(GREEN)✓ Example complete!$(NC)"
+
+example-go-plugin: build-go-plugin-simple ## Run go_plugin_host example (tests Go plugin)
+	@echo "$(BLUE)Running go_plugin_host example...$(NC)"
+	@cargo run --example go_plugin_host
 	@echo "$(GREEN)✓ Example complete!$(NC)"
 
 examples: check-plugin ## Run all examples

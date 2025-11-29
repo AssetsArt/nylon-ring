@@ -165,6 +165,7 @@ func (p *Plugin) SendResult(sid uint64, status Status, data []byte) {
 	}
 
 	// Allocate C memory for data
+	// Always allocate at least 1 byte to avoid null pointer issues
 	var cData *C.char
 	var dataLen C.uint64_t
 
@@ -176,6 +177,14 @@ func (p *Plugin) SendResult(sid uint64, status Status, data []byte) {
 		C.memcpy(cDataPtr, unsafe.Pointer(&data[0]), C.size_t(len(data)))
 		cData = (*C.char)(cDataPtr)
 		dataLen = C.uint64_t(len(data))
+	} else {
+		// Allocate 1 byte for empty data to avoid null pointer
+		cDataPtr := C.malloc(1)
+		if cDataPtr == nil {
+			return
+		}
+		cData = (*C.char)(cDataPtr)
+		dataLen = 0
 	}
 
 	// Call host callback
@@ -191,9 +200,8 @@ func (p *Plugin) SendResult(sid uint64, status Status, data []byte) {
 	)
 
 	// Free the allocated memory after callback
-	if cData != nil {
-		C.free(unsafe.Pointer(cData))
-	}
+	// Note: We always allocate memory, so always free it
+	C.free(unsafe.Pointer(cData))
 }
 
 // convertCRequest converts a C request to a Go Request.
@@ -336,9 +344,24 @@ func nylon_ring_get_plugin_v1() *C.NrPluginInfo {
 	pluginName := C.CString(globalPlugin.name)
 	pluginVersion := C.CString(globalPlugin.version)
 
-	// Use the static vtable directly
+	// Allocate plugin info in C memory (required by CGO pinning rules)
+	pluginInfo := (*C.NrPluginInfo)(C.malloc(C.size_t(unsafe.Sizeof(C.NrPluginInfo{}))))
+	if pluginInfo == nil {
+		return nil
+	}
 
-	pluginInfo := C.NrPluginInfo{
+	// Allocate vtable in C memory
+	vtable := (*C.NrPluginVTable)(C.malloc(C.size_t(unsafe.Sizeof(C.NrPluginVTable{}))))
+	if vtable == nil {
+		C.free(unsafe.Pointer(pluginInfo))
+		return nil
+	}
+
+	// Copy vtable from static (which has function pointers)
+	*vtable = staticVTable
+
+	// Fill plugin info
+	*pluginInfo = C.NrPluginInfo{
 		abi_version: 1,
 		struct_size: C.uint32_t(unsafe.Sizeof(C.NrPluginInfo{})),
 		name: C.NrStr{
@@ -350,10 +373,10 @@ func nylon_ring_get_plugin_v1() *C.NrPluginInfo {
 			len: C.uint32_t(C.strlen(pluginVersion)),
 		},
 		plugin_ctx: nil,
-		vtable:     &staticVTable,
+		vtable:     vtable,
 	}
 
-	return &pluginInfo
+	return pluginInfo
 }
 
 func init() {

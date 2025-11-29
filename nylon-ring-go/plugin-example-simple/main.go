@@ -6,8 +6,9 @@ import (
 	"github.com/AssetsArt/nylon-ring/nylon-ring-go/sdk"
 )
 
-func main() {
-	// Create plugin
+func init() {
+	// Initialize plugin in package-level initialization
+	// This ensures it's set up before the plugin is loaded
 	plugin := sdk.NewPlugin("nylon-ring-go-plugin", "1.0.0")
 
 	// Set initialization function (optional)
@@ -23,7 +24,7 @@ func main() {
 
 	// Register unary handler
 	plugin.Handle("unary", func(req sdk.Request, payload []byte, callback func(sdk.Response)) {
-		// SDK automatically calls this in a goroutine, so you can do blocking work
+		// SDK automatically calls this in a goroutine
 		// Simulate work (DB call, network, etc.)
 		time.Sleep(2 * time.Second)
 
@@ -51,13 +52,19 @@ func main() {
 			})
 		}
 
-		// End stream
+		// End stream (use empty bytes, not nil)
 		callback(sdk.Response{
 			Status: sdk.StatusStreamEnd,
-			Data:   nil,
+			Data:   []byte{},
 		})
 	})
 
 	// Build and register plugin
 	sdk.BuildPlugin(plugin)
+}
+
+func main() {
+	// This is a plugin library, not a standalone program
+	// The main function is required but won't be called when loaded as a plugin
+	// Plugin initialization is done in the package-level init above
 }

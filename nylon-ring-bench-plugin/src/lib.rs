@@ -1,7 +1,5 @@
-use nylon_ring::{NrBytes, NrHostVTable, NrPluginInfo, NrPluginVTable, NrRequest, NrStatus, NrStr};
+use nylon_ring::{NrBytes, NrHostVTable, NrRequest, NrStatus};
 use std::ffi::c_void;
-use std::mem::size_of;
-use std::panic;
 use std::sync::OnceLock;
 
 struct HostHandle {
@@ -15,22 +13,19 @@ unsafe impl Sync for HostHandle {}
 
 static HOST_HANDLE: OnceLock<HostHandle> = OnceLock::new();
 
-extern "C" fn plugin_init(
+unsafe fn plugin_init(
     _plugin_ctx: *mut c_void,
     host_ctx: *mut c_void,
     host_vtable: *const NrHostVTable,
 ) -> NrStatus {
-    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        let handle = HostHandle {
-            ctx: host_ctx,
-            vtable: host_vtable,
-        };
-        if HOST_HANDLE.set(handle).is_err() {
-            return NrStatus::Err;
-        }
-        NrStatus::Ok
-    }));
-    result.unwrap_or(NrStatus::Err)
+    let handle = HostHandle {
+        ctx: host_ctx,
+        vtable: host_vtable,
+    };
+    if HOST_HANDLE.set(handle).is_err() {
+        return NrStatus::Err;
+    }
+    NrStatus::Ok
 }
 
 // Handlers
@@ -44,7 +39,7 @@ unsafe fn handle_stream(
         return NrStatus::Invalid;
     }
     let req_ref = &*req;
-    let path = match std::str::from_utf8(std::slice::from_raw_parts(
+    let _path = match std::str::from_utf8(std::slice::from_raw_parts(
         req_ref.path.ptr,
         req_ref.path.len as usize,
     )) {
@@ -110,10 +105,8 @@ unsafe fn handle_unary(
 
 use nylon_ring::define_plugin;
 
-extern "C" fn plugin_shutdown(_plugin_ctx: *mut c_void) {
-    let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        // No cleanup needed
-    }));
+unsafe fn plugin_shutdown(_plugin_ctx: *mut c_void) {
+    // No cleanup needed
 }
 
 define_plugin! {

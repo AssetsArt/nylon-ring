@@ -113,17 +113,17 @@ pub struct NrPluginVTable {
 #[macro_export]
 macro_rules! define_plugin {
     (
-        init: $init_fn:expr,
-        shutdown: $shutdown_fn:expr,
+        init: $init_fn:path,
+        shutdown: $shutdown_fn:path,
         entries: {
             $($entry_name:literal => $handler_fn:path),* $(,)?
         }
     ) => {
         // Static VTable
         static PLUGIN_VTABLE: $crate::NrPluginVTable = $crate::NrPluginVTable {
-            init: Some($init_fn),
+            init: Some(plugin_init_wrapper),
             handle: Some(plugin_handle_wrapper),
-            shutdown: Some($shutdown_fn),
+            shutdown: Some(plugin_shutdown_wrapper),
         };
 
         // Static Plugin Info
@@ -148,7 +148,29 @@ macro_rules! define_plugin {
             &PLUGIN_INFO
         }
 
-        // Dispatcher
+        // Wrappers
+        unsafe extern "C" fn plugin_init_wrapper(
+            plugin_ctx: *mut std::ffi::c_void,
+            host_ctx: *mut std::ffi::c_void,
+            host_vtable: *const $crate::NrHostVTable,
+        ) -> $crate::NrStatus {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                $init_fn(plugin_ctx, host_ctx, host_vtable)
+            }));
+            match result {
+                Ok(status) => status,
+                Err(_) => $crate::NrStatus::Err,
+            }
+        }
+
+        unsafe extern "C" fn plugin_shutdown_wrapper(
+            plugin_ctx: *mut std::ffi::c_void,
+        ) {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                $shutdown_fn(plugin_ctx)
+            }));
+        }
+
         unsafe extern "C" fn plugin_handle_wrapper(
             plugin_ctx: *mut std::ffi::c_void,
             entry: $crate::NrStr,
@@ -156,14 +178,20 @@ macro_rules! define_plugin {
             req: *const $crate::NrRequest,
             payload: $crate::NrBytes,
         ) -> $crate::NrStatus {
-            let entry_str = entry.as_str();
-            match entry_str {
-                $(
-                    $entry_name => {
-                        $handler_fn(plugin_ctx, sid, req, payload)
-                    }
-                )*
-                _ => $crate::NrStatus::Invalid,
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let entry_str = entry.as_str();
+                match entry_str {
+                    $(
+                        $entry_name => {
+                            $handler_fn(plugin_ctx, sid, req, payload)
+                        }
+                    )*
+                    _ => $crate::NrStatus::Invalid,
+                }
+            }));
+            match result {
+                Ok(status) => status,
+                Err(_) => $crate::NrStatus::Err,
             }
         }
     };

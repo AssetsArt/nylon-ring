@@ -1,10 +1,5 @@
-use nylon_ring::{
-    define_plugin, NrBytes, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrRequest,
-    NrStatus, NrStr,
-};
+use nylon_ring::{define_plugin, NrBytes, NrHostExt, NrHostVTable, NrRequest, NrStatus, NrStr};
 use std::ffi::c_void;
-use std::mem::size_of;
-use std::panic;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
@@ -21,39 +16,32 @@ unsafe impl Sync for HostHandle {}
 
 static HOST_HANDLE: OnceLock<HostHandle> = OnceLock::new();
 
-extern "C" fn plugin_init(
+unsafe fn plugin_init(
     _plugin_ctx: *mut c_void,
     host_ctx: *mut c_void,
     host_vtable: *const NrHostVTable,
 ) -> NrStatus {
-    // Panic-safe: catch any panics before they cross FFI boundary
-    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        // Get host extension using the helper function from host
-        // This is safer than accessing HostContext directly
-        let host_ext = unsafe {
-            if host_ctx.is_null() {
-                std::ptr::null()
-            } else {
-                // Use the helper function from nylon_ring_host crate
-                // Note: This requires linking against nylon_ring_host, which is fine for examples
-                // In production, plugins should use a different mechanism or the host should
-                // provide this function via a shared library
-                nylon_ring_host::NylonRingHost::get_host_ext(host_ctx)
-            }
-        };
+    // Get host extension using the helper function from host
+    // This is safer than accessing HostContext directly
+    let host_ext = if host_ctx.is_null() {
+        std::ptr::null()
+    } else {
+        // Use the helper function from nylon_ring_host crate
+        // Note: This requires linking against nylon_ring_host, which is fine for examples
+        // In production, plugins should use a different mechanism or the host should
+        // provide this function via a shared library
+        nylon_ring_host::NylonRingHost::get_host_ext(host_ctx)
+    };
 
-        let handle = HostHandle {
-            ctx: host_ctx,
-            vtable: host_vtable,
-            ext: host_ext,
-        };
-        if HOST_HANDLE.set(handle).is_err() {
-            return NrStatus::Err;
-        }
-        NrStatus::Ok
-    }));
-
-    result.unwrap_or(NrStatus::Err)
+    let handle = HostHandle {
+        ctx: host_ctx,
+        vtable: host_vtable,
+        ext: host_ext,
+    };
+    if HOST_HANDLE.set(handle).is_err() {
+        return NrStatus::Err;
+    }
+    NrStatus::Ok
 }
 
 // Handlers
@@ -229,11 +217,8 @@ unsafe fn handle_unary(
     NrStatus::Ok
 }
 
-extern "C" fn plugin_shutdown(_plugin_ctx: *mut c_void) {
-    // Panic-safe: catch any panics before they cross FFI boundary
-    let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        // Cleanup if needed
-    }));
+unsafe fn plugin_shutdown(_plugin_ctx: *mut c_void) {
+    // Cleanup if needed
 }
 
 define_plugin! {

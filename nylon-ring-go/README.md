@@ -11,7 +11,7 @@ The SDK provides a high-level API similar to Rust's `define_plugin!` macro:
 ```go
 package main
 
-import "github.com/nylon-ring/nylon-ring-go/sdk"
+import "github.com/AssetsArt/nylon-ring/nylon-ring-go/sdk"
 
 func main() {
 	plugin := sdk.NewPlugin("my-plugin", "1.0.0")

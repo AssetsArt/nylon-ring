@@ -3,7 +3,7 @@ package main
 import (
 	"time"
 
-	"github.com/nylon-ring/nylon-ring-go/sdk"
+	"github.com/AssetsArt/nylon-ring/nylon-ring-go/sdk"
 )
 
 func main() {

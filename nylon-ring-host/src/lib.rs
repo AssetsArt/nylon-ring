@@ -9,10 +9,11 @@ use nylon_ring::{
     NrBytes, NrHeader, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrRequest, NrStatus,
     NrStr,
 };
-use std::collections::HashMap;
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::panic;
 use std::sync::Arc;
+use std::{collections::HashMap, time::Instant};
 use tokio::sync::{mpsc, oneshot};
 
 type Result<T> = std::result::Result<T, NylonRingHostError>;
@@ -70,6 +71,12 @@ pub struct NylonRingHost {
 // Safety: The host is responsible for thread safety.
 unsafe impl Send for NylonRingHost {}
 unsafe impl Sync for NylonRingHost {}
+
+// Ultra-fast unary mode:
+thread_local! {
+    static CURRENT_UNARY_TX: Cell<*mut Option<oneshot::Sender<(NrStatus, Vec<u8>)>>> =
+        const { Cell::new(std::ptr::null_mut()) };
+}
 
 impl NylonRingHost {
     pub fn load(path: &str) -> Result<Self> {
@@ -142,8 +149,6 @@ impl NylonRingHost {
             host.plugin_ctx = info.plugin_ctx;
 
             // Initialize plugin
-            // Note: We pass host_ext as a pointer that plugins can optionally use
-            // For backward compatibility, plugins that don't need state can ignore it
             if let Some(init_fn) = plugin_vtable.init {
                 let status = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                     init_fn(
@@ -167,6 +172,9 @@ impl NylonRingHost {
     }
 
     /// Callback called from plugin (any thread)
+    /// - มี 2 path:
+    ///   1) ultra fast unary: ใช้ thread-local CURRENT_UNARY_TX
+    ///   2) ปกติ: ใช้ DashMap pending_requests
     /// This function is panic-safe and will not propagate panics across FFI boundary.
     unsafe extern "C" fn send_result_callback(
         host_ctx: *mut c_void,
@@ -174,24 +182,44 @@ impl NylonRingHost {
         status: NrStatus,
         payload: NrBytes,
     ) {
-        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if host_ctx.is_null() {
                 return;
             }
             let ctx = &*(host_ctx as *const HostContext);
 
-            // Take the entry out of the map so we own it.
+            // ── ultra fast unary path ──
+            let mut handled_fast = false;
+            CURRENT_UNARY_TX.with(|cell| {
+                let ptr = cell.get();
+                if !ptr.is_null() {
+                    // ptr: *mut Option<Sender<_>>
+                    let slot: &mut Option<oneshot::Sender<(NrStatus, Vec<u8>)>> =
+                        unsafe { &mut *ptr };
+
+                    if let Some(tx) = slot.take() {
+                        let data = payload.as_slice().to_vec();
+                        let _ = tx.send((status, data));
+                        ctx.state_per_sid.remove(&sid);
+                        handled_fast = true;
+                    }
+                }
+            });
+
+            if handled_fast {
+                return;
+            }
+
+            // ── ปกติ: ใช้ DashMap pending_requests ──
             let should_clear_state = if let Some((_, entry)) = ctx.pending_requests.remove(&sid) {
                 let data = payload.as_slice().to_vec();
                 match entry {
                     Pending::Unary(tx) => {
-                        // Unary: send result and always clear state when done
                         let _ = tx.send((status, data));
                         true
                     }
                     Pending::Stream(tx) => {
                         let _ = tx.send(StreamFrame { status, data });
-                        // If the status indicates the stream is finished, clear state
                         let is_finished = matches!(
                             status,
                             NrStatus::Err
@@ -209,13 +237,11 @@ impl NylonRingHost {
                 false
             };
 
-            // Clear state if request is finished
             if should_clear_state {
                 ctx.state_per_sid.remove(&sid);
             }
         }));
 
-        // Ignore panics - we don't want to propagate them across FFI boundary
         let _ = result;
     }
 
@@ -278,6 +304,7 @@ impl NylonRingHost {
     }
 
     /// Unary RPC: plugin should call send_result exactly once for this sid.
+    /// ใช้ DashMap + oneshot → safety & support async
     pub async fn call(&self, entry: &str, req: HighLevelRequest) -> Result<(NrStatus, Vec<u8>)> {
         let sid = self
             .next_sid
@@ -414,8 +441,9 @@ impl NylonRingHost {
     }
 
     /// Raw RPC: plugin should call send_result exactly once for this sid.
-    /// This bypasses the NrRequest structure and sends raw bytes.
+    /// ใช้ DashMap + oneshot (ปลอดภัย รองรับ async/thread)
     pub async fn call_raw(&self, entry: &str, payload: &[u8]) -> Result<(NrStatus, Vec<u8>)> {
+        let _now = Instant::now();
         let sid = self
             .next_sid
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -457,9 +485,64 @@ impl NylonRingHost {
         rx.await.map_err(|_| NylonRingHostError::OneshotClosed)
     }
 
+    /// Ultra-fast unary raw call:
+    pub async fn call_raw_unary_fast(
+        &self,
+        entry: &str,
+        payload: &[u8],
+    ) -> Result<(NrStatus, Vec<u8>)> {
+        let sid = self
+            .next_sid
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Sender/Receiver ปกติ
+        let (tx, rx) = oneshot::channel::<(NrStatus, Vec<u8>)>();
+
+        // เก็บ Sender ไว้ใน Option เพื่อให้ callback มา .take() ไปใช้
+        let mut tx_slot: Option<oneshot::Sender<(NrStatus, Vec<u8>)>> = Some(tx);
+
+        CURRENT_UNARY_TX.with(|cell| {
+            debug_assert!(
+                cell.get().is_null(),
+                "CURRENT_UNARY_TX already in use on this thread"
+            );
+            cell.set(&mut tx_slot as *mut _);
+        });
+
+        let payload_bytes = NrBytes::from_slice(payload);
+
+        let handle_raw_fn = match self.plugin_vtable.handle_raw {
+            Some(f) => f,
+            None => {
+                CURRENT_UNARY_TX.with(|cell| cell.set(std::ptr::null_mut()));
+                return Err(NylonRingHostError::MissingRequiredFunctions);
+            }
+        };
+
+        let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            handle_raw_fn(self.plugin_ctx, NrStr::from_str(entry), sid, payload_bytes)
+        }));
+
+        // เคลียร์ thread-local ให้แน่ใจว่าไม่ค้าง
+        CURRENT_UNARY_TX.with(|cell| cell.set(std::ptr::null_mut()));
+
+        let status = match status {
+            Ok(s) => s,
+            Err(_) => {
+                return Err(NylonRingHostError::PluginHandleFailed(NrStatus::Err));
+            }
+        };
+
+        if status != NrStatus::Ok {
+            return Err(NylonRingHostError::PluginHandleFailed(status));
+        }
+
+        // ตอนนี้ plugin น่าจะเรียก send_result ไปแล้ว → rx จะ ready
+        let (st, data) = rx.await.map_err(|_| NylonRingHostError::OneshotClosed)?;
+        Ok((st, data))
+    }
+
     /// Get host extension pointer from host_ctx.
-    /// Plugins can use this to access state management functions.
-    /// Returns null pointer if host_ext is not available.
     pub unsafe fn get_host_ext(host_ctx: *mut c_void) -> *const NrHostExt {
         if host_ctx.is_null() {
             return std::ptr::null();

@@ -22,6 +22,8 @@ fn get_plugin_path() -> PathBuf {
     path
 }
 
+fn echo_inproc() {}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     // -----------------------------
@@ -52,7 +54,7 @@ async fn main() {
         .map(|n| n.get())
         .unwrap_or(8);
 
-    let estimated_rps_per_thread = 1_200_000usize;
+    let estimated_rps_per_thread = 1_300_000usize;
     let iters_per_thread = estimated_rps_per_thread * duration_secs;
 
     println!(
@@ -78,9 +80,12 @@ async fn main() {
             let mut local_count = 0usize;
 
             for _ in 0..iters {
+                // let now = Instant::now();
                 if let Ok(_) = host.call_raw("echo", payload).await {
                     local_count += 1;
                 }
+                // println!("roundtrip: {:?}", now.elapsed());
+                // break;
             }
 
             counter.fetch_add(local_count, Ordering::Relaxed);

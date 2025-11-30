@@ -117,6 +117,11 @@ pub struct NrPluginVTable {
     >,
 
     pub shutdown: Option<unsafe extern "C" fn(plugin_ctx: *mut c_void)>,
+
+    pub stream_data:
+        Option<unsafe extern "C" fn(plugin_ctx: *mut c_void, sid: u64, data: NrBytes) -> NrStatus>,
+
+    pub stream_close: Option<unsafe extern "C" fn(plugin_ctx: *mut c_void, sid: u64) -> NrStatus>,
 }
 
 #[macro_export]
@@ -130,6 +135,10 @@ macro_rules! define_plugin {
         $(, raw_entries: {
             $($raw_entry_name:literal => $raw_handler_fn:path),* $(,)?
         })?
+        $(, stream_handlers: {
+            data: $stream_data_fn:path,
+            close: $stream_close_fn:path $(,)?
+        })?
     ) => {
         // Static VTable
         static PLUGIN_VTABLE: $crate::NrPluginVTable = $crate::NrPluginVTable {
@@ -137,6 +146,8 @@ macro_rules! define_plugin {
             handle: Some(plugin_handle_wrapper),
             handle_raw: Some(plugin_handle_raw_wrapper),
             shutdown: Some(plugin_shutdown_wrapper),
+            stream_data: Some(plugin_stream_data_wrapper),
+            stream_close: Some(plugin_stream_close_wrapper),
         };
 
         // Static Plugin Info
@@ -224,6 +235,41 @@ macro_rules! define_plugin {
                     )*)?
                     _ => $crate::NrStatus::Invalid,
                 }
+            }));
+            match result {
+                Ok(status) => status,
+                Err(_) => $crate::NrStatus::Err,
+            }
+        }
+
+        unsafe extern "C" fn plugin_stream_data_wrapper(
+            plugin_ctx: *mut std::ffi::c_void,
+            sid: u64,
+            data: $crate::NrBytes,
+        ) -> $crate::NrStatus {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                $(
+                    return $stream_data_fn(plugin_ctx, sid, data);
+                )?
+                #[allow(unreachable_code)]
+                $crate::NrStatus::Unsupported
+            }));
+            match result {
+                Ok(status) => status,
+                Err(_) => $crate::NrStatus::Err,
+            }
+        }
+
+        unsafe extern "C" fn plugin_stream_close_wrapper(
+            plugin_ctx: *mut std::ffi::c_void,
+            sid: u64,
+        ) -> $crate::NrStatus {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                $(
+                    return $stream_close_fn(plugin_ctx, sid);
+                )?
+                #[allow(unreachable_code)]
+                $crate::NrStatus::Unsupported
             }));
             match result {
                 Ok(status) => status,

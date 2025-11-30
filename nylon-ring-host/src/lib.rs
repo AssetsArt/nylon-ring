@@ -379,7 +379,11 @@ impl NylonRingHost {
     /// The stream closes when plugin sends one of:
     /// - NrStatus::StreamEnd
     /// - NrStatus::Err / Invalid / Unsupported
-    pub async fn call_stream(&self, entry: &str, req: HighLevelRequest) -> Result<StreamReceiver> {
+    pub async fn call_stream(
+        &self,
+        entry: &str,
+        req: HighLevelRequest,
+    ) -> Result<(u64, StreamReceiver)> {
         let sid = self
             .next_sid
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -442,7 +446,7 @@ impl NylonRingHost {
             return Err(NylonRingHostError::PluginHandleFailed(status));
         }
 
-        Ok(rx)
+        Ok((sid, rx))
     }
 
     /// Raw RPC: plugin should call send_result exactly once for this sid.
@@ -545,6 +549,43 @@ impl NylonRingHost {
         // ตอนนี้ plugin น่าจะเรียก send_result ไปแล้ว → rx จะ ready
         let (st, data) = rx.await.map_err(|_| NylonRingHostError::OneshotClosed)?;
         Ok((st, data))
+    }
+
+    /// Send data to an active stream (bidirectional streaming).
+    /// The plugin must have implemented `stream_data` handler.
+    pub fn send_stream_data(&self, sid: u64, data: &[u8]) -> Result<NrStatus> {
+        let stream_data_fn = match self.plugin_vtable.stream_data {
+            Some(f) => f,
+            None => return Err(NylonRingHostError::MissingRequiredFunctions),
+        };
+
+        let payload = NrBytes::from_slice(data);
+        let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            stream_data_fn(self.plugin_ctx, sid, payload)
+        }));
+
+        match status {
+            Ok(s) => Ok(s),
+            Err(_) => Err(NylonRingHostError::PluginHandleFailed(NrStatus::Err)),
+        }
+    }
+
+    /// Close an active stream from the host side.
+    /// The plugin must have implemented `stream_close` handler.
+    pub fn close_stream(&self, sid: u64) -> Result<NrStatus> {
+        let stream_close_fn = match self.plugin_vtable.stream_close {
+            Some(f) => f,
+            None => return Err(NylonRingHostError::MissingRequiredFunctions),
+        };
+
+        let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            stream_close_fn(self.plugin_ctx, sid)
+        }));
+
+        match status {
+            Ok(s) => Ok(s),
+            Err(_) => Err(NylonRingHostError::PluginHandleFailed(NrStatus::Err)),
+        }
     }
 
     /// Get host extension pointer from host_ctx.

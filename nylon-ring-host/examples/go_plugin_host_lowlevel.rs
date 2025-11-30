@@ -79,7 +79,7 @@ async fn main() -> Result<(), NylonRingHostError> {
     };
 
     println!("Starting streaming request...");
-    let mut rx = host.call_stream("stream", req).await?;
+    let (_sid, mut rx) = host.call_stream("stream", req).await?;
 
     println!("Receiving stream frames:");
     let mut frame_count = 0;
@@ -105,4 +105,3 @@ async fn main() -> Result<(), NylonRingHostError> {
     println!("\n✓ All tests completed successfully!");
     Ok(())
 }
-

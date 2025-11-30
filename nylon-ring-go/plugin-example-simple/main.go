@@ -65,6 +65,25 @@ func init() {
 		})
 	})
 
+	// Register bidirectional stream handlers
+	plugin.HandleStream(
+		// Handle data from host
+		func(data []byte, callback func(sdk.Response)) {
+			msg := "Echo: " + string(data)
+			callback(sdk.Response{
+				Status: sdk.StatusOk,
+				Data:   []byte(msg),
+			})
+		},
+		// Handle stream close from host
+		func(callback func(sdk.Response)) {
+			callback(sdk.Response{
+				Status: sdk.StatusStreamEnd,
+				Data:   []byte("Stream closed by host"),
+			})
+		},
+	)
+
 	// Build and register plugin
 	sdk.BuildPlugin(plugin)
 }

@@ -63,15 +63,27 @@ type Handler func(req Request, payload []byte, callback func(Response))
 // RawHandler is a function that handles a raw request (no metadata).
 type RawHandler func(payload []byte, callback func(Response))
 
+// StreamHandler is a function that handles stream data.
+type StreamHandler func(data []byte, callback func(Response))
+
+// StreamCloseHandler is a function that handles stream close.
+type StreamCloseHandler func(callback func(Response))
+
+type streamHandlers struct {
+	data  StreamHandler
+	close StreamCloseHandler
+}
+
 // Plugin represents a nylon-ring plugin.
 type Plugin struct {
-	name         string
-	version      string
-	handlers     map[string]Handler
-	syncHandlers map[string]Handler
-	rawHandlers  map[string]RawHandler
-	initFn       func() error
-	shutdownFn   func()
+	name           string
+	version        string
+	handlers       map[string]Handler
+	syncHandlers   map[string]Handler
+	rawHandlers    map[string]RawHandler
+	streamHandlers *streamHandlers
+	initFn         func() error
+	shutdownFn     func()
 
 	// Internal state
 	hostCtx    unsafe.Pointer
@@ -118,6 +130,14 @@ func (p *Plugin) HandleSync(entry string, handler Handler) {
 // The handler will be executed in a goroutine.
 func (p *Plugin) HandleRaw(entry string, handler RawHandler) {
 	p.rawHandlers[entry] = handler
+}
+
+// HandleStream registers handlers for bidirectional streaming.
+func (p *Plugin) HandleStream(dataHandler StreamHandler, closeHandler StreamCloseHandler) {
+	p.streamHandlers = &streamHandlers{
+		data:  dataHandler,
+		close: closeHandler,
+	}
 }
 
 // SendResult sends a result back to the host.
@@ -230,6 +250,50 @@ func (p *Plugin) handleRawRequest(entry string, payload []byte, callback func(St
 	}()
 
 	handler(payload, func(resp Response) {
+		callback(resp.Status, resp.Data)
+	})
+
+	return nil
+}
+
+func (p *Plugin) handleStreamData(sid uint64, data []byte, callback func(Status, []byte)) error {
+	p.mu.RLock()
+	handlers := p.streamHandlers
+	p.mu.RUnlock()
+
+	if handlers == nil || handlers.data == nil {
+		return &PluginError{msg: "stream data handler not found"}
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			callback(StatusErr, []byte("plugin panic"))
+		}
+	}()
+
+	handlers.data(data, func(resp Response) {
+		callback(resp.Status, resp.Data)
+	})
+
+	return nil
+}
+
+func (p *Plugin) handleStreamClose(sid uint64, callback func(Status, []byte)) error {
+	p.mu.RLock()
+	handlers := p.streamHandlers
+	p.mu.RUnlock()
+
+	if handlers == nil || handlers.close == nil {
+		return &PluginError{msg: "stream close handler not found"}
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			callback(StatusErr, []byte("plugin panic"))
+		}
+	}()
+
+	handlers.close(func(resp Response) {
 		callback(resp.Status, resp.Data)
 	})
 

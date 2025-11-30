@@ -55,6 +55,8 @@ typedef struct {
 	NrStatus (*handle)(void* plugin_ctx, NrStr entry, uint64_t sid, NrRequest* req, NrBytes payload);
 	NrStatus (*handle_raw)(void* plugin_ctx, NrStr entry, uint64_t sid, NrBytes payload);
 	void (*shutdown)(void* plugin_ctx);
+	NrStatus (*stream_data)(void* plugin_ctx, uint64_t sid, NrBytes data);
+	NrStatus (*stream_close)(void* plugin_ctx, uint64_t sid);
 } NrPluginVTable;
 
 typedef struct {
@@ -78,6 +80,8 @@ extern NrStatus go_plugin_init(void* plugin_ctx, void* host_ctx, NrHostVTable* h
 extern NrStatus go_plugin_handle(void* plugin_ctx, NrStr entry, uint64_t sid, NrRequest* req, NrBytes payload);
 extern NrStatus go_plugin_handle_raw(void* plugin_ctx, NrStr entry, uint64_t sid, NrBytes payload);
 extern void go_plugin_shutdown(void* plugin_ctx);
+extern NrStatus go_plugin_stream_data(void* plugin_ctx, uint64_t sid, NrBytes data);
+extern NrStatus go_plugin_stream_close(void* plugin_ctx, uint64_t sid);
 */
 import "C"
 import (
@@ -90,10 +94,12 @@ var staticVTable C.NrPluginVTable
 func init() {
 	// Initialize static vtable with function pointers to Go exported functions
 	staticVTable = C.NrPluginVTable{
-		init:       (*[0]byte)(C.go_plugin_init),
-		handle:     (*[0]byte)(C.go_plugin_handle),
-		handle_raw: (*[0]byte)(C.go_plugin_handle_raw),
-		shutdown:   (*[0]byte)(C.go_plugin_shutdown),
+		init:         (*[0]byte)(C.go_plugin_init),
+		handle:       (*[0]byte)(C.go_plugin_handle),
+		handle_raw:   (*[0]byte)(C.go_plugin_handle_raw),
+		shutdown:     (*[0]byte)(C.go_plugin_shutdown),
+		stream_data:  (*[0]byte)(C.go_plugin_stream_data),
+		stream_close: (*[0]byte)(C.go_plugin_stream_close),
 	}
 }
 
@@ -181,6 +187,46 @@ func go_plugin_shutdown(pluginCtx unsafe.Pointer) {
 	if globalPlugin != nil {
 		globalPlugin.callShutdown()
 	}
+}
+
+//export go_plugin_stream_data
+func go_plugin_stream_data(pluginCtx unsafe.Pointer, sid uint64, data C.NrBytes) C.NrStatus {
+	if globalPlugin == nil {
+		return C.NR_STATUS_ERR
+	}
+
+	// Convert payload
+	var dataBytes []byte
+	if data.ptr != nil && data.len > 0 {
+		dataBytes = C.GoBytes(data.ptr, C.int(data.len))
+	}
+
+	err := globalPlugin.handleStreamData(sid, dataBytes, func(status Status, respData []byte) {
+		sendResultToHost(sid, status, respData)
+	})
+
+	if err != nil {
+		return C.NR_STATUS_UNSUPPORTED
+	}
+
+	return C.NR_STATUS_OK
+}
+
+//export go_plugin_stream_close
+func go_plugin_stream_close(pluginCtx unsafe.Pointer, sid uint64) C.NrStatus {
+	if globalPlugin == nil {
+		return C.NR_STATUS_ERR
+	}
+
+	err := globalPlugin.handleStreamClose(sid, func(status Status, respData []byte) {
+		sendResultToHost(sid, status, respData)
+	})
+
+	if err != nil {
+		return C.NR_STATUS_UNSUPPORTED
+	}
+
+	return C.NR_STATUS_OK
 }
 
 //export nylon_ring_get_plugin_v1

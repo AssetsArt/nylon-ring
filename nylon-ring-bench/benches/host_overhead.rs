@@ -122,9 +122,9 @@ fn bench_host_call_overhead(c: &mut Criterion) {
                     extensions: Extensions::new(),
                 };
 
-                let mut stream = host.call_stream("stream", req).await.unwrap();
+                let (_sid, mut rx) = host.call_stream("stream", req).await.unwrap();
                 // Consume all frames
-                while let Some(_frame) = stream.recv().await {
+                while let Some(_frame) = rx.recv().await {
                     // Consume frame
                 }
             });
@@ -216,10 +216,8 @@ fn bench_go_host_call_overhead(c: &mut Criterion) {
                     extensions: Extensions::new(),
                 };
 
-                let mut stream = host.call_stream("stream", req).await.unwrap();
-                while let Some(_frame) = stream.recv().await {
-                    // Consume frame
-                }
+                let (_sid, mut rx) = host.call_stream("stream", req).await.unwrap();
+                while let Some(_) = rx.recv().await {}
             });
         });
     });

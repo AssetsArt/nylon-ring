@@ -10,8 +10,8 @@
 
 - ✅ **Cross-language plugins**: Rust, Go, C, C++, Zig
 - ✅ **Non-blocking by default**: Async-first design with Tokio
-- ✅ **Dual communication modes**: Unary (request/response) + Streaming (WebSocket-style)
-- ✅ **High performance**: ~7M calls/sec (single-core), ~14.65M calls/sec (multi-core)
+- ✅ **Dual communication modes**: Unary (request/response) + Streaming (WebSocket-style) + Bidirectional
+- ✅ **High performance**: ~7M calls/sec (single-core), ~14.65M calls/sec (multi-core), ~3.7M calls/sec (bidirectional)
 - ✅ **ABI stability**: All types use C ABI (`#[repr(C)]`)
 - ✅ **Production-ready**: Panic-safe FFI, comprehensive error handling
 
@@ -109,7 +109,27 @@ sequenceDiagram
     Plugin->>Host: send_result(sid, Ok, frame2)
     Plugin->>Host: send_result(sid, Ok, frame3)
     Plugin->>Host: send_result(sid, StreamEnd, empty)
+    Plugin->>Host: send_result(sid, StreamEnd, empty)
     Host->>Host: Close stream receiver
+```
+
+#### Bidirectional (Full Duplex)
+
+```mermaid
+sequenceDiagram
+    participant Host
+    participant Plugin
+    
+    Host->>Plugin: handle(entry, sid, req)
+    Plugin-->>Host: return Ok
+    
+    par Host to Plugin
+        Host->>Plugin: send_stream_data(sid, data)
+        Host->>Plugin: close_stream(sid)
+    and Plugin to Host
+        Plugin->>Host: send_result(sid, Ok, frame)
+        Plugin->>Host: send_result(sid, StreamEnd, empty)
+    end
 ```
 
 ---
@@ -278,6 +298,21 @@ pub struct NrPluginVTable {
     pub shutdown: Option<
         unsafe extern "C" fn(plugin_ctx: *mut c_void)
     >,
+
+    pub stream_data: Option<
+        unsafe extern "C" fn(
+            plugin_ctx: *mut c_void,
+            sid: u64,
+            data: NrBytes
+        ) -> NrStatus
+    >,
+
+    pub stream_close: Option<
+        unsafe extern "C" fn(
+            plugin_ctx: *mut c_void,
+            sid: u64
+        ) -> NrStatus
+    >,
 }
 ```
 
@@ -370,6 +405,17 @@ impl NylonRingHost {
         entry: &str,
         payload: &[u8]
     ) -> Result<(NrStatus, Vec<u8>), NylonRingHostError>;
+    pub async fn call_raw(
+        &self,
+        entry: &str,
+        payload: &[u8]
+    ) -> Result<(NrStatus, Vec<u8>), NylonRingHostError>;
+
+    // Send data to active stream
+    pub fn send_stream_data(&self, sid: u64, data: &[u8]) -> Result<NrStatus, NylonRingHostError>;
+
+    // Close active stream
+    pub fn close_stream(&self, sid: u64) -> Result<NrStatus, NylonRingHostError>;
 }
 ```
 
@@ -560,6 +606,10 @@ define_plugin! {
     entries: {
         "unary" => handle_unary,
     },
+    stream_handlers: {
+        data: handle_stream_data,
+        close: handle_stream_close,
+    },
 }
 ```
 
@@ -638,7 +688,29 @@ unsafe fn handle_stream(
 **Streaming rules**:
 - Send multiple frames with `NrStatus::Ok`
 - Final frame must be `NrStatus::StreamEnd`
+- Final frame must be `NrStatus::StreamEnd`
 - Host closes stream on `StreamEnd`/`Err`/`Invalid`/`Unsupported`
+
+### 4.5 Bidirectional Handlers
+
+```rust
+unsafe fn handle_stream_data(
+    _plugin_ctx: *mut c_void,
+    sid: u64,
+    data: NrBytes,
+) -> NrStatus {
+    // Handle data from host
+    NrStatus::Ok
+}
+
+unsafe fn handle_stream_close(
+    _plugin_ctx: *mut c_void,
+    sid: u64,
+) -> NrStatus {
+    // Handle close signal
+    NrStatus::Ok
+}
+```
 
 ---
 

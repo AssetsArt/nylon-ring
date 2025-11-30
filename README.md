@@ -43,6 +43,7 @@
 **⚡ Dual Communication Mode**
 - **Unary**: Simple request/response
 - **Streaming**: WebSocket-style multi-frame
+- **Bidirectional**: Full duplex communication
 
 **🔧 Flexible Design**
 - Blocking and non-blocking plugins
@@ -109,6 +110,8 @@ make example-simple           # Rust plugin - unary
 make example-streaming        # Rust plugin - streaming
 make example-go-plugin        # Go plugin with SDK
 make example-go-plugin-lowlevel  # Go plugin (low-level)
+make example-bidirectional       # Rust plugin - bidirectional
+make example-bidirectional-go    # Go plugin - bidirectional
 ```
 
 ### Run Tests
@@ -320,6 +323,12 @@ while let Some(frame) = stream.recv().await {
         break;
     }
 }
+
+// Send data back to plugin (Bidirectional)
+host.send_stream_data(sid, b"Hello Plugin")?;
+
+// Close stream from host
+host.close_stream(sid)?;
 ```
 
 ### Raw Call (Bypass NrRequest)
@@ -415,6 +424,7 @@ Full round-trip performance (host → plugin → host callback):
 | **Raw unary** | ~0.16 µs | **~6.31M calls/sec** | Bypass NrRequest |
 | **Fast raw unary** | ~0.14 µs | **~7.14M calls/sec** | Thread-local optimization (see below) |
 | **Streaming** | ~0.83 µs | **~1.20M calls/sec** | All frames consumed |
+| **Bidirectional** | N/A | **~3.73M calls/sec** | Full duplex stress test |
 | **Build request** | ~216 ns | N/A | `HighLevelRequest` creation |
 
 **Overhead sources:**
@@ -462,6 +472,7 @@ For most use cases, prefer the standard paths (`call`, `call_raw`) which support
 |------|------------|----------------|-------|
 | **Standard** (`call_raw`) | **~11.16M req/sec** | 111.6M requests | Good scaling |
 | **Fast path** (`call_raw_unary_fast`) | **~14.65M req/sec** | 146.5M requests | **+31.2% faster** |
+| **Bidirectional** | **~3.73M req/sec** | 37.3M requests | Complex flow |
 
 **📊 Scaling efficiency**: Nearly **2x** throughput per core vs single-core benchmarks, indicating excellent parallel processing with minimal contention.
 

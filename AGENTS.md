@@ -543,7 +543,7 @@ The overhead is dominated by:
 * Concurrent map operations (`DashMap` - fine-grained locking)
 * Plugin's own work
 
-**Scaling**: With multiple cores handling requests, ideal throughput scales linearly. On M1 Pro 10-core, measured throughput reaches **~10M req/s** in a stress test scenario.
+**Scaling**: With multiple cores handling requests, ideal throughput scales linearly. On M1 Pro 10-core, measured throughput reaches **~10.1M req/s** in a standard stress test and **~12.8M req/s** in a fast unary stress test.
 
 ### Benchmark Expectations
 

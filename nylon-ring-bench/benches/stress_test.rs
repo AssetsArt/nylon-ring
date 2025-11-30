@@ -106,4 +106,50 @@ async fn main() {
     println!("Completed {} calls in {:.2?}", total, elapsed);
     println!("Throughput: {:.2} calls/sec", rps);
     println!("Per-thread avg: {:.2} calls/sec", rps / concurrency as f64);
+
+    // Test fast unary path
+    println!(
+        "\n\nStarting NylonRing fast unary stress test: {} threads × {} iterations each...",
+        concurrency, iters_per_thread
+    );
+    let total_requests = Arc::new(AtomicUsize::new(0));
+    let start_time = Instant::now();
+
+    let mut handles = Vec::with_capacity(concurrency);
+
+    for _ in 0..concurrency {
+        let host = host.clone();
+        let counter = total_requests.clone();
+        let iters = iters_per_thread;
+
+        handles.push(tokio::spawn(async move {
+            let payload: &'static [u8] = b"bench";
+            let mut local_count = 0usize;
+
+            for _ in 0..iters {
+                // let now = Instant::now();
+                if let Ok(_) = host.call_raw_unary_fast("echo", payload).await {
+                    local_count += 1;
+                }
+                // println!("roundtrip: {:?}", now.elapsed());
+                // break;
+            }
+
+            counter.fetch_add(local_count, Ordering::Relaxed);
+        }));
+    }
+
+    // Wait all workers
+    for h in handles {
+        let _ = h.await;
+    }
+
+    let elapsed = start_time.elapsed();
+    let total = total_requests.load(Ordering::Relaxed);
+    let rps = total as f64 / elapsed.as_secs_f64();
+
+    println!("--------------------------------------------");
+    println!("Completed {} calls in {:.2?}", total, elapsed);
+    println!("Throughput: {:.2} calls/sec", rps);
+    println!("Per-thread avg: {:.2} calls/sec", rps / concurrency as f64);
 }

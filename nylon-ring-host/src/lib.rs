@@ -9,6 +9,7 @@ use nylon_ring::{
     NrBytes, NrHeader, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrRequest, NrStatus,
     NrStr,
 };
+use rustc_hash::FxBuildHasher;
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::panic;
@@ -50,10 +51,14 @@ pub type StreamReceiver = mpsc::UnboundedReceiver<StreamFrame>;
 
 // Note: This struct must match the layout expected by plugins.
 // Plugins access host_ext field directly, so we need #[repr(C)] for ABI compatibility.
+// Type aliases using FxBuildHasher for faster integer-key hashing
+type FastPendingMap = DashMap<u64, Pending, FxBuildHasher>;
+type FastStateMap = DashMap<u64, HashMap<String, Vec<u8>>, FxBuildHasher>;
+
 #[repr(C)]
 struct HostContext {
-    pending_requests: DashMap<u64, Pending>,
-    state_per_sid: DashMap<u64, HashMap<String, Vec<u8>>>,
+    pending_requests: FastPendingMap,
+    state_per_sid: FastStateMap,
     host_ext: *const NrHostExt, // Pointer to host extension (stable address)
 }
 
@@ -112,8 +117,8 @@ impl NylonRingHost {
             }
 
             let host_ctx = Arc::new(HostContext {
-                pending_requests: DashMap::new(),
-                state_per_sid: DashMap::new(),
+                pending_requests: FastPendingMap::with_hasher(FxBuildHasher::default()),
+                state_per_sid: FastStateMap::with_hasher(FxBuildHasher::default()),
                 host_ext: std::ptr::null(), // Will be set after creating host_ext
             });
 

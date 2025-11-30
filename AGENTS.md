@@ -545,7 +545,11 @@ The overhead is dominated by:
 * Concurrent map operations (`DashMap` - fine-grained locking)
 * Plugin's own work
 
-**Scaling**: With multiple cores handling requests, ideal throughput scales linearly. On M1 Pro 10-core, measured throughput reaches **~10.1M req/s** in a standard stress test and **~12.8M req/s** in a fast unary stress test.
+**Multi-Core Scaling**: With 10 cores handling requests in batch pipeline mode (optimized with MiMalloc allocator), measured throughput reaches:
+* **Standard path** (`call_raw`): **~11.16M req/sec** (111.6M requests in 10s)
+* **Fast path** (`call_raw_unary_fast`): **~14.65M req/sec** (146.5M requests in 10s, +31.2% faster)
+
+This demonstrates excellent parallel scaling - nearly **2x** throughput per core compared to single-core benchmarks, indicating very efficient concurrent processing with minimal contention.
 
 ### Benchmark Expectations
 

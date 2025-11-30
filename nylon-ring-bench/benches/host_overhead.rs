@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use nylon_ring_host::{Extensions, HighLevelRequest, NylonRingHost};
 use std::env;
+use std::hint::black_box;
 use std::path::PathBuf;
 
 fn get_plugin_path() -> PathBuf {

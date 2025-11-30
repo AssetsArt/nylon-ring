@@ -1,5 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use nylon_ring::{NrBytes, NrHeader, NrRequest, NrStr};
+use std::hint::black_box;
 
 fn bench_nrstr_from_str(c: &mut Criterion) {
     let test_string = "Hello, World! This is a test string for benchmarking.";

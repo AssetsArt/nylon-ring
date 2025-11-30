@@ -242,6 +242,41 @@ unsafe fn handle_raw_echo(_plugin_ctx: *mut c_void, sid: u64, payload: NrBytes) 
     NrStatus::Ok
 }
 
+unsafe fn handle_stream_data(_plugin_ctx: *mut c_void, sid: u64, data: NrBytes) -> NrStatus {
+    let data_str = match std::str::from_utf8(data.as_slice()) {
+        Ok(s) => s,
+        Err(_) => return NrStatus::Invalid,
+    };
+
+    // Echo back with "Echo: " prefix
+    let msg = format!("Echo: {}", data_str);
+
+    if let Some(host) = HOST_HANDLE.get() {
+        let send_result = (*host.vtable).send_result;
+        send_result(
+            host.ctx,
+            sid,
+            NrStatus::Ok,
+            NrBytes::from_slice(msg.as_bytes()),
+        );
+    }
+
+    NrStatus::Ok
+}
+
+unsafe fn handle_stream_close(_plugin_ctx: *mut c_void, sid: u64) -> NrStatus {
+    if let Some(host) = HOST_HANDLE.get() {
+        let send_result = (*host.vtable).send_result;
+        send_result(
+            host.ctx,
+            sid,
+            NrStatus::StreamEnd,
+            NrBytes::from_slice(b"Stream closed by host"),
+        );
+    }
+    NrStatus::Ok
+}
+
 define_plugin! {
     init: plugin_init,
     shutdown: plugin_shutdown,
@@ -252,5 +287,9 @@ define_plugin! {
     },
     raw_entries: {
         "echo" => handle_raw_echo,
+    },
+    stream_handlers: {
+        data: handle_stream_data,
+        close: handle_stream_close,
     }
 }

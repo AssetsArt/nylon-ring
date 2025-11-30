@@ -65,10 +65,14 @@ async fn main() {
     println!("\n>>> Running Test 2: Fast Unary call_raw_unary_fast...");
     let rps_fast = run_benchmark(concurrency, host.clone(), BenchmarkMode::FastUnary).await;
 
+    println!("\n>>> Running Test 3: Bidirectional Streaming...");
+    let rps_bidi = run_benchmark(concurrency, host.clone(), BenchmarkMode::Bidirectional).await;
+
     println!("\n========================================================");
     println!("FINAL RESULTS");
     println!("Standard Path : {:>12.2} req/sec", rps_standard);
     println!("Fast Path     : {:>12.2} req/sec", rps_fast);
+    println!("Bidirectional : {:>12.2} req/sec", rps_bidi);
 
     let diff = rps_fast - rps_standard;
     let pct = (diff / rps_standard) * 100.0;
@@ -85,6 +89,7 @@ async fn main() {
 enum BenchmarkMode {
     Standard,
     FastUnary,
+    Bidirectional,
 }
 
 async fn run_benchmark(concurrency: usize, host: Arc<NylonRingHost>, mode: BenchmarkMode) -> f64 {
@@ -127,6 +132,44 @@ async fn run_benchmark(concurrency: usize, host: Arc<NylonRingHost>, mode: Bench
                         }
                         let _ = join_all(futures_batch.drain(..)).await;
                         counter.fetch_add(BATCH_SIZE as u64, Ordering::Relaxed);
+                    }
+                }
+                BenchmarkMode::Bidirectional => {
+                    // For bidirectional, we don't use batching in the same way because it's stateful
+                    // We'll spawn a stream and send messages
+                    use nylon_ring_host::{Extensions, HighLevelRequest};
+
+                    while start_time.elapsed() < bench_duration {
+                        let req = HighLevelRequest {
+                            method: "GET".to_string(),
+                            path: "/stream".to_string(),
+                            query: "".to_string(),
+                            headers: vec![],
+                            body: vec![],
+                            extensions: Extensions::new(),
+                        };
+
+                        if let Ok((sid, mut rx)) = host.call_stream("bidi_stream", req).await {
+                            // Receive initial frames
+                            let mut count = 0;
+                            while let Some(_) = rx.recv().await {
+                                count += 1;
+                                if count >= 5 {
+                                    break;
+                                }
+                            }
+
+                            // Send data
+                            let _ = host.send_stream_data(sid, payload);
+
+                            // Close
+                            let _ = host.close_stream(sid);
+
+                            // Wait for end
+                            while let Some(_) = rx.recv().await {}
+
+                            counter.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 }
             }

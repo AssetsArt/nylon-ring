@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 nylon-ring = { path = "../nylon-ring" }
 tokio = { version = "1.0", features = ["full"] }
-libloading = "0.8"
-thiserror = "1.0"
+libloading = "0.9"
+thiserror = "2"
 log = "0.4"
-dashmap = "5.5"
+dashmap = "6.1"

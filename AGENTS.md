@@ -5,7 +5,7 @@
 `nylon-ring` is a **host–plugin interface** standard designed for:
 
 * **ABI-stable** (uses C ABI → works with Rust, Go, C, Zig)
-* **Non-blocking** (plugin must not block thread; must callback host when done)
+* **Flexible** (supports both blocking and non-blocking plugins)
 * **Cross-language** (connects Rust host ↔ Rust/Go plugin seamlessly)
 * **Zero-serialization enforcement** (payload is bytes; you choose JSON, rkyv, FlatBuffers, Cap'nProto)
 * **Safe for high-QPS workloads** (designed for Nylon/Pingora)
@@ -37,9 +37,10 @@ Uses C ABI:
 Goal: Make plugins "external modules" that can:
 
 * Read request metadata
-* Work async/background
+* Read request metadata
+* Work async/background (optional)
 * Send results via callback
-* Never block the host
+* Can block if needed (but discouraged for high-throughput)
 
 ---
 
@@ -79,11 +80,10 @@ Goal: Make plugins "external modules" that can:
 
 **Note**: The `entry` parameter allows plugins to support multiple entry points. The host calls `host.call("entry_name", req)` or `host.call_stream("entry_name", req)` to route to specific handlers.
 
-### Non-blocking guarantee:
-
-* Host never blocks worker thread.
-* Plugin is required to copy what it needs and return immediately.
-* Real work must be done in background threads/tasks.
+### Blocking vs Non-blocking:
+* Host never blocks worker thread by default.
+* Plugin CAN block if it needs to, but for high performance, it should spawn background tasks.
+* Go SDK provides `HandleSync` for blocking handlers and `Handle` for non-blocking (goroutine) handlers.
 
 ---
 
@@ -214,14 +214,11 @@ pub struct NrPluginVTable {
 
 ### Contract (CRITICAL):
 
-### **`handle()` MUST NOT BLOCK**
-
+### **`handle()`**
 Plugin must:
-
 1. Copy all required data out of `req` & `payload`.
-2. Return `NR_STATUS_OK` immediately.
-3. Spawn background work.
-4. When done → call `host_vtable.send_result(...)`.
+2. Do work (sync or async).
+3. Call `host_vtable.send_result(...)`.
    - For unary: call once with final status.
    - For streaming: call multiple times with `Ok`, then once with `StreamEnd`.
 
@@ -490,6 +487,11 @@ func init() {
 		// SDK automatically calls this in a goroutine - you can do blocking work
 		callback(sdk.Response{Status: sdk.StatusOk, Data: []byte("OK")})
 	})
+
+    // Use HandleSync for very fast, non-blocking operations (runs on host thread)
+    plugin.HandleSync("fast", func(req sdk.Request, payload []byte, callback func(sdk.Response)) {
+        callback(sdk.Response{Status: sdk.StatusOk, Data: []byte("FAST")})
+    })
 	
 	sdk.BuildPlugin(plugin)
 }

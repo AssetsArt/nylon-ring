@@ -23,11 +23,8 @@ func init() {
 	})
 
 	// Register unary handler
-	plugin.Handle("unary", func(req sdk.Request, payload []byte, callback func(sdk.Response)) {
-		// SDK automatically calls this in a goroutine
-		// Simulate work (DB call, network, etc.)
-		time.Sleep(2 * time.Second)
-
+	// Use HandleSync for fast, non-blocking operations
+	plugin.HandleSync("unary", func(req sdk.Request, payload []byte, callback func(sdk.Response)) {
 		// Prepare response
 		response := "OK: " + req.Method + " " + req.Path
 

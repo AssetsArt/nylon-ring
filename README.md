@@ -1,11 +1,11 @@
 # Nylon Ring
 
-**Nylon Ring** is an ABI-stable, non-blocking host–plugin interface designed for high-performance systems. It allows plugins written in Rust (and potentially other languages like C, C++, Zig, Go) to communicate with a host application without blocking the host's execution threads.
+**Nylon Ring** is an ABI-stable host–plugin interface designed for high-performance systems. It allows plugins written in Rust (and potentially other languages like C, C++, Zig, Go) to communicate with a host application.
 
 ## Features
 
 * **ABI-Stable**: All data structures use C ABI (`#[repr(C)]`), ensuring compatibility across language boundaries
-* **Non-Blocking**: Plugins must return immediately; actual work happens in background tasks
+* **Flexible**: Supports both blocking and non-blocking plugins
 * **Cross-Language**: Works with Rust, Go, C, Zig, and more
 * **High Performance**: Designed for high-throughput, low-latency workloads
 * **Dual Mode**: Supports both unary (request/response) and streaming (WebSocket-style) communication
@@ -16,7 +16,7 @@
 The system relies on a few key concepts:
 
 1. **ABI Stability**: All data structures exchanged between host and plugin are `#[repr(C)]`.
-2. **Non-Blocking**: The plugin's `handle` function must return immediately. Actual work is done in the background.
+2. **Flexibility**: Plugins can choose to be blocking (simple) or non-blocking (high performance).
 3. **Callback Mechanism**: The plugin reports results back to the host via a `send_result` callback, using a request ID (`sid`).
 4. **Streaming Support**: Plugins can send multiple frames for a single request, enabling WebSocket-style communication.
 
@@ -207,6 +207,11 @@ func init() {
 		time.Sleep(2 * time.Second)
 		callback(sdk.Response{Status: sdk.StatusOk, Data: []byte("OK")})
 	})
+
+    // Use HandleSync for very fast, non-blocking operations (runs on host thread)
+    plugin.HandleSync("fast", func(req sdk.Request, payload []byte, callback func(sdk.Response)) {
+        callback(sdk.Response{Status: sdk.StatusOk, Data: []byte("FAST")})
+    })
 	
 	plugin.Handle("stream", func(req sdk.Request, payload []byte, callback func(sdk.Response)) {
 		for i := 1; i <= 5; i++ {
@@ -455,7 +460,7 @@ if let Some(metadata) = req.extensions.get::<MyMetadata>() {
 
 ## Key Constraints
 
-* **Plugin `handle()` must return immediately** - no blocking operations
+* **Plugin `handle()` can block** - but for high performance, use background tasks
 * **All ABI types are `#[repr(C)]`** - do not modify their layout
 * **Host owns request data** - plugin must copy if needed
 * **Thread-safe callbacks** - `send_result` can be called from any thread

@@ -413,7 +413,7 @@ Full round-trip performance (host → plugin → host callback):
 | **Unary call** | ~0.43 µs | **~2.32M calls/sec** | Single core |
 | **Unary + 1KB body** | ~0.49 µs | **~2.05M calls/sec** | Body size has minimal impact |
 | **Raw unary** | ~0.16 µs | **~6.31M calls/sec** | Bypass NrRequest |
-| **Fast raw unary** | ~0.14 µs | **~7.14M calls/sec** | Thread-local optimization ⚠️ No async/Thread support |
+| **Fast raw unary** | ~0.14 µs | **~7.14M calls/sec** | Thread-local optimization (see below) |
 | **Streaming** | ~0.83 µs | **~1.20M calls/sec** | All frames consumed |
 | **Build request** | ~216 ns | N/A | `HighLevelRequest` creation |
 
@@ -425,28 +425,86 @@ Full round-trip performance (host → plugin → host callback):
 
 ---
 
+### ⚡ Fast Unary Path
+
+The **fast raw unary** path (`call_raw_unary_fast`) is an optimized code path that achieves the highest throughput by making specific trade-offs:
+
+**✅ Advantages:**
+- **Highest performance**: ~7.14M calls/sec (single-core)
+- Thread-local optimization reduces contention
+- Minimal overhead (no request parsing)
+
+**⚠️ Constraints:**
+- **Plugin handler must be synchronous** — cannot use `async`/`.await`
+- **No thread spawning** — cannot use `thread::spawn()` or task executors
+- **Must complete immediately** — all work done in the calling thread
+- Use only for CPU-bound, non-blocking operations (<1µs)
+
+**When to use:**
+- Simple transformations (echo, hash, encode/decode)
+- Stateless operations
+- Hot path optimizations
+
+**When NOT to use:**
+- I/O operations (file, network, database)
+- Long-running computations
+- Operations requiring background tasks
+
+For most use cases, prefer the standard paths (`call`, `call_raw`) which support async and threading.
+
+---
+
 ### 🔥 Multi-Core Scaling
 
-**10-core batch pipeline** (with MiMalloc allocator):
+**Stress test results** (10-core Apple M1 Pro, 10-second run):
 
-| Path | Throughput | Total (10s) | Notes |
-|------|------------|-------------|-------|
+| Path | Throughput | Total Requests | Notes |
+|------|------------|----------------|-------|
 | **Standard** (`call_raw`) | **~11.16M req/sec** | 111.6M requests | Good scaling |
 | **Fast path** (`call_raw_unary_fast`) | **~14.65M req/sec** | 146.5M requests | **+31.2% faster** |
 
-**📊 Scaling efficiency**: Nearly **2x** throughput per core vs single-threaded, indicating excellent parallel processing with minimal contention.
+**📊 Scaling efficiency**: Nearly **2x** throughput per core vs single-core benchmarks, indicating excellent parallel processing with minimal contention.
+
+> **Note**: These tests use a custom allocator (MiMalloc) and batch processing for maximum throughput. See [Benchmark Methodology](#-benchmark-methodology) below.
 
 ---
+
+### 📊 Benchmark Methodology
+
+We use two types of benchmarks to measure different aspects of performance:
+
+#### Micro-Benchmarks (Criterion.rs)
+
+Measure isolated component performance with statistical rigor:
+
+- **ABI types**: `NrStr`, `NrBytes`, `NrHeader`, `NrRequest` construction and access (~0.35–2.5 ns)
+- **Host overhead**: Full round-trip including FFI, async scheduling, and callbacks (~0.14–0.83 µs)
+- **Method**: Criterion.rs with warmup, multiple iterations, outlier detection
+- **Environment**: Single-threaded, minimal external load
+- **Use case**: Validate that ABI layer adds negligible overhead
+
+#### Stress Tests (Multi-Core)
+
+Measure aggregate throughput under sustained load:
+
+- **Setup**: 10 worker threads, each making continuous requests for 10 seconds
+- **Measurement**: Total requests completed / elapsed time
+- **Allocator**: MiMalloc for reduced allocation contention (optional optimization)
+- **Environment**: Multi-core, batch processing, realistic concurrency
+- **Use case**: Validate scaling efficiency and find maximum sustainable throughput
+
+**Key difference**: Micro-benchmarks measure latency per operation; stress tests measure aggregate throughput.
 
 ### 🧪 Run Benchmarks
 
 ```bash
-make benchmark              # All benchmarks
-make benchmark-abi         # ABI types only
-make benchmark-host        # Host overhead (requires plugin)
+make benchmark              # All benchmarks (micro + stress)
+make benchmark-abi         # ABI types only (micro)
+make benchmark-host        # Host overhead (micro)
+make stress-test           # Multi-core stress test
 ```
 
-> ⚠️ **Note**: Results are hardware-dependent. Your mileage may vary based on CPU, clock speed, and system load.
+> ⚠️ **Note**: Results are hardware-dependent. Your mileage may vary based on CPU architecture, clock speed, core count, and system load.
 
 ---
 

@@ -22,8 +22,6 @@ fn get_plugin_path() -> PathBuf {
     path
 }
 
-fn echo_inproc() {}
-
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     // -----------------------------

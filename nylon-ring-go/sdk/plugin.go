@@ -223,18 +223,15 @@ func (p *Plugin) handleRawRequest(entry string, payload []byte, callback func(St
 		return &PluginError{msg: "handler not found"}
 	}
 
-	// Call handler in goroutine
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				callback(StatusErr, []byte("plugin panic"))
-			}
-		}()
-
-		handler(payload, func(resp Response) {
-			callback(resp.Status, resp.Data)
-		})
+	defer func() {
+		if r := recover(); r != nil {
+			callback(StatusErr, []byte("plugin panic"))
+		}
 	}()
+
+	handler(payload, func(resp Response) {
+		callback(resp.Status, resp.Data)
+	})
 
 	return nil
 }

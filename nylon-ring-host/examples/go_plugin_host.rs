@@ -75,7 +75,7 @@ async fn main() -> Result<(), NylonRingHostError> {
         .await
         .expect("call_raw failed");
 
-    println!("\n=== Raw Call Response ===");
+    println!("=== Raw Call Response ===");
     println!("Status: {:?}", status);
     println!("Payload: {}", String::from_utf8_lossy(&response));
 

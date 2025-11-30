@@ -47,23 +47,21 @@ unsafe fn handle_stream(
         Err(_) => return NrStatus::Invalid,
     };
 
-    rayon::spawn(move || {
-        if let Some(host) = HOST_HANDLE.get() {
-            let send_result = (*host.vtable).send_result;
+    if let Some(host) = HOST_HANDLE.get() {
+        let send_result = (*host.vtable).send_result;
 
-            for i in 1..=5 {
-                let msg = format!("Frame {}", i);
-                send_result(
-                    host.ctx,
-                    sid,
-                    NrStatus::Ok,
-                    NrBytes::from_slice(msg.as_bytes()),
-                );
-            }
-            // End stream
-            send_result(host.ctx, sid, NrStatus::StreamEnd, NrBytes::from_slice(&[]));
+        for i in 1..=5 {
+            let msg = format!("Frame {}", i);
+            send_result(
+                host.ctx,
+                sid,
+                NrStatus::Ok,
+                NrBytes::from_slice(msg.as_bytes()),
+            );
         }
-    });
+        // End stream
+        send_result(host.ctx, sid, NrStatus::StreamEnd, NrBytes::from_slice(&[]));
+    }
 
     NrStatus::Ok
 }
@@ -86,19 +84,17 @@ unsafe fn handle_unary(
         Err(_) => return NrStatus::Invalid,
     };
 
-    rayon::spawn(move || {
-        if let Some(host) = HOST_HANDLE.get() {
-            let send_result = (*host.vtable).send_result;
-            let response_string = format!("OK: {}", path);
-            let response_bytes = response_string.as_bytes();
-            send_result(
-                host.ctx,
-                sid,
-                NrStatus::Ok,
-                NrBytes::from_slice(response_bytes),
-            );
-        }
-    });
+    if let Some(host) = HOST_HANDLE.get() {
+        let send_result = (*host.vtable).send_result;
+        let response_string = format!("OK: {}", path);
+        let response_bytes = response_string.as_bytes();
+        send_result(
+            host.ctx,
+            sid,
+            NrStatus::Ok,
+            NrBytes::from_slice(response_bytes),
+        );
+    }
 
     NrStatus::Ok
 }

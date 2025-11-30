@@ -332,7 +332,6 @@ name = "nylon-ring-bench-plugin"
 version = "0.1.0"
 dependencies = [
  "nylon-ring",
- "rayon",
 ]
 
 [[package]]

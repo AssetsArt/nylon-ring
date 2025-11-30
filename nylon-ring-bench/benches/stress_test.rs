@@ -1,12 +1,18 @@
+// stress_test.rs
+
+// 1. Setup Allocator: MiMalloc (Requires 'mimalloc' crate)
 #[cfg(not(debug_assertions))]
+#[cfg(not(target_os = "windows"))]
 use mimalloc::MiMalloc;
 
 #[cfg(not(debug_assertions))]
+#[cfg(not(target_os = "windows"))]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
 use futures::future::join_all;
-use nylon_ring_host::NylonRingHost;
+// Ensure these items are exported from your nylon_ring_host lib
+use nylon_ring_host::{Extensions, HighLevelRequest, NylonRingHost};
 use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +21,7 @@ use std::time::{Duration, Instant};
 
 // --- CONFIGURATION ---
 const DURATION_SECS: u64 = 10;
+// BATCH_SIZE: used for Unary/Standard tests to create pipelining without spawn overhead
 const BATCH_SIZE: usize = 130;
 
 fn get_plugin_path() -> PathBuf {
@@ -37,7 +44,10 @@ fn get_plugin_path() -> PathBuf {
 async fn main() {
     let plugin_path = get_plugin_path();
     if !plugin_path.exists() {
-        eprintln!("Plugin not found at {:?}.", plugin_path);
+        eprintln!(
+            "Plugin not found at {:?}. Please build the bench plugin first.",
+            plugin_path
+        );
         return;
     }
     println!("Loading plugin: {:?}", plugin_path);
@@ -55,8 +65,13 @@ async fn main() {
     println!("Threads (Workers)    : {}", concurrency);
     println!("Batch Size (Pipeline): {}", BATCH_SIZE);
     println!("Duration             : {} seconds", DURATION_SECS);
+
+    #[cfg(not(debug_assertions))]
     #[cfg(not(target_os = "windows"))]
     println!("Allocator            : MiMalloc (Optimized)");
+    #[cfg(debug_assertions)]
+    println!("Allocator            : System (Debug Mode)");
+
     println!("========================================================\n");
 
     println!(">>> Running Test 1: Standard call_raw (Normal Path)...");
@@ -65,7 +80,7 @@ async fn main() {
     println!("\n>>> Running Test 2: Fast Unary call_raw_unary_fast...");
     let rps_fast = run_benchmark(concurrency, host.clone(), BenchmarkMode::FastUnary).await;
 
-    println!("\n>>> Running Test 3: Bidirectional Streaming...");
+    println!("\n>>> Running Test 3: Bidirectional Streaming (5 frames + 1 echo)...");
     let rps_bidi = run_benchmark(concurrency, host.clone(), BenchmarkMode::Bidirectional).await;
 
     println!("\n========================================================");
@@ -78,9 +93,9 @@ async fn main() {
     let pct = (diff / rps_standard) * 100.0;
 
     if pct > 0.0 {
-        println!("Improvement   : \x1b[32m+{:.2}%\x1b[0m", pct);
+        println!("Improvement (Fast vs Std) : \x1b[32m+{:.2}%\x1b[0m", pct);
     } else {
-        println!("Difference    : {:.2}%", pct);
+        println!("Difference (Fast vs Std)  : {:.2}%", pct);
     }
     println!("========================================================");
 }
@@ -105,13 +120,13 @@ async fn run_benchmark(concurrency: usize, host: Arc<NylonRingHost>, mode: Bench
         handles.push(tokio::spawn(async move {
             let payload: &'static [u8] = b"bench";
 
+            // Wait for signal
             start_signal.notified().await;
 
             let start_time = Instant::now();
             let bench_duration = Duration::from_secs(DURATION_SECS);
 
-            // แยก Loop ออกจากกันชัดเจน เพื่อให้ Compiler สร้าง Type ของ Vector แยกกัน
-            // แบบนี้จะไม่ติด error mismatched types และได้ performance สูงสุด
+            // แยก Loop เพื่อประสิทธิภาพสูงสุดและ Type checking
             match mode {
                 BenchmarkMode::FastUnary => {
                     let mut futures_batch = Vec::with_capacity(BATCH_SIZE);
@@ -119,7 +134,6 @@ async fn run_benchmark(concurrency: usize, host: Arc<NylonRingHost>, mode: Bench
                         for _ in 0..BATCH_SIZE {
                             futures_batch.push(host.call_raw_unary_fast("echo", payload));
                         }
-                        // join_all จะรอจนครบ batch นี้
                         let _ = join_all(futures_batch.drain(..)).await;
                         counter.fetch_add(BATCH_SIZE as u64, Ordering::Relaxed);
                     }
@@ -135,9 +149,8 @@ async fn run_benchmark(concurrency: usize, host: Arc<NylonRingHost>, mode: Bench
                     }
                 }
                 BenchmarkMode::Bidirectional => {
-                    // For bidirectional, we don't use batching in the same way because it's stateful
-                    // We'll spawn a stream and send messages
-                    use nylon_ring_host::{Extensions, HighLevelRequest};
+                    // Streaming ต้องมีการ maintain state ต่อ request จึงไม่ใช้ Batching แบบ Unary
+                    // เราวัดจำนวน "Session ที่จบสมบูรณ์" (Completed Flows)
 
                     while start_time.elapsed() < bench_duration {
                         let req = HighLevelRequest {
@@ -149,25 +162,28 @@ async fn run_benchmark(concurrency: usize, host: Arc<NylonRingHost>, mode: Bench
                             extensions: Extensions::new(),
                         };
 
+                        // 1. Open Stream
                         if let Ok((sid, mut rx)) = host.call_stream("bidi_stream", req).await {
-                            // Receive initial frames
+                            // 2. Consume Initial Greeting/Data (e.g., up to 5 frames)
                             let mut count = 0;
                             while let Some(_) = rx.recv().await {
                                 count += 1;
+                                // สมมติว่า Plugin ส่งมา 5 frames แรกแล้วรอ input เรา
                                 if count >= 5 {
                                     break;
                                 }
                             }
 
-                            // Send data
+                            // 3. Send Data back to Plugin (Bidirectional)
                             let _ = host.send_stream_data(sid, payload);
 
-                            // Close
+                            // 4. Close Stream (Explicitly)
                             let _ = host.close_stream(sid);
 
-                            // Wait for end
+                            // 5. Drain remaining frames (if any)
                             while let Some(_) = rx.recv().await {}
 
+                            // Count as 1 completed transaction
                             counter.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -176,6 +192,7 @@ async fn run_benchmark(concurrency: usize, host: Arc<NylonRingHost>, mode: Bench
         }));
     }
 
+    // Warmup / Sync time
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let start_time = Instant::now();

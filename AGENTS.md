@@ -11,7 +11,7 @@
 - ✅ **Cross-language plugins**: Rust, Go, C, C++, Zig
 - ✅ **Non-blocking by default**: Async-first design with Tokio
 - ✅ **Dual communication modes**: Unary (request/response) + Streaming (WebSocket-style) + Bidirectional
-- ✅ **High performance**: ~7M calls/sec (single-core), ~14.65M calls/sec (multi-core), ~3.7M calls/sec (bidirectional)
+- ✅ **High performance**: ~7M calls/sec (single-core), ~14.65M calls/sec (multi-core), ~4.55M calls/sec (bidirectional)
 - ✅ **ABI stability**: All types use C ABI (`#[repr(C)]`)
 - ✅ **Production-ready**: Panic-safe FFI, comprehensive error handling
 
@@ -973,6 +973,7 @@ pub enum NylonRingHostError {
 | Benchmark | Latency | Throughput (single-core) | Notes |
 |-----------|---------|--------------------------|-------|
 | Standard unary | ~0.43 µs | ~2.32M req/sec | Default path |
+| Bidirectional | N/A | **~4.55M calls/sec** | 5 frames + 1 echo |
 | Unary + 1KB body | ~0.49 µs | ~2.05M req/sec | Body size minimal impact |
 | Raw unary | ~0.16 µs | ~6.31M req/sec | Skip NrRequest parsing |
 | Fast raw unary | ~0.14 µs | ~7.14M req/sec | Thread-local optimization |
@@ -991,6 +992,7 @@ pub enum NylonRingHostError {
 |------|----------------------|------------------------|-------|
 | Standard (`call_raw`) | **~11.16M req/sec** | ~1.77x | Good scaling |
 | Fast path (`call_raw_unary_fast`) | **~14.65M req/sec** | ~2.05x | Excellent scaling |
+| Bidirectional | **~4.55M req/sec** | N/A | 5 frames + 1 echo |
 
 **Key insight**: Nearly **2x** scaling efficiency indicates minimal contention with `DashMap`.
 

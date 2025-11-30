@@ -424,7 +424,7 @@ Full round-trip performance (host → plugin → host callback):
 | **Raw unary** | ~0.16 µs | **~6.31M calls/sec** | Bypass NrRequest |
 | **Fast raw unary** | ~0.14 µs | **~7.14M calls/sec** | Thread-local optimization (see below) |
 | **Streaming** | ~0.83 µs | **~1.20M calls/sec** | All frames consumed |
-| **Bidirectional** | N/A | **~3.73M calls/sec** | Full duplex stress test |
+| **Bidirectional** | N/A | **~4.55M calls/sec** | 5 frames + 1 echo |
 | **Build request** | ~216 ns | N/A | `HighLevelRequest` creation |
 
 **Overhead sources:**
@@ -472,7 +472,7 @@ For most use cases, prefer the standard paths (`call`, `call_raw`) which support
 |------|------------|----------------|-------|
 | **Standard** (`call_raw`) | **~11.16M req/sec** | 111.6M requests | Good scaling |
 | **Fast path** (`call_raw_unary_fast`) | **~14.65M req/sec** | 146.5M requests | **+31.2% faster** |
-| **Bidirectional** | **~3.73M req/sec** | 37.3M requests | Complex flow |
+| **Bidirectional** | **~4.55M req/sec** | 45.5M requests | 5 frames + 1 echo |
 
 **📊 Scaling efficiency**: Nearly **2x** throughput per core vs single-core benchmarks, indicating excellent parallel processing with minimal contention.
 

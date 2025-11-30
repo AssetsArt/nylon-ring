@@ -53,6 +53,7 @@ typedef struct {
 typedef struct {
 	NrStatus (*init)(void* plugin_ctx, void* host_ctx, NrHostVTable* host_vtable);
 	NrStatus (*handle)(void* plugin_ctx, NrStr entry, uint64_t sid, NrRequest* req, NrBytes payload);
+	NrStatus (*handle_raw)(void* plugin_ctx, NrStr entry, uint64_t sid, NrBytes payload);
 	void (*shutdown)(void* plugin_ctx);
 } NrPluginVTable;
 
@@ -75,6 +76,7 @@ static void call_send_result(NrHostVTable* vtable, void* host_ctx, uint64_t sid,
 // Forward declarations for Go exported functions
 extern NrStatus go_plugin_init(void* plugin_ctx, void* host_ctx, NrHostVTable* host_vtable);
 extern NrStatus go_plugin_handle(void* plugin_ctx, NrStr entry, uint64_t sid, NrRequest* req, NrBytes payload);
+extern NrStatus go_plugin_handle_raw(void* plugin_ctx, NrStr entry, uint64_t sid, NrBytes payload);
 extern void go_plugin_shutdown(void* plugin_ctx);
 */
 import "C"
@@ -88,9 +90,10 @@ var staticVTable C.NrPluginVTable
 func init() {
 	// Initialize static vtable with function pointers to Go exported functions
 	staticVTable = C.NrPluginVTable{
-		init:     (*[0]byte)(C.go_plugin_init),
-		handle:   (*[0]byte)(C.go_plugin_handle),
-		shutdown: (*[0]byte)(C.go_plugin_shutdown),
+		init:       (*[0]byte)(C.go_plugin_init),
+		handle:     (*[0]byte)(C.go_plugin_handle),
+		handle_raw: (*[0]byte)(C.go_plugin_handle_raw),
+		shutdown:   (*[0]byte)(C.go_plugin_shutdown),
 	}
 }
 
@@ -142,6 +145,32 @@ func go_plugin_handle(pluginCtx unsafe.Pointer, entry C.NrStr, sid uint64, req *
 
 	if err != nil {
 		return C.NR_STATUS_INVALID // Or appropriate error
+	}
+
+	return C.NR_STATUS_OK
+}
+
+//export go_plugin_handle_raw
+func go_plugin_handle_raw(pluginCtx unsafe.Pointer, entry C.NrStr, sid uint64, payload C.NrBytes) C.NrStatus {
+	if globalPlugin == nil {
+		return C.NR_STATUS_ERR
+	}
+
+	entryStr := cStrToString(entry)
+
+	// Convert payload
+	var payloadBytes []byte
+	if payload.ptr != nil && payload.len > 0 {
+		payloadBytes = C.GoBytes(payload.ptr, C.int(payload.len))
+	}
+
+	// Call plugin handler
+	err := globalPlugin.handleRawRequest(entryStr, payloadBytes, func(status Status, data []byte) {
+		sendResultToHost(sid, status, data)
+	})
+
+	if err != nil {
+		return C.NR_STATUS_INVALID
 	}
 
 	return C.NR_STATUS_OK

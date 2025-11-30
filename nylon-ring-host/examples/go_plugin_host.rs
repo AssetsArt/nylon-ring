@@ -11,7 +11,7 @@ async fn main() -> Result<(), NylonRingHostError> {
     plugin_path.pop(); // Go up to workspace root
     plugin_path.push("target");
     plugin_path.push("go");
-    
+
     // Try different extensions based on platform
     let extensions = if cfg!(target_os = "macos") {
         vec!["dylib", "so"]
@@ -20,7 +20,7 @@ async fn main() -> Result<(), NylonRingHostError> {
     } else {
         vec!["dll", "so"]
     };
-    
+
     let mut found = false;
     for ext in &extensions {
         let mut test_path = plugin_path.clone();
@@ -31,7 +31,7 @@ async fn main() -> Result<(), NylonRingHostError> {
             break;
         }
     }
-    
+
     if !found {
         // Fallback: try with first extension
         plugin_path.push(format!("nylon_ring_go_plugin_simple.{}", extensions[0]));
@@ -45,7 +45,7 @@ async fn main() -> Result<(), NylonRingHostError> {
             plugin_path
         ))
     })?;
-    
+
     let host = NylonRingHost::load(plugin_path_str)?;
     println!("✓ Go plugin loaded successfully!");
 
@@ -66,6 +66,18 @@ async fn main() -> Result<(), NylonRingHostError> {
     println!("Response received!");
     println!("Status: {:?}", status);
     println!("Payload: {}", String::from_utf8_lossy(&payload));
+
+    // Test raw call
+    println!("\n=== Testing Raw Call ===");
+    let payload = b"Hello, Go Raw World!";
+    let (status, response) = host
+        .call_raw("echo", payload)
+        .await
+        .expect("call_raw failed");
+
+    println!("\n=== Raw Call Response ===");
+    println!("Status: {:?}", status);
+    println!("Payload: {}", String::from_utf8_lossy(&response));
 
     // Test streaming call
     println!("\n=== Testing Streaming Call ===");
@@ -105,4 +117,3 @@ async fn main() -> Result<(), NylonRingHostError> {
     println!("\n✓ All tests completed successfully!");
     Ok(())
 }
-

@@ -60,12 +60,16 @@ type Response struct {
 // Results should be sent via the callback function.
 type Handler func(req Request, payload []byte, callback func(Response))
 
+// RawHandler is a function that handles a raw request (no metadata).
+type RawHandler func(payload []byte, callback func(Response))
+
 // Plugin represents a nylon-ring plugin.
 type Plugin struct {
 	name         string
 	version      string
 	handlers     map[string]Handler
 	syncHandlers map[string]Handler
+	rawHandlers  map[string]RawHandler
 	initFn       func() error
 	shutdownFn   func()
 
@@ -83,6 +87,7 @@ func NewPlugin(name, version string) *Plugin {
 		version:      version,
 		handlers:     make(map[string]Handler),
 		syncHandlers: make(map[string]Handler),
+		rawHandlers:  make(map[string]RawHandler),
 	}
 }
 
@@ -107,6 +112,12 @@ func (p *Plugin) Handle(entry string, handler Handler) {
 // Use this for very fast handlers to avoid goroutine overhead.
 func (p *Plugin) HandleSync(entry string, handler Handler) {
 	p.syncHandlers[entry] = handler
+}
+
+// HandleRaw registers a raw handler for the given entry name.
+// The handler will be executed in a goroutine.
+func (p *Plugin) HandleRaw(entry string, handler RawHandler) {
+	p.rawHandlers[entry] = handler
 }
 
 // SendResult sends a result back to the host.
@@ -196,6 +207,31 @@ func (p *Plugin) handleRequest(entry string, req *Request, payload []byte, callb
 
 		// Pass by value to handler as per API
 		handler(*req, payload, func(resp Response) {
+			callback(resp.Status, resp.Data)
+		})
+	}()
+
+	return nil
+}
+
+func (p *Plugin) handleRawRequest(entry string, payload []byte, callback func(Status, []byte)) error {
+	p.mu.RLock()
+	handler, ok := p.rawHandlers[entry]
+	p.mu.RUnlock()
+
+	if !ok {
+		return &PluginError{msg: "handler not found"}
+	}
+
+	// Call handler in goroutine
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callback(StatusErr, []byte("plugin panic"))
+			}
+		}()
+
+		handler(payload, func(resp Response) {
 			callback(resp.Status, resp.Data)
 		})
 	}()

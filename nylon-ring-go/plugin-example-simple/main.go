@@ -56,6 +56,15 @@ func init() {
 		})
 	})
 
+	// Register raw handler
+	plugin.HandleRaw("echo", func(payload []byte, callback func(sdk.Response)) {
+		// Echo back the payload
+		callback(sdk.Response{
+			Status: sdk.StatusOk,
+			Data:   payload,
+		})
+	})
+
 	// Build and register plugin
 	sdk.BuildPlugin(plugin)
 }

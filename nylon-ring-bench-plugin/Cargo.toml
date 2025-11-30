@@ -8,3 +8,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 nylon-ring = { path = "../nylon-ring" }
+rayon = "1.11.0"

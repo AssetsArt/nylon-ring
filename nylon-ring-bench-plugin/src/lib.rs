@@ -47,7 +47,7 @@ unsafe fn handle_stream(
         Err(_) => return NrStatus::Invalid,
     };
 
-    std::thread::spawn(move || {
+    rayon::spawn(move || {
         if let Some(host) = HOST_HANDLE.get() {
             let send_result = (*host.vtable).send_result;
 
@@ -86,7 +86,7 @@ unsafe fn handle_unary(
         Err(_) => return NrStatus::Invalid,
     };
 
-    std::thread::spawn(move || {
+    rayon::spawn(move || {
         if let Some(host) = HOST_HANDLE.get() {
             let send_result = (*host.vtable).send_result;
             let response_string = format!("OK: {}", path);

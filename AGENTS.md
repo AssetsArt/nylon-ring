@@ -543,13 +543,12 @@ The overhead is dominated by:
 * Concurrent map operations (`DashMap` - fine-grained locking)
 * Plugin's own work
 
-**Scaling**: With multiple cores handling requests, ideal throughput scales linearly. On M1 Pro 10-core, measured throughput reaches **~9.2M req/s** in a stress test scenario.
+**Scaling**: With multiple cores handling requests, ideal throughput scales linearly. On M1 Pro 10-core, measured throughput reaches **~9.8M req/s** in a stress test scenario.
 
 ### Benchmark Expectations
 
 Under proper usage:
 
-* High throughput sustained (62–67k req/s per core)
 * Near-zero overhead passing borrowed strings (ABI layer: 0.5–3 ns)
 * No async work inside handle
 * Plugin callback ≈ O(1)
@@ -784,7 +783,7 @@ The workspace contains:
 
 **nylon-ring** is an ABI-level interface for high-performance proxy systems like Nylon/Pingora that require:
 
-* High performance (67k+ req/s per core)
+* High performance
 * High stability (ABI stable)
 * Multi-language plugin support
 * Async / background task support
@@ -882,5 +881,5 @@ The host adapter uses `NylonRingHostError` (defined with `thiserror`):
 
 * All performance numbers are measured on **Apple M1 Pro (10-core)**
 * ABI layer: 0.5–3 ns per operation
-* Host overhead: ~14.8–16.0 µs per call (67k–62k calls/sec per core)
+* Host overhead: ~0.5-1.3 us per call
 * Uses `DashMap` for better concurrency than `Mutex<HashMap>`

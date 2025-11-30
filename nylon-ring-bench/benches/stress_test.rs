@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Resolve benchmark plugin path under the workspace `target/release`
 fn get_plugin_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.pop(); // workspace root
@@ -23,27 +24,34 @@ fn get_plugin_path() -> PathBuf {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
+    // -----------------------------
+    // 1) Load plugin
+    // -----------------------------
     let plugin_path = get_plugin_path();
     if !plugin_path.exists() {
-        eprintln!("Plugin not found at {:?}", plugin_path);
+        eprintln!(
+            "Plugin not found at {:?}. \
+             Please run 'cargo build --release -p nylon-ring-bench-plugin' first.",
+            plugin_path
+        );
         std::process::exit(1);
     }
 
     println!("Loading plugin: {:?}", plugin_path);
+
     let host = Arc::new(
         NylonRingHost::load(plugin_path.to_str().unwrap()).expect("Failed to load plugin"),
     );
 
-    // --------------------------------------------
-    // Benchmark parameters
-    // --------------------------------------------
+    // -----------------------------
+    // 2) Benchmark parameters
+    // -----------------------------
+
     let duration_secs = 10;
     let concurrency = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(8);
 
-    // Rough expected per-thread call rate:
-    // On M1 Pro: ~1.2–1.5M per thread
     let estimated_rps_per_thread = 1_200_000usize;
     let iters_per_thread = estimated_rps_per_thread * duration_secs;
 
@@ -52,13 +60,13 @@ async fn main() {
         concurrency, iters_per_thread
     );
 
+    // -----------------------------
+    // 3) Run workers
+    // -----------------------------
     let total_requests = Arc::new(AtomicUsize::new(0));
     let start_time = Instant::now();
 
-    // --------------------------------------------
-    // Spawn concurrent workers
-    // --------------------------------------------
-    let mut handles = vec![];
+    let mut handles = Vec::with_capacity(concurrency);
 
     for _ in 0..concurrency {
         let host = host.clone();
@@ -67,26 +75,28 @@ async fn main() {
 
         handles.push(tokio::spawn(async move {
             let payload: &'static [u8] = b"bench";
-            let mut local = 0;
+            let mut local_count = 0usize;
 
             for _ in 0..iters {
                 if let Ok(_) = host.call_raw("echo", payload).await {
-                    local += 1;
+                    local_count += 1;
                 }
             }
 
-            counter.fetch_add(local, Ordering::Relaxed);
+            counter.fetch_add(local_count, Ordering::Relaxed);
         }));
     }
 
-    // Wait for all workers
+    // Wait all workers
     for h in handles {
         let _ = h.await;
     }
 
+    // -----------------------------
+    // 4) Summary
+    // -----------------------------
     let elapsed = start_time.elapsed();
     let total = total_requests.load(Ordering::Relaxed);
-
     let rps = total as f64 / elapsed.as_secs_f64();
 
     println!("--------------------------------------------");

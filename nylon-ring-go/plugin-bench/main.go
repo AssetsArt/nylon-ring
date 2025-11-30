@@ -7,10 +7,10 @@ import (
 func init() {
 	plugin := sdk.NewPlugin("nylon-ring-bench-plugin", "0.1.0")
 
-	plugin.Handle("unary", func(req sdk.Request, payload []byte, callback func(sdk.Response)) {
+	plugin.Handle("unary", func(req sdk.Request, _payload []byte, callback func(sdk.Response)) {
 		callback(sdk.Response{
 			Status: sdk.StatusOk,
-			Data:   payload, // Echo payload
+			Data:   []byte("OK: " + req.Path),
 		})
 	})
 
@@ -19,7 +19,7 @@ func init() {
 		for i := 0; i < 10; i++ {
 			callback(sdk.Response{
 				Status: sdk.StatusOk,
-				Data:   []byte("frame"),
+				Data:   []byte("frame " + string(i)),
 			})
 		}
 		// End stream

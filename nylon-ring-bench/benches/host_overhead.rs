@@ -215,8 +215,8 @@ fn bench_request_building(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_request_building,
-    bench_host_call_overhead,
+    // bench_request_building,
+    // bench_host_call_overhead,
     bench_go_host_call_overhead
 );
 criterion_main!(benches);

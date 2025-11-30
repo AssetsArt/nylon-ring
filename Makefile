@@ -40,6 +40,7 @@ help: ## แสดง help message
 	@echo "  $(YELLOW)make example-go-plugin$(NC)    - Run go_plugin_host example (Go plugin with SDK)"
 	@echo "  $(YELLOW)make example-go-plugin-lowlevel$(NC) - Run go_plugin_host_lowlevel example (low-level Go plugin)"
 	@echo "  $(YELLOW)make example-bidirectional$(NC) - Run bidirectional_host example (Rust plugin)"
+	@echo "  $(YELLOW)make example-bidirectional-go$(NC) - Run bidirectional_go_host example (Go plugin)"
 	@echo ""
 	@echo "$(GREEN)Test Commands:$(NC)"
 	@echo "  $(YELLOW)make test$(NC)                - Run all tests"
@@ -106,6 +107,9 @@ example: build ## Build everything and run all examples (Rust + Go)
 	@echo "$(YELLOW)=== Example 5: bidirectional_host (Rust plugin) ===$(NC)"
 	@cargo run --example bidirectional_host
 	@echo ""
+	@echo "$(YELLOW)=== Example 6: bidirectional_go_host (Go plugin) ===$(NC)"
+	@cargo run --example bidirectional_go_host
+	@echo ""
 	@echo "$(GREEN)✓ All examples complete!$(NC)"
 
 example-simple: build ## Run simple_host example (Rust plugin)
@@ -131,6 +135,11 @@ example-go-plugin-lowlevel: build ## Run go_plugin_host_lowlevel example (low-le
 example-bidirectional: build ## Run bidirectional_host example (Rust plugin)
 	@echo "$(BLUE)Running bidirectional_host example...$(NC)"
 	@cargo run --example bidirectional_host
+	@echo "$(GREEN)✓ Example complete!$(NC)"
+
+example-bidirectional-go: build ## Run bidirectional_go_host example (Go plugin)
+	@echo "$(BLUE)Running bidirectional_go_host example...$(NC)"
+	@cargo run --example bidirectional_go_host
 	@echo "$(GREEN)✓ Example complete!$(NC)"
 
 stress-test: ## Run stress test

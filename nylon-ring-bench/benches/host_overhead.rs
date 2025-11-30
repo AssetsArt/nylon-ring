@@ -52,6 +52,22 @@ fn bench_host_call_overhead(c: &mut Criterion) {
     let mut group = c.benchmark_group("host_overhead");
     group.throughput(Throughput::Elements(1));
 
+    group.bench_function("fast_raw_unary_call", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _result = host.call_raw_unary_fast("echo", b"bench").await;
+            });
+        });
+    });
+
+    group.bench_function("raw_unary_call", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _result = host.call_raw("echo", b"bench").await;
+            });
+        });
+    });
+
     group.bench_function("unary_call", |b| {
         b.iter(|| {
             rt.block_on(async {
@@ -135,6 +151,22 @@ fn bench_go_host_call_overhead(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("go_host_overhead");
     group.throughput(Throughput::Elements(1));
+
+    group.bench_function("go_fast_raw_unary_call", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _result = host.call_raw_unary_fast("echo", b"bench").await;
+            });
+        });
+    });
+
+    group.bench_function("go_raw_unary_call", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _result = host.call_raw("echo", b"bench").await;
+            });
+        });
+    });
 
     group.bench_function("unary_call", |b| {
         b.iter(|| {

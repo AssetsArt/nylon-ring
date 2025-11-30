@@ -44,5 +44,16 @@ async fn main() -> Result<(), NylonRingHostError> {
     println!("Status: {:?}", status);
     println!("Payload: {:?}", String::from_utf8_lossy(&payload));
 
+    println!("\n\nSending raw request...");
+    let payload = b"Hello, Raw World!";
+    let (status, response) = host
+        .call_raw("echo", payload)
+        .await
+        .expect("call_raw failed");
+
+    println!("Response received!");
+    println!("Status: {:?}", status);
+    println!("Payload: {:?}", String::from_utf8_lossy(&response));
+
     Ok(())
 }

@@ -107,6 +107,15 @@ pub struct NrPluginVTable {
         ) -> NrStatus,
     >,
 
+    pub handle_raw: Option<
+        unsafe extern "C" fn(
+            plugin_ctx: *mut c_void,
+            entry: NrStr,
+            sid: u64,
+            payload: NrBytes,
+        ) -> NrStatus,
+    >,
+
     pub shutdown: Option<unsafe extern "C" fn(plugin_ctx: *mut c_void)>,
 }
 
@@ -118,11 +127,15 @@ macro_rules! define_plugin {
         entries: {
             $($entry_name:literal => $handler_fn:path),* $(,)?
         }
+        $(, raw_entries: {
+            $($raw_entry_name:literal => $raw_handler_fn:path),* $(,)?
+        })?
     ) => {
         // Static VTable
         static PLUGIN_VTABLE: $crate::NrPluginVTable = $crate::NrPluginVTable {
             init: Some(plugin_init_wrapper),
             handle: Some(plugin_handle_wrapper),
+            handle_raw: Some(plugin_handle_raw_wrapper),
             shutdown: Some(plugin_shutdown_wrapper),
         };
 
@@ -186,6 +199,29 @@ macro_rules! define_plugin {
                             $handler_fn(plugin_ctx, sid, req, payload)
                         }
                     )*
+                    _ => $crate::NrStatus::Invalid,
+                }
+            }));
+            match result {
+                Ok(status) => status,
+                Err(_) => $crate::NrStatus::Err,
+            }
+        }
+
+        unsafe extern "C" fn plugin_handle_raw_wrapper(
+            plugin_ctx: *mut std::ffi::c_void,
+            entry: $crate::NrStr,
+            sid: u64,
+            payload: $crate::NrBytes,
+        ) -> $crate::NrStatus {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let entry_str = entry.as_str();
+                match entry_str {
+                    $($(
+                        $raw_entry_name => {
+                            $raw_handler_fn(plugin_ctx, sid, payload)
+                        }
+                    )*)?
                     _ => $crate::NrStatus::Invalid,
                 }
             }));

@@ -145,25 +145,44 @@ unsafe fn handle_unary(
     let req_ref = &*req;
     let path = req_ref.path.as_str().to_string();
     
-    thread::spawn(move || {
-        if let Some(host) = HOST_HANDLE.get() {
-            // Do actual work (DB, network, etc.)
-            thread::sleep(Duration::from_secs(1));
-            
-            // Send result back
-            let response = format!("OK: {}", path);
-            let send_result = (*host.vtable).send_result;
-            send_result(
-                host.ctx,
-                sid,
-                NrStatus::Ok,
-                NrBytes::from_slice(response.as_bytes()),
-            );
-        }
-    });
+    if let Some(host) = HOST_HANDLE.get() {
+        // Do actual work (DB, network, etc.)
+        thread::sleep(Duration::from_secs(1));
+        
+        // Send result back
+        let response = format!("OK: {}", path);
+        let send_result = (*host.vtable).send_result;
+        send_result(
+            host.ctx,
+            sid,
+            NrStatus::Ok,
+            NrBytes::from_slice(response.as_bytes()),
+        );
+    }
     
     NrStatus::Ok
 }
+
+unsafe fn handle_raw_echo(
+    _plugin_ctx: *mut c_void,
+    sid: u64,
+    payload: NrBytes,
+) -> NrStatus {
+    let payload_slice = payload.as_slice();
+    let payload_vec = payload_slice.to_vec();
+
+    if let Some(host) = HOST_HANDLE.get() {
+        let send_result = (*host.vtable).send_result;
+        send_result(
+            host.ctx,
+            sid,
+            NrStatus::Ok,
+            NrBytes::from_slice(payload_vec.as_slice()),
+        );
+    }
+    NrStatus::Ok
+}
+    
 
 unsafe fn plugin_shutdown(_plugin_ctx: *mut c_void) {
     // Cleanup if needed
@@ -175,8 +194,12 @@ define_plugin! {
     entries: {
         "unary" => handle_unary,
         "stream" => handle_stream,
+    },
+    raw_entries: {
+        "echo" => handle_raw_echo,
     }
 }
+
 ```
 
 The `define_plugin!` macro automatically:
@@ -289,6 +312,13 @@ while let Some(frame) = stream.recv().await {
         break;
     }
 }
+
+// Raw Call:
+// Bypass NrRequest and send raw bytes directly
+let payload = b"Hello, Raw World!";
+let (status, response) = host.call_raw("echo", payload).await?;
+println!("Status: {:?}, Response: {:?}", status, String::from_utf8_lossy(&response));
+
 ```
 
 **Note**: The first parameter to `call()` and `call_stream()` is the entry name, which routes to the corresponding handler in the plugin. Plugins can support multiple entry points (e.g., "unary", "stream", "state").

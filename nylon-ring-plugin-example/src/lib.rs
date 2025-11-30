@@ -221,6 +221,27 @@ unsafe fn plugin_shutdown(_plugin_ctx: *mut c_void) {
     // Cleanup if needed
 }
 
+unsafe fn handle_raw_echo(_plugin_ctx: *mut c_void, sid: u64, payload: NrBytes) -> NrStatus {
+    let payload_slice = payload.as_slice();
+    let payload_vec = payload_slice.to_vec();
+
+    thread::spawn(move || {
+        if let Some(host) = HOST_HANDLE.get() {
+            let send_result = (*host.vtable).send_result;
+            thread::sleep(Duration::from_millis(100)); // Simulate some work
+
+            send_result(
+                host.ctx,
+                sid,
+                NrStatus::Ok,
+                NrBytes::from_slice(&payload_vec),
+            );
+        }
+    });
+
+    NrStatus::Ok
+}
+
 define_plugin! {
     init: plugin_init,
     shutdown: plugin_shutdown,
@@ -228,5 +249,8 @@ define_plugin! {
         "stream" => handle_stream,
         "state" => handle_state,
         "unary" => handle_unary,
+    },
+    raw_entries: {
+        "echo" => handle_raw_echo,
     }
 }

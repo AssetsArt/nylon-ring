@@ -68,18 +68,12 @@ build: ## Build everything (Rust crates + Rust plugin + Go plugins)
 	fi
 	@echo ""
 	@echo "$(YELLOW)=== Building Go plugin (low-level) ===$(NC)"
-	@cd nylon-ring-go/plugin-example && \
-		if [ -f build.sh ]; then \
-			chmod +x build.sh && ./build.sh; \
-		else \
-			echo "$(YELLOW)⚠ build.sh not found, building manually...$(NC)"; \
-			go build -buildmode=c-shared -o nylon_ring_go_plugin.so . || \
-			go build -buildmode=c-shared -o nylon_ring_go_plugin.dylib . || \
-			go build -buildmode=c-shared -o nylon_ring_go_plugin.dll .; \
-		fi
-	@echo ""
+	@cd nylon-ring-go/plugin-example && chmod +x build.sh && ./build.sh
 	@echo "$(YELLOW)=== Building Go plugin (with SDK) ===$(NC)"
 	@cd nylon-ring-go/plugin-example-simple && chmod +x build.sh && ./build.sh
+	@echo ""
+	@echo "$(YELLOW)=== Building Go plugin (benchmark) ===$(NC)"
+	@cd nylon-ring-go/plugin-bench && chmod +x build.sh && ./build.sh
 	@echo ""
 	@echo "$(GREEN)✓ All builds complete!$(NC)"
 

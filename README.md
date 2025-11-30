@@ -380,9 +380,11 @@ The ABI layer itself is extremely lightweight:
 
 Full round-trip performance (host → plugin → host callback):
 
-* **Unary call**: ~0.57 µs per call → **~1.76M calls/sec** on a single core (M1 Pro 10-core)
-* **Unary call with 1KB body**: ~0.60 µs per call → **~1.68M calls/sec** (M1 Pro 10-core, body size has negligible impact)
-* **Streaming call** (consume all frames): ~1.36 µs per call → **~736k calls/sec** (M1 Pro 10-core)
+* **Unary call**: ~0.43 µs per call → **~2.32M calls/sec** on a single core (M1 Pro 10-core)
+* **Unary call with 1KB body**: ~0.49 µs per call → **~2.05M calls/sec** (M1 Pro 10-core, body size has negligible impact)
+* **Raw unary call**: ~0.16 µs per call → **~6.31M calls/sec** (M1 Pro 10-core, bypassing NrRequest overhead)
+* **Fast raw unary call**: ~0.14 µs per call → **~7.14M calls/sec** (M1 Pro 10-core, thread-local optimization)
+* **Streaming call** (consume all frames): ~0.83 µs per call → **~1.20M calls/sec** (M1 Pro 10-core)
 * **Build `HighLevelRequest`**: ~216 ns (M1 Pro 10-core)
 
 The overhead is dominated by:

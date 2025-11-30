@@ -11,6 +11,10 @@ harness = false
 name = "host_overhead"
 harness = false
 
+[[bench]]
+name = "stress_test"
+harness = false
+
 [dependencies]
 nylon-ring = { path = "../nylon-ring" }
 nylon-ring-host = { path = "../nylon-ring-host" }

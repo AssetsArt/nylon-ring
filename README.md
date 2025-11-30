@@ -380,9 +380,9 @@ The ABI layer itself is extremely lightweight:
 
 Full round-trip performance (host → plugin → host callback):
 
-* **Unary call**: ~14.8 µs per call → **~67k calls/sec** on a single core (M1 Pro 10-core)
-* **Unary call with 1KB body**: ~14.9 µs per call → **~67k calls/sec** (M1 Pro 10-core, body size has negligible impact)
-* **Streaming call** (consume all frames): ~16.0 µs per call → **~62k calls/sec** (M1 Pro 10-core)
+* **Unary call**: ~0.57 µs per call → **~1.76M calls/sec** on a single core (M1 Pro 10-core)
+* **Unary call with 1KB body**: ~0.60 µs per call → **~1.68M calls/sec** (M1 Pro 10-core, body size has negligible impact)
+* **Streaming call** (consume all frames): ~1.36 µs per call → **~736k calls/sec** (M1 Pro 10-core)
 * **Build `HighLevelRequest`**: ~216 ns (M1 Pro 10-core)
 
 The overhead is dominated by:
@@ -391,7 +391,7 @@ The overhead is dominated by:
 * Concurrent map operations (`DashMap` - fine-grained locking)
 * Plugin's own work
 
-**Scaling**: With multiple cores handling requests, ideal throughput scales linearly. On M1 Pro 10-core, theoretical maximum can reach **~670k req/s** in a scale-out scenario, which is well within the range of high-performance reverse proxy systems.
+**Scaling**: With multiple cores handling requests, ideal throughput scales linearly. On M1 Pro 10-core, measured throughput reaches **~9.2M req/s** in a stress test scenario, which is well within the range of high-performance reverse proxy systems.
 
 ### Benchmarking
 

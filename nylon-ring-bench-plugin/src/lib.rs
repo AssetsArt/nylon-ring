@@ -1,31 +1,27 @@
 use nylon_ring::{NrBytes, NrHostVTable, NrRequest, NrStatus};
 use std::ffi::c_void;
-use std::sync::OnceLock;
 
-struct HostHandle {
-    ctx: *mut c_void,
-    vtable: *const NrHostVTable,
-}
-
-// Safety: The host guarantees that the context and vtable are thread-safe or handles concurrency.
-unsafe impl Send for HostHandle {}
-unsafe impl Sync for HostHandle {}
-
-static HOST_HANDLE: OnceLock<HostHandle> = OnceLock::new();
+static mut HOST_CTX: *mut c_void = std::ptr::null_mut();
+static mut HOST_VTABLE: *const NrHostVTable = std::ptr::null();
 
 unsafe fn plugin_init(
     _plugin_ctx: *mut c_void,
     host_ctx: *mut c_void,
     host_vtable: *const NrHostVTable,
 ) -> NrStatus {
-    let handle = HostHandle {
-        ctx: host_ctx,
-        vtable: host_vtable,
-    };
-    if HOST_HANDLE.set(handle).is_err() {
-        return NrStatus::Err;
+    unsafe {
+        HOST_CTX = host_ctx;
+        HOST_VTABLE = host_vtable;
     }
     NrStatus::Ok
+}
+
+#[inline(always)]
+pub fn send_result(sid: u64, status: NrStatus, data: &[u8]) {
+    unsafe {
+        let f = (*HOST_VTABLE).send_result;
+        f(HOST_CTX, sid, status, NrBytes::from_slice(data));
+    }
 }
 
 // Handlers
@@ -47,21 +43,12 @@ unsafe fn handle_stream(
         Err(_) => return NrStatus::Invalid,
     };
 
-    if let Some(host) = HOST_HANDLE.get() {
-        let send_result = (*host.vtable).send_result;
-
-        for i in 1..=5 {
-            let msg = format!("Frame {}", i);
-            send_result(
-                host.ctx,
-                sid,
-                NrStatus::Ok,
-                NrBytes::from_slice(msg.as_bytes()),
-            );
-        }
-        // End stream
-        send_result(host.ctx, sid, NrStatus::StreamEnd, NrBytes::from_slice(&[]));
+    for i in 1..=5 {
+        let msg = format!("Frame {}", i);
+        send_result(sid, NrStatus::Ok, msg.as_bytes());
     }
+    // End stream
+    send_result(sid, NrStatus::StreamEnd, &[]);
 
     NrStatus::Ok
 }
@@ -84,17 +71,9 @@ unsafe fn handle_unary(
         Err(_) => return NrStatus::Invalid,
     };
 
-    if let Some(host) = HOST_HANDLE.get() {
-        let send_result = (*host.vtable).send_result;
-        let response_string = format!("OK: {}", path);
-        let response_bytes = response_string.as_bytes();
-        send_result(
-            host.ctx,
-            sid,
-            NrStatus::Ok,
-            NrBytes::from_slice(response_bytes),
-        );
-    }
+    let response_string = format!("OK: {}", path);
+    let response_bytes = response_string.as_bytes();
+    send_result(sid, NrStatus::Ok, response_bytes);
 
     NrStatus::Ok
 }
@@ -105,11 +84,19 @@ unsafe fn plugin_shutdown(_plugin_ctx: *mut c_void) {
     // No cleanup needed
 }
 
+unsafe fn handle_raw_echo(_plugin_ctx: *mut c_void, sid: u64, payload: NrBytes) -> NrStatus {
+    send_result(sid, NrStatus::Ok, payload.as_slice());
+    NrStatus::Ok
+}
+
 define_plugin! {
     init: plugin_init,
     shutdown: plugin_shutdown,
     entries: {
         "stream" => handle_stream,
         "unary" => handle_unary,
+    },
+    raw_entries: {
+        "echo" => handle_raw_echo,
     }
 }

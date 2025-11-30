@@ -124,6 +124,11 @@ example-go-plugin-lowlevel: build ## Run go_plugin_host_lowlevel example (low-le
 	@cargo run --example go_plugin_host_lowlevel
 	@echo "$(GREEN)✓ Example complete!$(NC)"
 
+stress-test: ## Run stress test
+	@echo "$(BLUE)Running stress test...$(NC)"
+	@cargo bench --bench stress_test
+	@echo "$(GREEN)✓ Stress test complete!$(NC)"
+
 build-bench-plugin: ## Build benchmark plugin (fast response, no sleep)
 	@echo "$(BLUE)Building benchmark plugin...$(NC)"
 	@cargo build --release -p nylon-ring-bench-plugin
@@ -134,12 +139,12 @@ benchmark-abi: ## Run ABI type benchmarks
 	@cargo bench --bench abi_types
 	@echo "$(GREEN)✓ ABI benchmarks complete!$(NC)"
 
-benchmark-host: build-bench-plugin ## Run host overhead benchmarks
+benchmark-host: build-bench-plugin stress-test## Run host overhead benchmarks
 	@echo "$(BLUE)Running host overhead benchmarks...$(NC)"
 	@cargo bench --bench host_overhead
 	@echo "$(GREEN)✓ Host benchmarks complete!$(NC)"
 
-benchmark: benchmark-abi benchmark-host ## Run all benchmarks
+benchmark: benchmark-abi benchmark-host stress-test## Run all benchmarks
 	@echo "$(GREEN)✓ All benchmarks complete!$(NC)"
 
 clean: ## Clean build artifacts

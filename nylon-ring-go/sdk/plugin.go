@@ -62,11 +62,12 @@ type Handler func(req Request, payload []byte, callback func(Response))
 
 // Plugin represents a nylon-ring plugin.
 type Plugin struct {
-	name       string
-	version    string
-	handlers   map[string]Handler
-	initFn     func() error
-	shutdownFn func()
+	name         string
+	version      string
+	handlers     map[string]Handler
+	syncHandlers map[string]Handler
+	initFn       func() error
+	shutdownFn   func()
 
 	// Internal state
 	hostCtx    unsafe.Pointer
@@ -78,9 +79,10 @@ type Plugin struct {
 // NewPlugin creates a new plugin with the given name and version.
 func NewPlugin(name, version string) *Plugin {
 	return &Plugin{
-		name:     name,
-		version:  version,
-		handlers: make(map[string]Handler),
+		name:         name,
+		version:      version,
+		handlers:     make(map[string]Handler),
+		syncHandlers: make(map[string]Handler),
 	}
 }
 
@@ -95,8 +97,16 @@ func (p *Plugin) OnShutdown(fn func()) {
 }
 
 // Handle registers a handler for the given entry name.
+// The handler will be executed in a goroutine.
 func (p *Plugin) Handle(entry string, handler Handler) {
 	p.handlers[entry] = handler
+}
+
+// HandleSync registers a synchronous handler for the given entry name.
+// The handler will be executed in the calling thread (blocking the host).
+// Use this for very fast handlers to avoid goroutine overhead.
+func (p *Plugin) HandleSync(entry string, handler Handler) {
+	p.syncHandlers[entry] = handler
 }
 
 // SendResult sends a result back to the host.
@@ -148,7 +158,24 @@ func (p *Plugin) getInfo() (string, string) {
 func (p *Plugin) handleRequest(entry string, req *Request, payload []byte, callback func(Status, []byte)) error {
 	p.mu.RLock()
 	handler, ok := p.handlers[entry]
+	syncHandler, syncOk := p.syncHandlers[entry]
 	p.mu.RUnlock()
+
+	if syncOk {
+		// Execute synchronously
+		defer releaseRequest(req)
+
+		defer func() {
+			if r := recover(); r != nil {
+				callback(StatusErr, []byte("plugin panic"))
+			}
+		}()
+
+		syncHandler(*req, payload, func(resp Response) {
+			callback(resp.Status, resp.Data)
+		})
+		return nil
+	}
 
 	if !ok {
 		// If handler not found, we must release request here because we won't spawn goroutine

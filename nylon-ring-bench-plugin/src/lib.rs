@@ -89,14 +89,48 @@ unsafe fn handle_raw_echo(_plugin_ctx: *mut c_void, sid: u64, payload: NrBytes) 
     NrStatus::Ok
 }
 
+unsafe fn handle_bidi_stream(
+    _plugin_ctx: *mut c_void,
+    sid: u64,
+    req: *const NrRequest,
+    _payload: NrBytes,
+) -> NrStatus {
+    if req.is_null() {
+        return NrStatus::Invalid;
+    }
+    // Send initial frames
+    for i in 1..=5 {
+        let msg = format!("Frame {}", i);
+        send_result(sid, NrStatus::Ok, msg.as_bytes());
+    }
+    // Do not end stream here, wait for host input
+    NrStatus::Ok
+}
+
+unsafe fn handle_stream_data(_plugin_ctx: *mut c_void, sid: u64, data: NrBytes) -> NrStatus {
+    let msg = format!("Received data: {}", data.len);
+    send_result(sid, NrStatus::Ok, msg.as_bytes());
+    NrStatus::Ok
+}
+
+unsafe fn handle_stream_close(_plugin_ctx: *mut c_void, sid: u64) -> NrStatus {
+    send_result(sid, NrStatus::StreamEnd, b"Stream closed by host");
+    NrStatus::Ok
+}
+
 define_plugin! {
     init: plugin_init,
     shutdown: plugin_shutdown,
     entries: {
         "stream" => handle_stream,
+        "bidi_stream" => handle_bidi_stream,
         "unary" => handle_unary,
     },
     raw_entries: {
         "echo" => handle_raw_echo,
+    },
+    stream_handlers: {
+        data: handle_stream_data,
+        close: handle_stream_close,
     }
 }

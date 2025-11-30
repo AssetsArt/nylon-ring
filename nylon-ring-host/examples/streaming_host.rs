@@ -40,7 +40,7 @@ async fn main() -> Result<(), NylonRingHostError> {
     };
 
     println!("Starting streaming request...");
-    let mut rx = host.call_stream("stream", req).await?;
+    let (_sid, mut rx) = host.call_stream("stream", req).await?;
 
     println!("Receiving stream frames:");
     while let Some(frame) = rx.recv().await {

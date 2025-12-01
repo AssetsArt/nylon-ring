@@ -4,8 +4,8 @@
 
 **High-Performance ABI-Stable Host–Plugin Interface**
 
-[![Rust](https://img.shields.io/badge/Rust-🦀-orange)](https://www.rust-lang.org/)
-[![Go](https://img.shields.io/badge/Go-🐹-blue)](https://golang.org/)
+[![Rust](https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Go](https://img.shields.io/badge/Go-00ADD8?style=flat-square&logo=go&logoColor=white)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-MIT-green)](#)
 
 *Write plugins in Rust, Go, C, C++, Zig and more — communicate seamlessly with ABI stability*
@@ -76,7 +76,7 @@ nylon-ring/
 │   ├── Streaming handlers
 │   └── State management examples
 │
-├── nylon-ring-go/                 # 🐹 Go implementation
+├── nylon-ring-go/                 # Go implementation
 │   ├── sdk/ - High-level Go SDK
 │   ├── plugin-example-simple/ - SDK example
 │   └── plugin-example/ - Low-level CGO example
@@ -141,7 +141,7 @@ host.fast_raw_unary_call("echo", payload).await?;   // → "echo" handler (raw b
 
 ## 🔨 Implementing a Plugin
 
-### 🦀 Rust Plugin
+### [![Rust](https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/) Plugin
 
 Use the `define_plugin!` macro for easy plugin creation:
 
@@ -220,7 +220,7 @@ define_plugin! {
 
 ---
 
-### 🐹 Go Plugin
+### [![Go](https://img.shields.io/badge/Go-00ADD8?style=flat-square&logo=go&logoColor=white)](https://golang.org/) Plugin
 
 #### Using SDK (Recommended)
 
@@ -675,10 +675,10 @@ Strict production-safety guidelines:
 
 | Language | Support Level | Notes |
 |----------|---------------|-------|
-| **🦀 Rust** | ⭐⭐⭐⭐⭐ | First-class with `define_plugin!` macro |
-| **🐹 Go** | ⭐⭐⭐⭐⭐ | High-level SDK + low-level CGO |
-| **⚙️ C / C++** | ⭐⭐⭐⭐ | Direct C ABI match (low-level) |
-| **⚡ Zig** | ⭐⭐⭐⭐ | C ABI support (low-level) |
+| **![Rust](https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white)** | ⭐⭐⭐⭐⭐ | First-class with `define_plugin!` macro |
+| **[![Go](https://img.shields.io/badge/Go-00ADD8?style=flat-square&logo=go&logoColor=white)](https://golang.org/)** | ⭐⭐⭐⭐⭐ | High-level SDK + low-level CGO |
+| **![C](https://img.shields.io/badge/C-000000?style=flat-square&logo=c&logoColor=white) / ![C++](https://img.shields.io/badge/C++-000000?style=flat-square&logo=c++&logoColor=white)** | ⭐⭐⭐⭐ | Direct C ABI match (low-level) |
+| **![Zig](https://img.shields.io/badge/Zig-000000?style=flat-square&logo=zig&logoColor=white)** | ⭐⭐⭐⭐ | C ABI support (low-level) |
 | **🔧 Others** | ⭐⭐⭐ | Any language with C FFI (low-level) |
 
 > **Note**: High-level SDKs for C, C++, Zig, and other languages are **coming soon**. Currently, only Rust and Go have high-level SDK support.

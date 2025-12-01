@@ -425,6 +425,7 @@ Full round-trip performance (host → plugin → host callback):
 | **Raw unary** | ~0.16 µs | **~6.31M calls/sec** | Bypass NrRequest |
 | **Fast raw unary** | ~0.14 µs | **~7.14M calls/sec** | Thread-local optimization (see below) |
 | **Streaming** | ~0.83 µs | **~1.20M calls/sec** | All frames consumed |
+| **Raw streaming** | ~0.77 µs | **~1.29M calls/sec** | Bypass NrRequest |
 | **Bidirectional** | ~0.93 µs | **~1.07M calls/sec** | 5 frames + 1 echo |
 | **Build request** | ~216 ns | N/A | `HighLevelRequest` creation |
 

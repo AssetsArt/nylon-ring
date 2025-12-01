@@ -978,6 +978,7 @@ pub enum NylonRingHostError {
 | Raw unary | ~0.16 µs | ~6.31M req/sec | Skip NrRequest parsing |
 | Fast raw unary | ~0.14 µs | ~7.14M req/sec | Thread-local optimization |
 | Streaming (5 frames) | ~0.83 µs | ~1.20M req/sec | All frames consumed |
+| Raw streaming | ~0.77 µs | ~1.29M req/sec | Bypass NrRequest |
 | Build HighLevelRequest | ~216 ns | N/A | Construction overhead |
 
 **Overhead sources**:

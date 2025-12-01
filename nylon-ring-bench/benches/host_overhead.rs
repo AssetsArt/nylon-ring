@@ -131,6 +131,34 @@ fn bench_host_call_overhead(c: &mut Criterion) {
         });
     });
 
+    group.bench_function("bidirectional_stream_call", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let req = HighLevelRequest {
+                    method: black_box("GET".to_string()),
+                    path: black_box("/bidi_stream".to_string()),
+                    query: black_box("".to_string()),
+                    headers: black_box(vec![]),
+                    body: black_box(vec![]),
+                    extensions: Extensions::new(),
+                };
+
+                let (sid, mut rx) = host.call_stream("bidi_stream", req).await.unwrap();
+                // Consume all frames
+                let mut count = 0;
+                while let Some(_frame) = rx.recv().await {
+                    // Consume frame
+                    count += 1;
+                    if count >= 5 {
+                        break;
+                    }
+                }
+                let _ = host.send_stream_data(sid, b"bench");
+                let _ = host.close_stream(sid);
+            });
+        });
+    });
+
     group.finish();
 }
 

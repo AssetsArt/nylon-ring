@@ -118,6 +118,12 @@ unsafe fn handle_stream_close(_plugin_ctx: *mut c_void, sid: u64) -> NrStatus {
     NrStatus::Ok
 }
 
+unsafe fn handle_raw_stream_data(_plugin_ctx: *mut c_void, sid: u64, data: NrBytes) -> NrStatus {
+    let msg = format!("Received data: {}", data.len);
+    send_result(sid, NrStatus::Ok, msg.as_bytes());
+    NrStatus::Ok
+}
+
 define_plugin! {
     init: plugin_init,
     shutdown: plugin_shutdown,
@@ -128,6 +134,7 @@ define_plugin! {
     },
     raw_entries: {
         "echo" => handle_raw_echo,
+        "raw_stream" => handle_raw_stream_data,
     },
     stream_handlers: {
         data: handle_stream_data,

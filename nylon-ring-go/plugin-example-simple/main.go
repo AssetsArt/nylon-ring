@@ -65,6 +65,24 @@ func init() {
 		})
 	})
 
+	// Register raw streaming handler
+	plugin.HandleRawStream("raw_stream", func(payload []byte, callback func(sdk.Response)) {
+		// Send 3 frames
+		for i := 0; i < 3; i++ {
+			time.Sleep(50 * time.Millisecond)
+			msg := "Raw stream frame " + string(rune('0'+i)) + " for " + string(payload)
+			callback(sdk.Response{
+				Status: sdk.StatusOk,
+				Data:   []byte(msg),
+			})
+		}
+		// End stream
+		callback(sdk.Response{
+			Status: sdk.StatusStreamEnd,
+			Data:   []byte{},
+		})
+	})
+
 	// Register bidirectional stream handlers
 	plugin.HandleStream(
 		// Handle data from host

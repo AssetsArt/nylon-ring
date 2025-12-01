@@ -132,6 +132,12 @@ func (p *Plugin) HandleRaw(entry string, handler RawHandler) {
 	p.rawHandlers[entry] = handler
 }
 
+// HandleRawStream registers a raw streaming handler for the given entry name.
+// The handler will be executed in a goroutine and can call the callback multiple times.
+func (p *Plugin) HandleRawStream(entry string, handler RawHandler) {
+	p.rawHandlers[entry] = handler
+}
+
 // HandleStream registers handlers for bidirectional streaming.
 func (p *Plugin) HandleStream(dataHandler StreamHandler, closeHandler StreamCloseHandler) {
 	p.streamHandlers = &streamHandlers{

@@ -131,6 +131,19 @@ fn bench_host_call_overhead(c: &mut Criterion) {
         });
     });
 
+    group.bench_function("raw_stream_call", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let (_sid, mut rx) = host.call_raw_stream("raw_stream", b"bench").await.unwrap();
+                // Consume all frames
+                while let Some(_frame) = rx.recv().await {
+                    // Consume frame
+                    break;
+                }
+            });
+        });
+    });
+
     group.bench_function("bidirectional_stream_call", |b| {
         b.iter(|| {
             rt.block_on(async {

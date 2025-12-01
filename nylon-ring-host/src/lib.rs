@@ -5,9 +5,9 @@ use dashmap::DashMap;
 pub use error::NylonRingHostError;
 pub use extensions::Extensions;
 use libloading::{Library, Symbol};
+pub use nylon_ring::NrStatus;
 use nylon_ring::{
-    NrBytes, NrHeader, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrRequest, NrStatus,
-    NrStr,
+    NrBytes, NrHeader, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrRequest, NrStr,
 };
 use rustc_hash::FxBuildHasher;
 use std::cell::Cell;
@@ -431,6 +431,57 @@ impl NylonRingHost {
                 &nr_req,
                 payload,
             )
+        }));
+
+        let status = match status {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = self.host_ctx.pending_requests.remove(&sid);
+                return Err(NylonRingHostError::PluginHandleFailed(NrStatus::Err));
+            }
+        };
+
+        if status != NrStatus::Ok {
+            let _ = self.host_ctx.pending_requests.remove(&sid);
+            return Err(NylonRingHostError::PluginHandleFailed(status));
+        }
+
+        Ok((sid, rx))
+    }
+
+    /// Raw Streaming call: plugin may call send_result multiple times.
+    /// The stream closes when plugin sends one of:
+    /// - NrStatus::StreamEnd
+    /// - NrStatus::Err / Invalid / Unsupported
+    pub async fn call_raw_stream(
+        &self,
+        entry: &str,
+        payload: &[u8],
+    ) -> Result<(u64, StreamReceiver)> {
+        let sid = self
+            .next_sid
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let (tx, rx) = mpsc::unbounded_channel::<StreamFrame>();
+
+        {
+            self.host_ctx
+                .pending_requests
+                .insert(sid, Pending::Stream(tx));
+        }
+
+        let payload_bytes = NrBytes::from_slice(payload);
+
+        let handle_raw_fn = match self.plugin_vtable.handle_raw {
+            Some(f) => f,
+            None => {
+                let _ = self.host_ctx.pending_requests.remove(&sid);
+                return Err(NylonRingHostError::MissingRequiredFunctions);
+            }
+        };
+
+        let status = panic::catch_unwind(panic::AssertUnwindSafe(|| unsafe {
+            handle_raw_fn(self.plugin_ctx, NrStr::from_str(entry), sid, payload_bytes)
         }));
 
         let status = match status {

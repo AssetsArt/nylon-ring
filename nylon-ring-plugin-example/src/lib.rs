@@ -242,6 +242,36 @@ unsafe fn handle_raw_echo(_plugin_ctx: *mut c_void, sid: u64, payload: NrBytes) 
     NrStatus::Ok
 }
 
+unsafe fn handle_raw_stream(_plugin_ctx: *mut c_void, sid: u64, payload: NrBytes) -> NrStatus {
+    let payload_slice = payload.as_slice();
+    let payload_vec = payload_slice.to_vec();
+
+    thread::spawn(move || {
+        if let Some(host) = HOST_HANDLE.get() {
+            let send_result = (*host.vtable).send_result;
+
+            let payload_str = String::from_utf8_lossy(&payload_vec);
+
+            // Stream 3 frames
+            for i in 0..3 {
+                thread::sleep(Duration::from_millis(50));
+                let msg = format!("Stream frame {} for {}", i, payload_str);
+                send_result(
+                    host.ctx,
+                    sid,
+                    NrStatus::Ok,
+                    NrBytes::from_slice(msg.as_bytes()),
+                );
+            }
+
+            // End stream
+            send_result(host.ctx, sid, NrStatus::StreamEnd, NrBytes::from_slice(&[]));
+        }
+    });
+
+    NrStatus::Ok
+}
+
 unsafe fn handle_stream_data(_plugin_ctx: *mut c_void, sid: u64, data: NrBytes) -> NrStatus {
     let data_str = match std::str::from_utf8(data.as_slice()) {
         Ok(s) => s,
@@ -287,6 +317,7 @@ define_plugin! {
     },
     raw_entries: {
         "echo" => handle_raw_echo,
+        "stream" => handle_raw_stream,
     },
     stream_handlers: {
         data: handle_stream_data,

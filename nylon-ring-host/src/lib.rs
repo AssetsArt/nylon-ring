@@ -516,7 +516,30 @@ impl NylonRingHost {
         }
 
         let payload_bytes = NrBytes::from_slice(payload);
+        self.call_raw_internal(sid, entry, &payload_bytes)?;
+        rx.await.map_err(|_| NylonRingHostError::OneshotClosed)
+    }
 
+    pub async fn call_raw_nr_bytes(
+        &self,
+        entry: &str,
+        payload: &NrBytes,
+    ) -> Result<(NrStatus, Vec<u8>)> {
+        let sid = self
+            .next_sid
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+
+        {
+            self.host_ctx
+                .pending_requests
+                .insert(sid, Pending::Unary(tx));
+        }
+        self.call_raw_internal(sid, entry, payload)?;
+        rx.await.map_err(|_| NylonRingHostError::OneshotClosed)
+    }
+
+    fn call_raw_internal(&self, sid: u64, entry: &str, payload: &NrBytes) -> Result<NrStatus> {
         let handle_raw_fn = match self.plugin_vtable.handle_raw {
             Some(f) => f,
             None => {
@@ -526,7 +549,7 @@ impl NylonRingHost {
         };
 
         let status = panic::catch_unwind(panic::AssertUnwindSafe(|| unsafe {
-            handle_raw_fn(self.plugin_ctx, NrStr::from_str(entry), sid, payload_bytes)
+            handle_raw_fn(self.plugin_ctx, NrStr::from_str(entry), sid, *payload)
         }));
 
         let status = match status {
@@ -542,7 +565,7 @@ impl NylonRingHost {
             return Err(NylonRingHostError::PluginHandleFailed(status));
         }
 
-        rx.await.map_err(|_| NylonRingHostError::OneshotClosed)
+        Ok(status)
     }
 
     /// Ultra-fast unary raw call:

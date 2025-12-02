@@ -15,7 +15,7 @@ pub enum NrStatus {
 /// A UTF-8 string slice with a pointer and length.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct NrStr {
     pub ptr: *const u8,
     pub len: u32,
@@ -24,7 +24,7 @@ pub struct NrStr {
 /// A byte slice with a pointer and length.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct NrBytes {
     pub ptr: *const u8,
     pub len: u64,
@@ -32,10 +32,39 @@ pub struct NrBytes {
 
 /// A key-value pair of strings.
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct NrHeader {
     pub key: NrStr,
     pub value: NrStr,
+}
+
+/// A vector with a pointer, length, and capacity.
+/// This struct is `#[repr(C)]` and ABI-stable.
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct NrVec<T> {
+    pub ptr: *mut T,
+    pub len: u64,
+    pub cap: u64,
+}
+
+impl<T> Default for NrVec<T> {
+    fn default() -> Self {
+        Self {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        }
+    }
+}
+
+/// A tuple of two elements.
+/// This struct is `#[repr(C)]` and ABI-stable.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NrTuple<A, B> {
+    pub a: A,
+    pub b: B,
 }
 
 /// Represents a request with metadata.
@@ -307,6 +336,25 @@ impl NrStr {
             std::str::from_utf8_unchecked(slice)
         }
     }
+
+    // push_str
+    pub fn push_str(&mut self, s: &str) {
+        if self.ptr.is_null() {
+            self.ptr = s.as_ptr();
+            self.len = s.len() as u32;
+            return;
+        }
+        let new_len = self.len + s.len() as u32;
+        let new_slice =
+            unsafe { std::slice::from_raw_parts_mut(self.ptr as *mut u8, new_len as usize) };
+        new_slice[self.len as usize..new_len as usize].copy_from_slice(s.as_bytes());
+        self.len = new_len;
+    }
+
+    pub fn clear(&mut self) {
+        self.ptr = std::ptr::null();
+        self.len = 0;
+    }
 }
 
 impl NrBytes {
@@ -329,11 +377,76 @@ impl NrHeader {
             value: NrStr::from_str(value),
         }
     }
+
+    pub fn from_nr_str(key: NrStr, value: NrStr) -> Self {
+        Self { key, value }
+    }
 }
 
 impl NrPluginInfo {
     pub fn compatible(&self, expected_abi_version: u32) -> bool {
         self.abi_version == expected_abi_version
+    }
+}
+
+impl<T> NrVec<T> {
+    pub fn push(&mut self, value: T) {
+        if self.len == self.cap {
+            self.reserve(1);
+        }
+        unsafe {
+            std::ptr::write(self.ptr.add(self.len as usize), value);
+        }
+        self.len += 1;
+    }
+
+    pub fn clear(&mut self) {
+        while self.len > 0 {
+            self.len -= 1;
+            unsafe {
+                std::ptr::drop_in_place(self.ptr.add(self.len as usize));
+            }
+        }
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        let available = self.cap as usize - self.len as usize;
+        if available < additional {
+            let required = self.len as usize + additional;
+            let new_cap = if self.cap == 0 {
+                std::cmp::max(1, required)
+            } else {
+                std::cmp::max(self.cap as usize * 2, required)
+            };
+
+            let new_layout = std::alloc::Layout::array::<T>(new_cap).unwrap();
+
+            let new_ptr = if self.cap == 0 {
+                unsafe { std::alloc::alloc(new_layout) }
+            } else {
+                let old_layout = std::alloc::Layout::array::<T>(self.cap as usize).unwrap();
+                unsafe { std::alloc::realloc(self.ptr as *mut u8, old_layout, new_layout.size()) }
+            };
+
+            if new_ptr.is_null() {
+                std::alloc::handle_alloc_error(new_layout);
+            }
+
+            self.ptr = new_ptr as *mut T;
+            self.cap = new_cap as u64;
+        }
+    }
+}
+
+impl<T> Drop for NrVec<T> {
+    fn drop(&mut self) {
+        self.clear();
+        if self.cap != 0 {
+            let layout = std::alloc::Layout::array::<T>(self.cap as usize).unwrap();
+            unsafe {
+                std::alloc::dealloc(self.ptr as *mut u8, layout);
+            }
+        }
     }
 }
 
@@ -360,6 +473,12 @@ unsafe impl Sync for NrPluginVTable {}
 unsafe impl Send for NrPluginInfo {}
 unsafe impl Sync for NrPluginInfo {}
 
+unsafe impl<T: Send> Send for NrVec<T> {}
+unsafe impl<T: Sync> Sync for NrVec<T> {}
+
+unsafe impl<A: Send, B: Send> Send for NrTuple<A, B> {}
+unsafe impl<A: Sync, B: Sync> Sync for NrTuple<A, B> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,6 +496,16 @@ mod tests {
         assert_eq!(size_of::<NrBytes>(), 16);
         assert_eq!(align_of::<NrBytes>(), 8);
 
+        // Verify NrVec layout (ptr + u64 + u64)
+        // On 64-bit: 8 bytes ptr + 8 bytes len + 8 bytes cap = 24 bytes
+        assert_eq!(size_of::<NrVec<u8>>(), 24);
+        assert_eq!(align_of::<NrVec<u8>>(), 8);
+
+        // Verify NrTuple layout (A + B)
+        // u64 + u64 = 16 bytes
+        assert_eq!(size_of::<NrTuple<u64, u64>>(), 16);
+        assert_eq!(align_of::<NrTuple<u64, u64>>(), 8);
+
         // Verify NrHeader layout (NrStr + NrStr)
         // 16 + 16 = 32 bytes
         assert_eq!(size_of::<NrHeader>(), 32);
@@ -387,5 +516,32 @@ mod tests {
         // 16*3 + 8 + 4 + 4 + 8 = 48 + 8 + 8 + 8 = 72 bytes
         assert_eq!(size_of::<NrRequest>(), 72);
         assert_eq!(align_of::<NrRequest>(), 8);
+    }
+
+    #[test]
+    fn test_nr_vec() {
+        let mut v = NrVec::<u32>::default();
+        assert_eq!(v.len, 0);
+        assert_eq!(v.cap, 0);
+
+        v.push(1);
+        assert_eq!(v.len, 1);
+        assert!(v.cap >= 1);
+        unsafe {
+            assert_eq!(*v.ptr, 1);
+        }
+
+        v.push(2);
+        assert_eq!(v.len, 2);
+        unsafe {
+            assert_eq!(*v.ptr.add(1), 2);
+        }
+
+        v.reserve(10);
+        assert!(v.cap >= 12); // 2 + 10
+
+        v.clear();
+        assert_eq!(v.len, 0);
+        assert!(v.cap >= 12);
     }
 }

@@ -548,17 +548,19 @@ impl NylonRingHost {
             }
         };
 
-        let status = panic::catch_unwind(panic::AssertUnwindSafe(|| unsafe {
-            handle_raw_fn(self.plugin_ctx, NrStr::from_str(entry), sid, *payload)
-        }));
+        // let status = panic::catch_unwind(panic::AssertUnwindSafe(|| unsafe {
+        //     handle_raw_fn(self.plugin_ctx, NrStr::from_str(entry), sid, *payload)
+        // }));
+        let status =
+            unsafe { handle_raw_fn(self.plugin_ctx, NrStr::from_str(entry), sid, *payload) };
 
-        let status = match status {
-            Ok(s) => s,
-            Err(_) => {
-                let _ = self.host_ctx.pending_requests.remove(&sid);
-                return Err(NylonRingHostError::PluginHandleFailed(NrStatus::Err));
-            }
-        };
+        // let status = match status {
+        //     Ok(s) => s,
+        //     Err(_) => {
+        //         let _ = self.host_ctx.pending_requests.remove(&sid);
+        //         return Err(NylonRingHostError::PluginHandleFailed(NrStatus::Err));
+        //     }
+        // };
 
         if status != NrStatus::Ok {
             let _ = self.host_ctx.pending_requests.remove(&sid);

@@ -440,11 +440,14 @@ impl<T> NrVec<T> {
 
 impl<T> Drop for NrVec<T> {
     fn drop(&mut self) {
-        self.clear();
         if self.cap != 0 {
-            let layout = std::alloc::Layout::array::<T>(self.cap as usize).unwrap();
+            if self.ptr.is_null() {
+                return;
+            }
             unsafe {
-                std::alloc::dealloc(self.ptr as *mut u8, layout);
+                if let Ok(layout) = std::alloc::Layout::array::<T>(self.cap as usize) {
+                    std::alloc::dealloc(self.ptr as *mut u8, layout);
+                }
             }
         }
     }

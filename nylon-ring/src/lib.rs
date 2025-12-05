@@ -445,9 +445,131 @@ impl<T> Drop for NrVec<T> {
                 return;
             }
             unsafe {
+                // Drop elements
+                let s = std::slice::from_raw_parts_mut(self.ptr, self.len as usize);
+                std::ptr::drop_in_place(s);
+
+                // Deallocate
                 if let Ok(layout) = std::alloc::Layout::array::<T>(self.cap as usize) {
                     std::alloc::dealloc(self.ptr as *mut u8, layout);
                 }
+            }
+        }
+    }
+}
+
+impl<T> NrVec<T> {
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.as_slice().iter()
+    }
+
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        self.as_mut_slice().iter_mut()
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        if self.ptr.is_null() {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) }
+        }
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        if self.ptr.is_null() {
+            &mut []
+        } else {
+            unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len as usize) }
+        }
+    }
+}
+
+impl<'a, T> IntoIterator for &'a NrVec<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut NrVec<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+/// An iterator that moves out of an NrVec.
+pub struct IntoIter<T> {
+    buf: *mut T,
+    cap: usize,
+    ptr: *const T,
+    end: *const T,
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.ptr == self.end {
+            None
+        } else {
+            unsafe {
+                let result = std::ptr::read(self.ptr);
+                self.ptr = self.ptr.add(1);
+                Some(result)
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = (self.end as usize - self.ptr as usize) / std::mem::size_of::<T>();
+        (len, Some(len))
+    }
+}
+
+impl<T> Drop for IntoIter<T> {
+    fn drop(&mut self) {
+        // Drop remaining elements
+        if self.ptr != self.end {
+            unsafe {
+                let len = (self.end as usize - self.ptr as usize) / std::mem::size_of::<T>();
+                let s = std::slice::from_raw_parts_mut(self.ptr as *mut T, len);
+                std::ptr::drop_in_place(s);
+            }
+        }
+        // Deallocate buffer
+        if self.cap != 0 {
+            unsafe {
+                if let Ok(layout) = std::alloc::Layout::array::<T>(self.cap) {
+                    std::alloc::dealloc(self.buf as *mut u8, layout);
+                }
+            }
+        }
+    }
+}
+
+impl<T> IntoIterator for NrVec<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        // Prevent NrVec drop from deallocating
+        let this = std::mem::ManuallyDrop::new(self);
+
+        let ptr = this.ptr;
+        let cap = this.cap as usize;
+        let len = this.len as usize;
+
+        unsafe {
+            IntoIter {
+                buf: ptr,
+                cap,
+                ptr,
+                end: if ptr.is_null() { ptr } else { ptr.add(len) },
             }
         }
     }
@@ -546,5 +668,60 @@ mod tests {
         v.clear();
         assert_eq!(v.len, 0);
         assert!(v.cap >= 12);
+    }
+    #[test]
+    fn test_nr_vec_iter() {
+        let mut v = NrVec::<u32>::default();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+
+        let mut iter = v.iter();
+        assert_eq!(iter.next(), Some(&1));
+        assert_eq!(iter.next(), Some(&2));
+        assert_eq!(iter.next(), Some(&3));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_nr_vec_iter_mut() {
+        let mut v = NrVec::<u32>::default();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+
+        for x in v.iter_mut() {
+            *x *= 2;
+        }
+
+        let mut iter = v.iter();
+        assert_eq!(iter.next(), Some(&2));
+        assert_eq!(iter.next(), Some(&4));
+        assert_eq!(iter.next(), Some(&6));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_nr_vec_into_iter() {
+        let mut v = NrVec::<u32>::default();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+
+        let mut iter = v.into_iter();
+        assert_eq!(iter.next(), Some(1));
+        assert_eq!(iter.next(), Some(2));
+        assert_eq!(iter.next(), Some(3));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_nr_vec_collect() {
+        let mut v = NrVec::<u32>::default();
+        v.push(10);
+        v.push(20);
+
+        let collected: Vec<u32> = v.iter().cloned().collect();
+        assert_eq!(collected, vec![10, 20]);
     }
 }

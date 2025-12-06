@@ -29,12 +29,19 @@ pub struct StreamFrame {
 pub type StreamReceiver = mpsc::UnboundedReceiver<StreamFrame>;
 type FastPendingMap = DashMap<u64, Pending, FxBuildHasher>;
 type FastStateMap = DashMap<u64, HashMap<String, Vec<u8>>, FxBuildHasher>;
+type UnarySender = Option<oneshot::Sender<(NrStatus, Vec<u8>)>>;
 #[repr(C)]
 struct HostContext {
     pending_requests: FastPendingMap,
     state_per_sid: FastStateMap,
     host_ext: *const NrHostExt,
 }
+
+// Safety: HostContext can be safely shared across threads because:
+// - FastPendingMap and FastStateMap (DashMap) are already thread-safe
+// - host_ext is a raw pointer to a stable Box that outlives HostContext
+unsafe impl Send for HostContext {}
+unsafe impl Sync for HostContext {}
 pub struct NylonRingHost {
     _lib: Library,
     plugin_vtable: &'static NrPluginVTable,
@@ -49,7 +56,7 @@ unsafe impl Send for NylonRingHost {}
 unsafe impl Sync for NylonRingHost {}
 
 thread_local! {
-    static CURRENT_UNARY_TX: Cell<*mut Option<oneshot::Sender<(NrStatus, Vec<u8>)>>> =
+    static CURRENT_UNARY_TX: Cell<*mut UnarySender> =
         const { Cell::new(std::ptr::null_mut()) };
 }
 
@@ -85,8 +92,8 @@ impl NylonRingHost {
             }
 
             let host_ctx = Arc::new(HostContext {
-                pending_requests: FastPendingMap::with_hasher(FxBuildHasher::default()),
-                state_per_sid: FastStateMap::with_hasher(FxBuildHasher::default()),
+                pending_requests: FastPendingMap::with_hasher(FxBuildHasher),
+                state_per_sid: FastStateMap::with_hasher(FxBuildHasher),
                 host_ext: std::ptr::null(), // Will be set after creating host_ext
             });
 
@@ -228,7 +235,7 @@ impl NylonRingHost {
 
             ctx.state_per_sid
                 .entry(sid)
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .insert(key_str, value_vec);
 
             // Return empty bytes on success
@@ -287,7 +294,7 @@ impl NylonRingHost {
             }
         };
 
-        let status = unsafe { handle_raw_fn(NrStr::from_str(entry), sid, payload_bytes) };
+        let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
         if status != NrStatus::Ok {
             let _ = self.host_ctx.pending_requests.remove(&sid);
@@ -330,7 +337,7 @@ impl NylonRingHost {
         };
 
         let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            handle_raw_fn(NrStr::from_str(entry), sid, payload_bytes)
+            handle_raw_fn(NrStr::new(entry), sid, payload_bytes)
         }));
 
         CURRENT_UNARY_TX.with(|cell| cell.set(std::ptr::null_mut()));
@@ -374,7 +381,7 @@ impl NylonRingHost {
         };
 
         let status = panic::catch_unwind(panic::AssertUnwindSafe(|| unsafe {
-            handle_raw_fn(NrStr::from_str(entry), sid, payload_bytes)
+            handle_raw_fn(NrStr::new(entry), sid, payload_bytes)
         }));
 
         let status = match status {
@@ -429,6 +436,12 @@ impl NylonRingHost {
     }
 
     /// Get host extension pointer from host_ctx.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `host_ctx` is a valid pointer to a `HostContext`
+    /// instance that was created by this host, or a null pointer. The returned pointer
+    /// is valid for the lifetime of the `HostContext`.
     pub unsafe fn get_host_ext(host_ctx: *mut c_void) -> *const NrHostExt {
         if host_ctx.is_null() {
             return std::ptr::null();

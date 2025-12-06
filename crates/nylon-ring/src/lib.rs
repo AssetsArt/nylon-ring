@@ -250,7 +250,7 @@ pub struct NrPluginInfo {
 }
 
 impl NrStr {
-    pub fn from_str(s: &str) -> Self {
+    pub fn new(s: &str) -> Self {
         Self {
             ptr: s.as_ptr(),
             len: s.len() as u32,
@@ -300,8 +300,8 @@ impl NrBytes {
 impl NrKV {
     pub fn new(key: &str, value: &str) -> Self {
         Self {
-            key: NrStr::from_str(key),
-            value: NrStr::from_str(value),
+            key: NrStr::new(key),
+            value: NrStr::new(value),
         }
     }
 

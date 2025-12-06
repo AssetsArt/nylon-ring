@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "crates/nylon-ring",
-    "crates/nylon-ring-host",
+    "crates/nylon-ring-host", "examples/ex-nyring-host", "examples/ex-nyring-plugin",
 ]
 resolver = "2"
 

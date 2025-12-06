@@ -12,3 +12,11 @@ thiserror = "2"
 log = "0.4"
 dashmap = "6.1"
 rustc-hash = "2.1"
+
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

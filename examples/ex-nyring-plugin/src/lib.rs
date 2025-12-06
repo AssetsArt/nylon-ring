@@ -49,6 +49,18 @@ unsafe fn handle_uppercase(sid: u64, payload: NrBytes) -> NrStatus {
     NrStatus::Ok
 }
 
+// benchmark
+unsafe fn handle_benchmark(sid: u64, payload: NrBytes) -> NrStatus {
+    let data = payload.as_slice();
+    let _text = String::from_utf8_lossy(data);
+    // println!("[Plugin] Benchmark received: {}", text);
+
+    // Send response back to host
+    send_result(sid, NrStatus::Ok, payload);
+
+    NrStatus::Ok
+}
+
 // Define the plugin with its entry points
 define_plugin! {
     init: init,
@@ -56,5 +68,6 @@ define_plugin! {
     entries: {
         "echo" => handle_echo,
         "uppercase" => handle_uppercase,
+        "benchmark" => handle_benchmark,
     }
 }

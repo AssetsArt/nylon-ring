@@ -5,6 +5,13 @@ use std::ffi::c_void;
 static mut HOST_CTX: *mut c_void = std::ptr::null_mut();
 static mut HOST_VTABLE: *const NrHostVTable = std::ptr::null();
 
+#[inline]
+unsafe fn send_result(sid: u64, status: NrStatus, payload: NrBytes) {
+    if !HOST_VTABLE.is_null() && !HOST_CTX.is_null() {
+        ((*HOST_VTABLE).send_result)(HOST_CTX, sid, status, payload);
+    }
+}
+
 // Initialize the plugin
 unsafe fn init(host_ctx: *mut c_void, host_vtable: *const NrHostVTable) -> NrStatus {
     println!("[Plugin] Initialized!");
@@ -25,9 +32,7 @@ unsafe fn handle_echo(sid: u64, payload: NrBytes) -> NrStatus {
     println!("[Plugin] Echo received: {}", text);
 
     // Send response back to host
-    if !HOST_VTABLE.is_null() && !HOST_CTX.is_null() {
-        ((*HOST_VTABLE).send_result)(HOST_CTX, sid, NrStatus::Ok, payload);
-    }
+    send_result(sid, NrStatus::Ok, payload);
 
     NrStatus::Ok
 }
@@ -39,11 +44,7 @@ unsafe fn handle_uppercase(sid: u64, payload: NrBytes) -> NrStatus {
     println!("[Plugin] Uppercase received, sending back: {}", text);
 
     // Send response back to host
-    if !HOST_VTABLE.is_null() && !HOST_CTX.is_null() {
-        let response = text.as_bytes();
-        let response_bytes = NrBytes::from_slice(response);
-        ((*HOST_VTABLE).send_result)(HOST_CTX, sid, NrStatus::Ok, response_bytes);
-    }
+    send_result(sid, NrStatus::Ok, NrBytes::from_slice(text.as_bytes()));
 
     NrStatus::Ok
 }

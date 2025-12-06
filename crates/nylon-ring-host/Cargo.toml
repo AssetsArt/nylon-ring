@@ -1,0 +1,13 @@
+[package]
+name = "nylon-ring-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nylon-ring = { path = "../nylon-ring" }
+tokio = { workspace = true }
+libloading = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+dashmap = { workspace = true }
+rustc-hash = { workspace = true }

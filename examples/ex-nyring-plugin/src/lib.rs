@@ -5,10 +5,11 @@ use std::ffi::c_void;
 static mut HOST_CTX: *mut c_void = std::ptr::null_mut();
 static mut HOST_VTABLE: *const NrHostVTable = std::ptr::null();
 
-#[inline]
-unsafe fn send_result(sid: u64, status: NrStatus, payload: NrBytes) {
-    if !HOST_VTABLE.is_null() && !HOST_CTX.is_null() {
-        ((*HOST_VTABLE).send_result)(HOST_CTX, sid, status, payload);
+#[inline(always)]
+pub fn send_result(sid: u64, status: NrStatus, data: &[u8]) {
+    unsafe {
+        let f = (*HOST_VTABLE).send_result;
+        f(HOST_CTX, sid, status, NrBytes::from_slice(data));
     }
 }
 
@@ -32,7 +33,7 @@ unsafe fn handle_echo(sid: u64, payload: NrBytes) -> NrStatus {
     println!("[Plugin] Echo received: {}", text);
 
     // Send response back to host
-    send_result(sid, NrStatus::Ok, payload);
+    send_result(sid, NrStatus::Ok, payload.as_slice());
 
     NrStatus::Ok
 }
@@ -44,7 +45,7 @@ unsafe fn handle_uppercase(sid: u64, payload: NrBytes) -> NrStatus {
     println!("[Plugin] Uppercase received, sending back: {}", text);
 
     // Send response back to host
-    send_result(sid, NrStatus::Ok, NrBytes::from_slice(text.as_bytes()));
+    send_result(sid, NrStatus::Ok, text.as_bytes());
 
     NrStatus::Ok
 }
@@ -56,7 +57,7 @@ unsafe fn handle_benchmark(sid: u64, payload: NrBytes) -> NrStatus {
     // println!("[Plugin] Benchmark received: {}", text);
 
     // Send response back to host
-    send_result(sid, NrStatus::Ok, payload);
+    send_result(sid, NrStatus::Ok, payload.as_slice());
 
     NrStatus::Ok
 }

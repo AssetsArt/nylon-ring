@@ -33,7 +33,7 @@ pub struct NrBytes {
 /// A key-value pair of strings.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Default)]
-pub struct NrHeader {
+pub struct NrKV {
     pub key: NrStr,
     pub value: NrStr,
 }
@@ -65,22 +65,6 @@ impl<T> Default for NrVec<T> {
 pub struct NrTuple<A, B> {
     pub a: A,
     pub b: B,
-}
-
-/// Represents a request with metadata.
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct NrRequest {
-    pub path: NrStr,
-    pub method: NrStr,
-    pub query: NrStr,
-
-    pub headers: *const NrHeader,
-    pub headers_len: u32,
-
-    // ABI forward-compatibility storage
-    pub _reserved0: u32,
-    pub _reserved1: u64,
 }
 
 /// Host callback table.
@@ -131,16 +115,6 @@ pub struct NrPluginVTable {
             plugin_ctx: *mut c_void,
             entry: NrStr,
             sid: u64,
-            req: *const NrRequest,
-            payload: NrBytes,
-        ) -> NrStatus,
-    >,
-
-    pub handle_raw: Option<
-        unsafe extern "C" fn(
-            plugin_ctx: *mut c_void,
-            entry: NrStr,
-            sid: u64,
             payload: NrBytes,
         ) -> NrStatus,
     >,
@@ -161,9 +135,6 @@ macro_rules! define_plugin {
         entries: {
             $($entry_name:literal => $handler_fn:path),* $(,)?
         }
-        $(, raw_entries: {
-            $($raw_entry_name:literal => $raw_handler_fn:path),* $(,)?
-        })?
         $(, stream_handlers: {
             data: $stream_data_fn:path,
             close: $stream_close_fn:path $(,)?
@@ -370,7 +341,7 @@ impl NrBytes {
     }
 }
 
-impl NrHeader {
+impl NrKV {
     pub fn new(key: &str, value: &str) -> Self {
         Self {
             key: NrStr::from_str(key),
@@ -583,11 +554,8 @@ unsafe impl Sync for NrStr {}
 unsafe impl Send for NrBytes {}
 unsafe impl Sync for NrBytes {}
 
-unsafe impl Send for NrHeader {}
-unsafe impl Sync for NrHeader {}
-
-unsafe impl Send for NrRequest {}
-unsafe impl Sync for NrRequest {}
+unsafe impl Send for NrKV {}
+unsafe impl Sync for NrKV {}
 
 unsafe impl Send for NrHostVTable {}
 unsafe impl Sync for NrHostVTable {}
@@ -631,16 +599,10 @@ mod tests {
         assert_eq!(size_of::<NrTuple<u64, u64>>(), 16);
         assert_eq!(align_of::<NrTuple<u64, u64>>(), 8);
 
-        // Verify NrHeader layout (NrStr + NrStr)
+        // Verify NrKV layout (NrStr + NrStr)
         // 16 + 16 = 32 bytes
-        assert_eq!(size_of::<NrHeader>(), 32);
-        assert_eq!(align_of::<NrHeader>(), 8);
-
-        // Verify NrRequest layout
-        // path (16) + method (16) + query (16) + headers ptr (8) + headers_len (4) + reserved0 (4) + reserved1 (8)
-        // 16*3 + 8 + 4 + 4 + 8 = 48 + 8 + 8 + 8 = 72 bytes
-        assert_eq!(size_of::<NrRequest>(), 72);
-        assert_eq!(align_of::<NrRequest>(), 8);
+        assert_eq!(size_of::<NrKV>(), 32);
+        assert_eq!(align_of::<NrKV>(), 8);
     }
 
     #[test]

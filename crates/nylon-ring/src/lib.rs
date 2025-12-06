@@ -161,12 +161,11 @@ macro_rules! define_plugin {
 
         // Wrappers
         unsafe extern "C" fn plugin_init_wrapper(
-            plugin_ctx: *mut std::ffi::c_void,
             host_ctx: *mut std::ffi::c_void,
             host_vtable: *const $crate::NrHostVTable,
         ) -> $crate::NrStatus {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                $init_fn(plugin_ctx, host_ctx, host_vtable)
+                $init_fn(host_ctx, host_vtable)
             }));
             match result {
                 Ok(status) => status,
@@ -186,11 +185,11 @@ macro_rules! define_plugin {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let entry_str = entry.as_str();
                 match entry_str {
-                    $($(
+                    $(
                         $entry_name => {
                             $handler_fn(sid, payload)
                         }
-                    )*)?
+                    )*
                     _ => $crate::NrStatus::Invalid,
                 }
             }));

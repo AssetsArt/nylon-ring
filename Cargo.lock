@@ -43,10 +43,17 @@ dependencies = [
 [[package]]
 name = "ex-nyring-host"
 version = "0.1.0"
+dependencies = [
+ "nylon-ring-host",
+ "tokio",
+]
 
 [[package]]
 name = "ex-nyring-plugin"
 version = "0.1.0"
+dependencies = [
+ "nylon-ring",
+]
 
 [[package]]
 name = "hashbrown"

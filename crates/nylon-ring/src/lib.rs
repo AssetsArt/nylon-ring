@@ -182,20 +182,14 @@ macro_rules! define_plugin {
             sid: u64,
             payload: $crate::NrBytes,
         ) -> $crate::NrStatus {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let entry_str = entry.as_str();
-                match entry_str {
-                    $(
-                        $entry_name => {
-                            $handler_fn(sid, payload)
-                        }
-                    )*
-                    _ => $crate::NrStatus::Invalid,
-                }
-            }));
-            match result {
-                Ok(status) => status,
-                Err(_) => $crate::NrStatus::Err,
+            let entry_str = entry.as_str();
+            match entry_str {
+                $(
+                    $entry_name => {
+                        $handler_fn(sid, payload)
+                    }
+                )*
+                _ => $crate::NrStatus::Invalid,
             }
         }
 
@@ -203,33 +197,21 @@ macro_rules! define_plugin {
             sid: u64,
             data: $crate::NrBytes,
         ) -> $crate::NrStatus {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                $(
-                    return $stream_data_fn(sid, data);
-                )?
-                #[allow(unreachable_code)]
-                $crate::NrStatus::Unsupported
-            }));
-            match result {
-                Ok(status) => status,
-                Err(_) => $crate::NrStatus::Err,
-            }
+            $(
+                return $stream_data_fn(sid, data);
+            )?
+            #[allow(unreachable_code)]
+            $crate::NrStatus::Unsupported
         }
 
         unsafe extern "C" fn plugin_stream_close_wrapper(
             sid: u64,
         ) -> $crate::NrStatus {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                $(
-                    return $stream_close_fn(sid);
-                )?
-                #[allow(unreachable_code)]
-                $crate::NrStatus::Unsupported
-            }));
-            match result {
-                Ok(status) => status,
-                Err(_) => $crate::NrStatus::Err,
-            }
+            $(
+                return $stream_close_fn(sid);
+            )?
+            #[allow(unreachable_code)]
+            $crate::NrStatus::Unsupported
         }
     };
 }

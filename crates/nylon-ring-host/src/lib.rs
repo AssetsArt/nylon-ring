@@ -125,7 +125,6 @@ impl NylonRingHost {
             if let Some(init_fn) = plugin_vtable.init {
                 let status = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                     init_fn(
-                        host.plugin_ctx,
                         Arc::as_ptr(&host.host_ctx) as *mut c_void,
                         &*host.host_vtable,
                     )
@@ -288,8 +287,7 @@ impl NylonRingHost {
             }
         };
 
-        let status =
-            unsafe { handle_raw_fn(self.plugin_ctx, NrStr::from_str(entry), sid, payload_bytes) };
+        let status = unsafe { handle_raw_fn(NrStr::from_str(entry), sid, payload_bytes) };
 
         if status != NrStatus::Ok {
             let _ = self.host_ctx.pending_requests.remove(&sid);
@@ -332,7 +330,7 @@ impl NylonRingHost {
         };
 
         let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            handle_raw_fn(self.plugin_ctx, NrStr::from_str(entry), sid, payload_bytes)
+            handle_raw_fn(NrStr::from_str(entry), sid, payload_bytes)
         }));
 
         CURRENT_UNARY_TX.with(|cell| cell.set(std::ptr::null_mut()));
@@ -376,7 +374,7 @@ impl NylonRingHost {
         };
 
         let status = panic::catch_unwind(panic::AssertUnwindSafe(|| unsafe {
-            handle_raw_fn(self.plugin_ctx, NrStr::from_str(entry), sid, payload_bytes)
+            handle_raw_fn(NrStr::from_str(entry), sid, payload_bytes)
         }));
 
         let status = match status {
@@ -403,7 +401,7 @@ impl NylonRingHost {
 
         let payload = NrBytes::from_slice(data);
         let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            stream_data_fn(self.plugin_ctx, sid, payload)
+            stream_data_fn(sid, payload)
         }));
 
         match status {
@@ -421,7 +419,7 @@ impl NylonRingHost {
         };
 
         let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            stream_close_fn(self.plugin_ctx, sid)
+            stream_close_fn(sid)
         }));
 
         match status {
@@ -444,7 +442,7 @@ impl Drop for NylonRingHost {
     fn drop(&mut self) {
         if let Some(shutdown_fn) = self.plugin_vtable.shutdown {
             unsafe {
-                shutdown_fn(self.plugin_ctx);
+                shutdown_fn();
             }
         }
     }

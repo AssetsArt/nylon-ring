@@ -103,28 +103,16 @@ unsafe impl Sync for NrHostExt {}
 #[derive(Debug, Copy, Clone)]
 pub struct NrPluginVTable {
     pub init: Option<
-        unsafe extern "C" fn(
-            plugin_ctx: *mut c_void,
-            host_ctx: *mut c_void,
-            host_vtable: *const NrHostVTable,
-        ) -> NrStatus,
+        unsafe extern "C" fn(host_ctx: *mut c_void, host_vtable: *const NrHostVTable) -> NrStatus,
     >,
 
-    pub handle: Option<
-        unsafe extern "C" fn(
-            plugin_ctx: *mut c_void,
-            entry: NrStr,
-            sid: u64,
-            payload: NrBytes,
-        ) -> NrStatus,
-    >,
+    pub handle: Option<unsafe extern "C" fn(entry: NrStr, sid: u64, payload: NrBytes) -> NrStatus>,
 
-    pub shutdown: Option<unsafe extern "C" fn(plugin_ctx: *mut c_void)>,
+    pub shutdown: Option<unsafe extern "C" fn()>,
 
-    pub stream_data:
-        Option<unsafe extern "C" fn(plugin_ctx: *mut c_void, sid: u64, data: NrBytes) -> NrStatus>,
+    pub stream_data: Option<unsafe extern "C" fn(sid: u64, data: NrBytes) -> NrStatus>,
 
-    pub stream_close: Option<unsafe extern "C" fn(plugin_ctx: *mut c_void, sid: u64) -> NrStatus>,
+    pub stream_close: Option<unsafe extern "C" fn(sid: u64) -> NrStatus>,
 }
 
 #[macro_export]
@@ -144,7 +132,6 @@ macro_rules! define_plugin {
         static PLUGIN_VTABLE: $crate::NrPluginVTable = $crate::NrPluginVTable {
             init: Some(plugin_init_wrapper),
             handle: Some(plugin_handle_wrapper),
-            handle_raw: Some(plugin_handle_raw_wrapper),
             shutdown: Some(plugin_shutdown_wrapper),
             stream_data: Some(plugin_stream_data_wrapper),
             stream_close: Some(plugin_stream_close_wrapper),
@@ -187,40 +174,11 @@ macro_rules! define_plugin {
             }
         }
 
-        unsafe extern "C" fn plugin_shutdown_wrapper(
-            plugin_ctx: *mut std::ffi::c_void,
-        ) {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                $shutdown_fn(plugin_ctx)
-            }));
+        unsafe extern "C" fn plugin_shutdown_wrapper() {
+            $shutdown_fn();
         }
 
         unsafe extern "C" fn plugin_handle_wrapper(
-            plugin_ctx: *mut std::ffi::c_void,
-            entry: $crate::NrStr,
-            sid: u64,
-            req: *const $crate::NrRequest,
-            payload: $crate::NrBytes,
-        ) -> $crate::NrStatus {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let entry_str = entry.as_str();
-                match entry_str {
-                    $(
-                        $entry_name => {
-                            $handler_fn(plugin_ctx, sid, req, payload)
-                        }
-                    )*
-                    _ => $crate::NrStatus::Invalid,
-                }
-            }));
-            match result {
-                Ok(status) => status,
-                Err(_) => $crate::NrStatus::Err,
-            }
-        }
-
-        unsafe extern "C" fn plugin_handle_raw_wrapper(
-            plugin_ctx: *mut std::ffi::c_void,
             entry: $crate::NrStr,
             sid: u64,
             payload: $crate::NrBytes,
@@ -229,8 +187,8 @@ macro_rules! define_plugin {
                 let entry_str = entry.as_str();
                 match entry_str {
                     $($(
-                        $raw_entry_name => {
-                            $raw_handler_fn(plugin_ctx, sid, payload)
+                        $entry_name => {
+                            $handler_fn(sid, payload)
                         }
                     )*)?
                     _ => $crate::NrStatus::Invalid,
@@ -243,13 +201,12 @@ macro_rules! define_plugin {
         }
 
         unsafe extern "C" fn plugin_stream_data_wrapper(
-            plugin_ctx: *mut std::ffi::c_void,
             sid: u64,
             data: $crate::NrBytes,
         ) -> $crate::NrStatus {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 $(
-                    return $stream_data_fn(plugin_ctx, sid, data);
+                    return $stream_data_fn(sid, data);
                 )?
                 #[allow(unreachable_code)]
                 $crate::NrStatus::Unsupported
@@ -261,12 +218,11 @@ macro_rules! define_plugin {
         }
 
         unsafe extern "C" fn plugin_stream_close_wrapper(
-            plugin_ctx: *mut std::ffi::c_void,
             sid: u64,
         ) -> $crate::NrStatus {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 $(
-                    return $stream_close_fn(plugin_ctx, sid);
+                    return $stream_close_fn(sid);
                 )?
                 #[allow(unreachable_code)]
                 $crate::NrStatus::Unsupported

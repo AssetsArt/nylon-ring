@@ -24,6 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "build",
             "--manifest-path",
             "examples/ex-nyring-plugin/Cargo.toml",
+            "-r",
         ])
         .status()?;
 
@@ -34,11 +35,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load the plugin
     let plugin_path = if cfg!(target_os = "macos") {
-        "target/debug/libex_nyring_plugin.dylib"
+        "target/release/libex_nyring_plugin.dylib"
     } else if cfg!(target_os = "windows") {
-        "target/debug/ex_nyring_plugin.dll"
+        "target/release/ex_nyring_plugin.dll"
     } else {
-        "target/debug/libex_nyring_plugin.so"
+        "target/release/libex_nyring_plugin.so"
     };
 
     println!("Loading plugin from: {}\n", plugin_path);

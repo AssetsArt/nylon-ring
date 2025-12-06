@@ -18,18 +18,18 @@ use tokio::sync::{mpsc, oneshot};
 type Result<T> = std::result::Result<T, NylonRingHostError>;
 enum Pending {
     #[allow(dead_code)]
-    Unary(oneshot::Sender<(NrStatus, Vec<u8>)>),
+    Unary(oneshot::Sender<(NrStatus, NrBytes)>),
     Stream(mpsc::UnboundedSender<StreamFrame>),
 }
 #[derive(Debug)]
 pub struct StreamFrame {
     pub status: NrStatus,
-    pub data: Vec<u8>,
+    pub data: NrBytes,
 }
 pub type StreamReceiver = mpsc::UnboundedReceiver<StreamFrame>;
 type FastPendingMap = DashMap<u64, Pending, FxBuildHasher>;
-type FastStateMap = DashMap<u64, HashMap<String, Vec<u8>>, FxBuildHasher>;
-type UnarySender = Option<oneshot::Sender<(NrStatus, Vec<u8>)>>;
+type FastStateMap = DashMap<u64, HashMap<String, NrBytes>, FxBuildHasher>;
+type UnarySender = Option<oneshot::Sender<(NrStatus, NrBytes)>>;
 #[repr(C)]
 struct HostContext {
     pending_requests: FastPendingMap,
@@ -168,12 +168,11 @@ impl NylonRingHost {
                 let ptr = cell.get();
                 if !ptr.is_null() {
                     // ptr: *mut Option<Sender<_>>
-                    let slot: &mut Option<oneshot::Sender<(NrStatus, Vec<u8>)>> =
+                    let slot: &mut Option<oneshot::Sender<(NrStatus, NrBytes)>> =
                         unsafe { &mut *ptr };
 
                     if let Some(tx) = slot.take() {
-                        let data = payload.as_slice().to_vec();
-                        let _ = tx.send((status, data));
+                        let _ = tx.send((status, payload));
                         ctx.state_per_sid.remove(&sid);
                         handled_fast = true;
                     }
@@ -185,14 +184,16 @@ impl NylonRingHost {
             }
 
             let should_clear_state = if let Some((_, entry)) = ctx.pending_requests.remove(&sid) {
-                let data = payload.as_slice().to_vec();
                 match entry {
                     Pending::Unary(tx) => {
-                        let _ = tx.send((status, data));
+                        let _ = tx.send((status, payload));
                         true
                     }
                     Pending::Stream(tx) => {
-                        let _ = tx.send(StreamFrame { status, data });
+                        let _ = tx.send(StreamFrame {
+                            status,
+                            data: payload,
+                        });
                         let is_finished = matches!(
                             status,
                             NrStatus::Err
@@ -231,12 +232,11 @@ impl NylonRingHost {
             let ctx = &*(host_ctx as *const HostContext);
 
             let key_str = key.as_str().to_string();
-            let value_vec = value.as_slice().to_vec();
 
             ctx.state_per_sid
                 .entry(sid)
                 .or_default()
-                .insert(key_str, value_vec);
+                .insert(key_str, value);
 
             // Return empty bytes on success
             NrBytes::from_slice(&[])
@@ -251,28 +251,23 @@ impl NylonRingHost {
         sid: u64,
         key: NrStr,
     ) -> NrBytes {
-        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            if host_ctx.is_null() {
-                return NrBytes::from_slice(&[]);
+        if host_ctx.is_null() {
+            return NrBytes::from_slice(&[]);
+        }
+        let ctx = &*(host_ctx as *const HostContext);
+
+        let key_str = key.as_str();
+        if let Some(sid_state) = ctx.state_per_sid.get(&sid) {
+            if let Some(value) = sid_state.get(key_str) {
+                return *value;
             }
-            let ctx = &*(host_ctx as *const HostContext);
+        }
 
-            let key_str = key.as_str();
-            if let Some(sid_state) = ctx.state_per_sid.get(&sid) {
-                if let Some(value) = sid_state.get(key_str) {
-                    return NrBytes::from_slice(value);
-                }
-            }
-
-            // Return empty bytes if not found
-            NrBytes::from_slice(&[])
-        }));
-
-        // Return empty bytes on panic (safe fallback)
-        result.unwrap_or_else(|_| NrBytes::from_slice(&[]))
+        // Return empty bytes if not found
+        NrBytes::from_slice(&[])
     }
 
-    pub async fn call(&self, entry: &str, payload: &[u8]) -> Result<(NrStatus, Vec<u8>)> {
+    pub async fn call(&self, entry: &str, payload: &[u8]) -> Result<(NrStatus, NrBytes)> {
         let _now = Instant::now();
         let sid = self
             .next_sid
@@ -307,16 +302,16 @@ impl NylonRingHost {
         &self,
         entry: &str,
         payload: &[u8],
-    ) -> Result<(NrStatus, Vec<u8>)> {
+    ) -> Result<(NrStatus, NrBytes)> {
         let sid = self
             .next_sid
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Sender/Receiver ปกติ
-        let (tx, rx) = oneshot::channel::<(NrStatus, Vec<u8>)>();
+        let (tx, rx) = oneshot::channel::<(NrStatus, NrBytes)>();
 
         // เก็บ Sender ไว้ใน Option เพื่อให้ callback มา .take() ไปใช้
-        let mut tx_slot: Option<oneshot::Sender<(NrStatus, Vec<u8>)>> = Some(tx);
+        let mut tx_slot: Option<oneshot::Sender<(NrStatus, NrBytes)>> = Some(tx);
 
         CURRENT_UNARY_TX.with(|cell| {
             debug_assert!(

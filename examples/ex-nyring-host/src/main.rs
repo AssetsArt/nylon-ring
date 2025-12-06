@@ -52,7 +52,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (status, response) = host.call("echo", message).await?;
     println!("Status: {:?}", status);
-    println!("Response: {}\n", String::from_utf8_lossy(&response));
+    println!(
+        "Response: {}\n",
+        String::from_utf8_lossy(response.as_slice())
+    );
 
     // Demo 2: Uppercase
     println!("--- Demo 2: Uppercase ---");
@@ -61,7 +64,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (status, response) = host.call("uppercase", message).await?;
     println!("Status: {:?}", status);
-    println!("Response: {}\n", String::from_utf8_lossy(&response));
+    println!(
+        "Response: {}\n",
+        String::from_utf8_lossy(response.as_slice())
+    );
 
     // Demo 3: Multiple calls
     println!("--- Demo 3: Multiple Calls ---");

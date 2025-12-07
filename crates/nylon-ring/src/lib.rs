@@ -44,8 +44,8 @@ pub struct NrKV {
 #[derive(Debug, Clone)]
 pub struct NrVec<T> {
     pub ptr: *mut T,
-    pub len: u64,
-    pub cap: u64,
+    pub len: usize,
+    pub cap: usize,
 }
 
 impl<T> Default for NrVec<T> {
@@ -307,11 +307,7 @@ impl<T> NrVec<T> {
         let ptr = v.as_mut_ptr();
         let len = v.len();
         let cap = v.capacity();
-        Self {
-            ptr,
-            len: len as u64,
-            cap: cap as u64,
-        }
+        Self { ptr, len, cap }
     }
 
     pub fn into_vec(self) -> Vec<T> {
@@ -362,8 +358,12 @@ impl<T> NrVec<T> {
             }
 
             self.ptr = new_ptr as *mut T;
-            self.cap = new_cap as u64;
+            self.cap = new_cap;
         }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.cap
     }
 }
 

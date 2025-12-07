@@ -48,7 +48,7 @@ fn bench_call_response(c: &mut Criterion) {
     group.bench_function("call_response", |b| {
         b.iter(|| {
             runtime.block_on(async {
-                let payload = b"Hello";
+                let payload = b"";
                 let result = host.call_response("benchmark", black_box(payload)).await;
                 black_box(result).unwrap();
             })
@@ -91,7 +91,7 @@ fn bench_call_response_fast(c: &mut Criterion) {
     group.bench_function("call_response_fast", |b| {
         b.iter(|| {
             runtime.block_on(async {
-                let payload = b"Hello";
+                let payload = b"";
                 let result = host
                     .call_response_fast("benchmark", black_box(payload))
                     .await;
@@ -113,7 +113,7 @@ fn bench_call_without_response(c: &mut Criterion) {
     group.bench_function("call_without_response", |b| {
         b.iter(|| {
             runtime.block_on(async {
-                let payload = b"Hello";
+                let payload = b"";
                 let result = host
                     .call("benchmark_without_response", black_box(payload))
                     .await;

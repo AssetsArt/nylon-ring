@@ -88,10 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demo 4: Benchmark
     println!("\n--- Demo 4: Benchmark ---");
-    // let concurrency = std::thread::available_parallelism()
-    //     .map(|n| n.get())
-    //     .unwrap_or(8);
-    let concurrency = 1;
+    let concurrency = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8);
     let mut handles = Vec::with_capacity(concurrency);
     let total_requests = Arc::new(AtomicU64::new(0));
     let total_latency_nanos = Arc::new(AtomicU64::new(0));

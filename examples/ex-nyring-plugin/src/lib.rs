@@ -59,12 +59,12 @@ unsafe fn handle_uppercase(sid: u64, payload: NrBytes) -> NrStatus {
 }
 
 // benchmark
-unsafe fn handle_benchmark(sid: u64, payload: NrBytes) -> NrStatus {
+unsafe fn handle_benchmark(_sid: u64, _payload: NrBytes) -> NrStatus {
     // let data = payload.as_slice();
     // let _text = String::from_utf8_lossy(data);
     // println!("[Plugin] Benchmark received: {}", text);
     // Send response back to host
-    send_result(sid, NrStatus::Ok, NrVec::from_nr_bytes(payload));
+    // send_result(sid, NrStatus::Ok, NrVec::from_nr_bytes(payload));
 
     NrStatus::Ok
 }

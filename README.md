@@ -2,57 +2,58 @@
 
 # 🔗 Nylon Ring
 
-**High-Performance ABI-Stable Host–Plugin Interface**
+**Ultra-Fast ABI-Stable Host–Plugin Interface for Rust**
 
 [![Rust](https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Go](https://img.shields.io/badge/Go-00ADD8?style=flat-square&logo=go&logoColor=white)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-MIT-green)](#)
 
-*Write plugins in Rust, Go, C, C++, Zig and more — communicate seamlessly with ABI stability*
+*Write blazing-fast plugins with ABI stability — extreme multi-thread performance*
 
-[Features](#-features) • [Quick Start](#-quick-start) • [Usage](#-usage) • [Performance](#-performance) • [Architecture](#-architecture)
+[Features](#-features) • [Quick Start](#-quick-start) • [Usage](#-usage) • [Performance](#-performance)
 
 </div>
 
 ---
 
+## ⚡ Performance Highlights
+
+> Benchmarked on **Apple M1 Pro (10-core)** — Release builds
+
+```
+🚀 Multi-thread:  52.9M req/sec  (10 cores, fire-and-forget)
+⚡ Single-thread: 13.7M req/sec  (fire-and-forget)
+🎯 Unary call:     6.9M req/sec  (with response)
+💨 Fast path:      7.2M req/sec  (thread-local optimized)
+```
+
+**Latency**: 73-235ns per call • **Scaling**: 3.9x per core efficiency
+
+---
+
 ## 🌟 Features
 
-<table>
-<tr>
-<td width="50%">
-
-**🔒 ABI-Stable**
+### 🔒 **ABI-Stable**
 - All data structures use C ABI (`#[repr(C)]`)
-- Guaranteed compatibility across language boundaries
-- Version-safe plugin loading
+- Version-safe plugin loading across Rust versions
+- Compatible with C, C++, Zig, Go, Rust, ...
 
-**🚀 High Performance**
-- Optimized for high-throughput workloads
-- Excellent multi-core scaling
-- Zero-copy data passing with borrowed slices
+### 🚀 **Extreme Performance**
+- **52.9M req/sec** multi-thread throughput
+- **Thread-local SID** generation (zero atomic operations)
+- **Zero-copy** data transfer with `NrVec<u8>`
+- Sub-nanosecond ABI overhead
 
-**🌐 Cross-Language**
-- Rust (first-class support)
-- Go (high-level SDK)
-- C, C++, Zig (native C ABI)
+### ⚡ **Flexible Call Patterns**
+- **Fire-and-forget**: ~73ns (fastest)
+- **Unary with response**: ~144ns
+- **Fast path**: ~138ns (thread-local optimized)
+- **Streaming**: Bi-directional communication
 
-</td>
-<td width="50%">
-
-**⚡ Dual Communication Mode**
-- **Unary**: Simple request/response
-- **Streaming**: WebSocket-style multi-frame
-- **Bidirectional**: Full duplex communication
-
-**🔧 Flexible Design**
-- Blocking and non-blocking plugins
+### 🔧 **Production Ready**
+- Thread-safe for 24/7 HTTP servers
+- Safe SID wrapping (no collision)
 - Entry-based routing for multiple handlers
-- Per-request/stream state management
-
-</td>
-</tr>
-</table>
+- Panic-safe FFI boundaries
 
 ---
 
@@ -60,667 +61,302 @@
 
 ```
 nylon-ring/
-├── nylon-ring/                    # 🔧 Core ABI library
-│   ├── ABI types (NrStr, NrBytes, NrRequest)
-│   ├── define_plugin! macro
-│   └── Helper functions
+├── crates/
+│   ├── nylon-ring/              # Core ABI library
+│   │   ├── src/                 # NrStr, NrBytes, NrKV, NrVec
+│   │   └── benches/             # ABI benchmarks
+│   │
+│   └── nylon-ring-host/         # Host adapter
+│       ├── src/                 # NylonRingHost interface
+│       └── benches/             # Host overhead benchmarks
 │
-├── nylon-ring-host/               # 🏠 Host adapter (Rust)
-│   ├── NylonRingHost - Main interface
-│   ├── HighLevelRequest - Request builder
-│   ├── Extensions - Type-safe metadata
-│   └── Examples: simple, streaming, go-plugin
-│
-├── nylon-ring-plugin-example/     # 📝 Example Rust plugin
-│   ├── Unary handlers
-│   ├── Streaming handlers
-│   └── State management examples
-│
-├── nylon-ring-go/                 # Go implementation
-│   ├── sdk/ - High-level Go SDK
-│   ├── plugin-example-simple/ - SDK example
-│   └── plugin-example/ - Low-level CGO example
-│
-├── nylon-ring-bench/              # 📊 Benchmark suite (Criterion.rs)
-└── nylon-ring-bench-plugin/       # ⚡ Optimized benchmark plugin
+└── examples/
+    ├── ex-nyring-plugin/        # Example plugin
+    └── ex-nyring-host/          # Example host + stress test
 ```
 
 ---
 
 ## 🚀 Quick Start
 
-### Build Everything
+### Build
 
 ```bash
-# Build all crates (Rust + Go plugins)
-make build
-
-# Or build individually
 cargo build --release
 ```
 
-### Run Examples
+### Run Demo
 
 ```bash
-# Run all examples (Rust + Go)
-make example
-
-# Run individual examples
-make example-simple           # Rust plugin - unary
-make example-streaming        # Rust plugin - streaming
-make example-go-plugin        # Go plugin with SDK
-make example-go-plugin-lowlevel  # Go plugin (low-level)
-make example-bidirectional       # Rust plugin - bidirectional
-make example-bidirectional-go    # Go plugin - bidirectional
+cargo run --release --bin ex-nyring-host
 ```
 
-### Run Tests
+### Run Benchmarks
 
 ```bash
-make test                     # Run all tests
-make test-all                 # Verbose output
+cargo bench                           # All benchmarks
+cargo bench --package nylon-ring      # ABI types only
+cargo bench --package nylon-ring-host # Host overhead only
 ```
 
 ---
 
 ## 💻 Usage
 
-### 🎯 Entry-Based Routing
+### Host: Loading a Plugin
 
-Nylon-ring uses **entry-based routing** to support multiple handlers per plugin:
+#### Fire-and-Forget (Fastest)
 
 ```rust
-// Route to different handlers based on entry name
-host.call("unary", req).await?;          // → "unary" handler
-host.call_stream("stream", req).await?;  // → "stream" handler
-host.call_raw("echo", payload).await?;   // → "echo" handler (raw bytes)
-host.fast_raw_unary_call("echo", payload).await?;   // → "echo" handler (raw bytes)
+use nylon_ring_host::NylonRingHost;
+
+let host = NylonRingHost::load("target/release/libmy_plugin.so")?;
+
+// Fire-and-forget - no response waiting (~73ns, 13.7M calls/sec)
+let status = host.call("handler_name", b"payload").await?;
+```
+
+#### Unary with Response
+
+```rust
+// Wait for response from plugin (~144ns, 6.9M calls/sec)
+let (status, response) = host.call_response("handler_name", b"payload").await?;
+println!("Response: {}", String::from_utf8_lossy(&response));
+```
+
+#### Fast Path
+
+```rust
+// Thread-local optimized path (~138ns, 7.2M calls/sec)
+let (status, response) = host.call_response_fast("handler_name", b"payload").await?;
+```
+
+#### Streaming
+
+```rust
+use nylon_ring::NrStatus;
+
+// Start streaming
+let (sid, mut rx) = host.call_stream("stream_handler", b"payload").await?;
+
+// Receive frames
+while let Some(frame) = rx.recv().await {
+    println!("Data: {}", String::from_utf8_lossy(&frame.data));
+    
+    if matches!(frame.status, NrStatus::StreamEnd | NrStatus::Err) {
+        break;
+    }
+}
 ```
 
 ---
 
-## 🔨 Implementing a Plugin
-
-### [![Rust](https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/) Plugin
-
-Use the `define_plugin!` macro for easy plugin creation:
+### Plugin: Implementing Handlers
 
 ```rust
-use nylon_ring::{define_plugin, NrBytes, NrHostExt, NrHostVTable, NrRequest, NrStatus, NrStr};
+use nylon_ring::{define_plugin, NrBytes, NrHostVTable, NrStatus, NrVec};
 use std::ffi::c_void;
-use std::sync::OnceLock;
 
-struct HostHandle {
-    ctx: *mut c_void,
-    vtable: *const NrHostVTable,
-    ext: *const NrHostExt,
-}
+// Global state to store host context and vtable
+static mut HOST_CTX: *mut c_void = std::ptr::null_mut();
+static mut HOST_VTABLE: *const NrHostVTable = std::ptr::null();
 
-unsafe impl Send for HostHandle {}
-unsafe impl Sync for HostHandle {}
-
-static HOST_HANDLE: OnceLock<HostHandle> = OnceLock::new();
-
-unsafe fn plugin_init(
-    _plugin_ctx: *mut c_void,
-    host_ctx: *mut c_void,
-    host_vtable: *const NrHostVTable,
-) -> NrStatus {
-    let host_ext = nylon_ring_host::NylonRingHost::get_host_ext(host_ctx);
-    let handle = HostHandle {
-        ctx: host_ctx,
-        vtable: host_vtable,
-        ext: host_ext,
-    };
-    HOST_HANDLE.set(handle).map_or(NrStatus::Err, |_| NrStatus::Ok)
-}
-
-unsafe fn handle_unary(
-    _plugin_ctx: *mut c_void,
-    sid: u64,
-    req: *const NrRequest,
-    _payload: NrBytes,
-) -> NrStatus {
-    if req.is_null() {
-        return NrStatus::Invalid;
-    }
-    
-    if let Some(host) = HOST_HANDLE.get() {
-        let response = b"Hello from plugin!";
-        let send_result = (*host.vtable).send_result;
-        send_result(
-            host.ctx,
-            sid,
-            NrStatus::Ok,
-            NrBytes::from_slice(response),
-        );
-    }
-    
+// Initialize plugin
+unsafe fn init(host_ctx: *mut c_void, host_vtable: *const NrHostVTable) -> NrStatus {
+    HOST_CTX = host_ctx;
+    HOST_VTABLE = host_vtable;
     NrStatus::Ok
 }
 
-unsafe fn plugin_shutdown(_plugin_ctx: *mut c_void) {
-    // Cleanup if needed
+// Handler example
+unsafe fn handle_echo(sid: u64, payload: NrBytes) -> NrStatus {
+    // Echo back using zero-copy NrVec
+    let nr_vec = NrVec::from_slice(payload.as_slice());
+    let send_result = (*HOST_VTABLE).send_result;
+    send_result(HOST_CTX, sid, NrStatus::Ok, nr_vec);
+    NrStatus::Ok
 }
 
+// Plugin shutdown
+fn shutdown() {
+    // Cleanup
+}
+
+// Define plugin with entry points
 define_plugin! {
-    init: plugin_init,
-    shutdown: plugin_shutdown,
+    init: init,
+    shutdown: shutdown,
     entries: {
-        "unary" => handle_unary,
+        "echo" => handle_echo,
     },
 }
 ```
 
-**The `define_plugin!` macro automatically:**
+**The `define_plugin!` macro:**
 - ✅ Creates panic-safe FFI wrappers
-- ✅ Exports the `nylon_ring_get_plugin_v1()` entry point
-- ✅ Routes requests to handlers based on entry name
-- ✅ Handles panics safely across FFI boundaries
+- ✅ Exports `nylon_ring_get_plugin_v1()` entry point
+- ✅ Routes requests by entry name
+- ✅ Handles panics across FFI boundaries
 
 ---
 
-### [![Go](https://img.shields.io/badge/Go-00ADD8?style=flat-square&logo=go&logoColor=white)](https://golang.org/) Plugin
+## 📊 Performance
 
-#### Using SDK (Recommended)
+> Measured on **Apple M1 Pro (10-core)** with release builds
 
-Simple API similar to Rust's `define_plugin!` macro:
+### ABI Types (Criterion Benchmarks)
 
-```go
-package main
+| Operation | Time | Notes |
+|-----------|------|-------|
+| `NrStr::new` | **1.03 ns** | Create string view |
+| `NrStr::as_str` | **0.33 ns** | Read string |
+| `NrBytes::from_slice` | **0.54 ns** | Create byte view |
+| `NrBytes::as_slice` | **0.33 ns** | Read bytes |
+| `NrKV::new` | **1.99 ns** | Key-value pair |
+| `NrVec::from_vec` | **22.7 ns** | Vec conversion |
+| `NrVec::into_vec` | **9.38 ns** | Back to Vec |
+| `NrVec::push` (100 items) | **323 ns** | Push 100 values |
 
-import (
-    "time"
-    "github.com/AssetsArt/nylon-ring/nylon-ring-go/sdk"
-)
-
-func init() {
-    plugin := sdk.NewPlugin("my-plugin", "1.0.0")
-    
-    // Async handler - automatically runs in goroutine
-    plugin.Handle("unary", func(req sdk.Request, payload []byte, callback func(sdk.Response)) {
-        time.Sleep(2 * time.Second)  // Blocking work is OK
-        callback(sdk.Response{Status: sdk.StatusOk, Data: []byte("OK")})
-    })
-
-    // Sync handler - runs on host thread (for very fast operations)
-    plugin.HandleSync("fast", func(req sdk.Request, payload []byte, callback func(sdk.Response)) {
-        callback(sdk.Response{Status: sdk.StatusOk, Data: []byte("FAST")})
-    })
-    
-    // Streaming handler
-    plugin.Handle("stream", func(req sdk.Request, payload []byte, callback func(sdk.Response)) {
-        for i := 1; i <= 5; i++ {
-            time.Sleep(1 * time.Second)
-            callback(sdk.Response{Status: sdk.StatusOk, Data: []byte("Frame " + string(rune('0'+i)))})
-        }
-        callback(sdk.Response{Status: sdk.StatusStreamEnd, Data: []byte{}})
-    })
-    
-    sdk.BuildPlugin(plugin)
-}
-```
-
-#### Low-Level CGO (Advanced)
-
-For full control, use CGO directly. See `nylon-ring-go/plugin-example/` for a complete example.
+**Key Insight**: ABI overhead is negligible (sub-ns to 23ns)
 
 ---
 
-## 🏠 Loading a Plugin (Host)
+### Host Overhead (Single-Thread)
 
-### Unary Call
+| Operation | Time | Throughput | Notes |
+|-----------|------|------------|-------|
+| **Fire-and-forget** | **73 ns** | **13.7M calls/sec** | Fastest ⚡ |
+| **Fast path** | **138 ns** | **7.2M calls/sec** | Thread-local |
+| **Standard unary** | **144 ns** | **6.9M calls/sec** | With response |
+| **+ 128B payload** | **159 ns** | **6.3M calls/sec** | Small data |
+| **+ 1KB payload** | **196 ns** | **5.1M calls/sec** | Medium data |
+| **+ 4KB payload** | **235 ns** | **4.3M calls/sec** | Large data |
 
-```rust
-use nylon_ring_host::{Extensions, HighLevelRequest, NylonRingHost};
+---
 
-let host = NylonRingHost::load("path/to/plugin.so")?;
+### Multi-Core Scaling
 
-let req = HighLevelRequest {
-    method: "GET".to_string(),
-    path: "/api/data".to_string(),
-    query: "".to_string(),
-    headers: vec![("User-Agent".to_string(), "MyApp/1.0".to_string())],
-    body: vec![],
-    extensions: Extensions::new(),
-};
+| Configuration | Throughput | Latency |
+|--------------|------------|---------|
+| **10 cores (fire-and-forget)** | **52.9M req/sec** | **0.19 µs** |
 
-// Async call - routes to "unary" handler in plugin
-let (status, payload) = host.call("unary", req).await?;
-println!("Status: {:?}, Response: {}", status, String::from_utf8_lossy(&payload));
-```
+**Scaling Efficiency**: 3.9x per core (vs single-thread 13.7M)
 
-### Streaming Call
-
-```rust
-use nylon_ring::NrStatus;
-use nylon_ring_host::{Extensions, HighLevelRequest, NylonRingHost};
-
-let host = NylonRingHost::load("path/to/plugin.so")?;
-
-let req = HighLevelRequest {
-    method: "GET".to_string(),
-    path: "/stream".to_string(),
-    query: "".to_string(),
-    headers: vec![],
-    body: vec![],
-    extensions: Extensions::new(),
-};
-
-// Get stream receiver - routes to "stream" handler
-let mut stream = host.call_stream("stream", req).await?;
-
-// Receive frames
-while let Some(frame) = stream.recv().await {
-    println!("Frame - Status: {:?}, Data: {}", 
-        frame.status, 
-        String::from_utf8_lossy(&frame.data)
-    );
-    
-    if matches!(
-        frame.status,
-        NrStatus::StreamEnd | NrStatus::Err | NrStatus::Invalid | NrStatus::Unsupported
-    ) {
-        break;
-    }
-}
-
-// Send data back to plugin (Bidirectional)
-host.send_stream_data(sid, b"Hello Plugin")?;
-
-// Close stream from host
-host.close_stream(sid)?;
-```
-
-### Raw Call (Bypass NrRequest)
-
-```rust
-// Send raw bytes directly (fastest path)
-let payload = b"Hello, Raw World!";
-let (status, response) = host.call_raw("echo", payload).await?;
-println!("Status: {:?}, Response: {:?}", status, String::from_utf8_lossy(&response));
-```
+**Key Optimization**: Thread-local SID generation eliminates atomic operations entirely
 
 ---
 
 ## 🏗️ Architecture
 
-### Unary Flow
+### Key Optimizations
 
-```
-┌─────────┐                         ┌────────┐
-│  Host   │                         │ Plugin │
-└────┬────┘                         └───┬────┘
-     │                                  │
-     │  handle(entry, sid, req)         │
-     │─────────────────────────────────>│
-     │                                  │
-     │         return Ok                │
-     │<─────────────────────────────────│
-     │                                  │
-     │                                  │ [spawn background task]
-     │                                  │ [do work...]
-     │                                  │
-     │      send_result(sid)            │
-     │<─────────────────────────────────│
-     │                                  │
-```
-
-### Streaming Flow
-
-```
-┌─────────┐                         ┌────────┐
-│  Host   │                         │ Plugin │
-└────┬────┘                         └───┬────┘
-     │                                  │
-     │  handle(entry, sid, req)         │
-     │─────────────────────────────────>│
-     │                                  │
-     │         return Ok                │
-     │<─────────────────────────────────│
-     │                                  │ [spawn background task]
-     │                                  │
-     │      send_result(sid) [frame 1]  │
-     │<─────────────────────────────────│
-     │      send_result(sid) [frame 2]  │
-     │<─────────────────────────────────│
-     │      send_result(sid) [frame 3]  │
-     │<─────────────────────────────────│
-     │      send_result(sid) [StreamEnd]│
-     │<─────────────────────────────────│
-     │                                  │
-```
-
----
-
-## ⚡ Performance
-
-> **Note**: All benchmarks measured on **Apple M1 Pro (10-core)** with release builds.
-
-### 🔧 ABI Types Performance
-
-The ABI layer is extremely lightweight:
-
-| Operation | Time (ns) | Notes |
-|-----------|-----------|-------|
-| `NrStr::from_str` | ~0.51 | Creating string view |
-| `NrStr::as_str` | ~0.49 | Reading string |
-| `NrBytes::from_slice` | ~0.35 | Creating byte view |
-| `NrBytes::as_slice` | ~0.43 | Reading bytes |
-| `NrHeader::new` | ~1.09 | Creating header |
-| `NrRequest::build` | ~2.48 | Building request |
-
-**💡 Conclusion**: ABI overhead is negligible (0.5–2.5 ns) — the bottleneck will never be the ABI layer.
-
----
-
-### 🏎️ Host Overhead Performance
-
-Full round-trip performance (host → plugin → host callback):
-
-| Benchmark | Time | Throughput | Notes |
-|-----------|------|------------|-------|
-| **Unary call** | ~0.43 µs | **~2.32M calls/sec** | Single core |
-| **Unary + 1KB body** | ~0.49 µs | **~2.05M calls/sec** | Body size has minimal impact |
-| **Raw unary** | ~0.16 µs | **~6.31M calls/sec** | Bypass NrRequest |
-| **Fast raw unary** | ~0.14 µs | **~7.14M calls/sec** | Thread-local optimization (see below) |
-| **Streaming** | ~0.83 µs | **~1.20M calls/sec** | All frames consumed |
-| **Raw streaming** | ~0.77 µs | **~1.29M calls/sec** | Bypass NrRequest |
-| **Bidirectional** | ~0.93 µs | **~1.07M calls/sec** | 5 frames + 1 echo |
-| **Build request** | ~216 ns | N/A | `HighLevelRequest` creation |
-
-**Overhead sources:**
-- FFI crossing (`extern "C"` calls)
-- Async scheduling (Tokio runtime)
-- Concurrent map operations (`DashMap`)
-- Plugin's own work
-
----
-
-### ⚡ Fast Unary Path
-
-The **fast raw unary** path (`call_raw_unary_fast`) is an optimized code path that achieves the highest throughput by making specific trade-offs:
-
-**✅ Advantages:**
-- **Highest performance**: ~7.14M calls/sec (single-core)
-- Thread-local optimization reduces contention
-- Minimal overhead (no request parsing)
-
-**⚠️ Constraints:**
-- **Plugin handler must be synchronous** — cannot use `async`/`.await`
-- **No thread spawning** — cannot use `thread::spawn()` or task executors
-- **Must complete immediately** — all work done in the calling thread
-- Use only for CPU-bound, non-blocking operations (<1µs)
-
-**When to use:**
-- Simple transformations (echo, hash, encode/decode)
-- Stateless operations
-- Hot path optimizations
-
-**When NOT to use:**
-- I/O operations (file, network, database)
-- Long-running computations
-- Operations requiring background tasks
-
-For most use cases, prefer the standard paths (`call`, `call_raw`) which support async and threading.
-
----
-
-### 🔥 Multi-Core Scaling
-
-**Stress test results** (10-core Apple M1 Pro, 10-second run):
-
-| Path | Throughput | Total Requests | Notes |
-|------|------------|----------------|-------|
-| **Standard** (`call_raw`) | **~11.16M req/sec** | 111.6M requests | Good scaling |
-| **Fast path** (`call_raw_unary_fast`) | **~14.65M req/sec** | 146.5M requests | **+31.2% faster** |
-
-**📊 Scaling efficiency**: Nearly **2x** throughput per core vs single-core benchmarks, indicating excellent parallel processing with minimal contention.
-
-> **Note**: These tests use a custom allocator (MiMalloc) and batch processing for maximum throughput. See [Benchmark Methodology](#-benchmark-methodology) below.
-
----
-
-### 📊 Benchmark Methodology
-
-We use two types of benchmarks to measure different aspects of performance:
-
-#### Micro-Benchmarks (Criterion.rs)
-
-Measure isolated component performance with statistical rigor:
-
-- **ABI types**: `NrStr`, `NrBytes`, `NrHeader`, `NrRequest` construction and access (~0.35–2.5 ns)
-- **Host overhead**: Full round-trip including FFI, async scheduling, and callbacks (~0.14–0.83 µs)
-- **Method**: Criterion.rs with warmup, multiple iterations, outlier detection
-- **Environment**: Single-threaded, minimal external load
-- **Use case**: Validate that ABI layer adds negligible overhead
-
-#### Stress Tests (Multi-Core)
-
-Measure aggregate throughput under sustained load:
-
-- **Setup**: 10 worker threads, each making continuous requests for 10 seconds
-- **Measurement**: Total requests completed / elapsed time
-- **Allocator**: MiMalloc for reduced allocation contention (optional optimization)
-- **Environment**: Multi-core, batch processing, realistic concurrency
-- **Use case**: Validate scaling efficiency and find maximum sustainable throughput
-
-**Key difference**: Micro-benchmarks measure latency per operation; stress tests measure aggregate throughput.
-
-### 🧪 Run Benchmarks
-
-```bash
-make benchmark              # All benchmarks (micro + stress)
-make benchmark-abi         # ABI types only (micro)
-make benchmark-host        # Host overhead (micro)
-make stress-test           # Multi-core stress test
-```
-
-> ⚠️ **Note**: Results are hardware-dependent. Your mileage may vary based on CPU architecture, clock speed, core count, and system load.
-
----
-
-## 🗂️ State Management
-
-Nylon-ring supports **per-request and per-stream state** without changing the ABI.
-
-### Host-Side State Store
-
+#### 1. Thread-Local SID Generation
 ```rust
-// Host maintains concurrent state per SID
-state_per_sid: DashMap<u64, HashMap<String, Vec<u8>>>
+// Each thread has its own SID range (100M per thread)
+// Thread 0: 0-99,999,999
+// Thread 1: 100,000,000-199,999,999
+// Zero atomic operations on hot path!
 ```
 
-### 🔌 Host Extension API
-
-Plugins access state through `NrHostExt`:
-
+#### 2. Zero-Copy Data Transfer
 ```rust
-#[repr(C)]
-pub struct NrHostExt {
-    pub set_state: unsafe extern "C" fn(host_ctx, sid, key: NrStr, value: NrBytes) -> NrBytes,
-    pub get_state: unsafe extern "C" fn(host_ctx, sid, key: NrStr) -> NrBytes,
-}
+// Plugin can transfer Vec<u8> ownership directly to host
+let data = vec![...];
+let nr_vec = NrVec::from_vec(data);  // No copy
+send_result(ctx, sid, status, nr_vec);
 ```
 
-### Using State in Plugins
-
-```rust
-// Get host extension in plugin_init
-let host_ext = unsafe {
-    nylon_ring_host::NylonRingHost::get_host_ext(host_ctx)
-};
-
-// Set state
-host_ext.set_state(host_ctx, sid, NrStr::from_str("key"), NrBytes::from_slice(value));
-
-// Get state
-let value = host_ext.get_state(host_ctx, sid, NrStr::from_str("key"));
-```
-
-### 🔄 State Lifecycle
-
-- ✅ Created automatically on first `set_state()` call
-- ✅ Persists for the entire request/stream lifetime
-- ✅ Automatically cleared when:
-  - Unary call completes
-  - Streaming call ends (`StreamEnd` or error)
-
-**Use cases:**
-- WebSocket session management
-- Per-request metadata storage
-- Plugin-local agent state
-- Frame-to-frame data persistence
+#### 3. Safe for Long-Running Servers
+- SID wraps within thread range (~33 seconds at 3M req/sec per thread)
+- No collision between threads
+- Request lifetime << wrap time
 
 ---
 
-## 🏷️ Extensions (Type-Safe Metadata)
+## Core Types
 
-`HighLevelRequest` supports type-safe metadata storage:
+### ABI Types (`nylon-ring`)
 
-```rust
-use nylon_ring_host::{Extensions, HighLevelRequest};
+- **`NrStr`** — String view (`&str` equivalent)
+- **`NrBytes`** — Byte slice view (`&[u8]` equivalent)
+- **`NrKV`** — Key-value pair
+- **`NrVec<T>`** — Owned vector with zero-copy transfer
+- **`NrStatus`** — Result status enum
+- **`NrHostVTable`** — Host callbacks
+- **`NrPluginVTable`** — Plugin entry points
 
-let mut req = HighLevelRequest {
-    method: "GET".to_string(),
-    path: "/api".to_string(),
-    query: "".to_string(),
-    headers: vec![],
-    body: vec![],
-    extensions: Extensions::new(),
-};
+### Host Types (`nylon-ring-host`)
 
-// Store type-safe metadata (host-side only)
-req.extensions.insert(MyMetadata { user_id: 123 });
-req.extensions.insert("routing_key".to_string());
-
-// Retrieve later
-if let Some(metadata) = req.extensions.get::<MyMetadata>() {
-    println!("User ID: {}", metadata.user_id);
-}
-```
-
-> ⚠️ **Note**: Extensions are **not sent to plugins** — use them for host-side routing, logging, or metadata.
+- **`NylonRingHost`** — Main host interface
+- **`StreamFrame`** — Streaming data frame
+- **`StreamReceiver`** — Stream receiver channel
 
 ---
 
-## 📋 Core Design Principles
+## 🎯 Use Cases
 
-| Principle | Description |
-|-----------|-------------|
-| **🔒 ABI Stability** | All data structures are `#[repr(C)]` |
-| **⚡ Flexibility** | Plugins can be blocking or non-blocking |
-| **🔄 Callback Mechanism** | Plugin reports results via `send_result` callback |
-| **📡 Streaming Support** | Multiple frames per request (WebSocket-style) |
-| **🛡️ Panic-Safe FFI** | All `extern "C"` functions catch panics |
-| **🧵 Thread-Safe** | `send_result` can be called from any thread |
-| **🎯 Entry Routing** | Multiple handlers per plugin via entry names |
+### ✅ Perfect For
+- **High-throughput HTTP servers** (REST, GraphQL)
+- **WebSocket backends**
+- **RPC services**
+- **Plugin systems** requiring isolation
+- **Hot-reloadable** business logic
 
----
-
-## ⚠️ Key Constraints
-
-- ✅ Plugin `handle()` **can block** (but use background tasks for high performance)
-- ✅ All ABI types are `#[repr(C)]` — **do not modify layout**
-- ✅ Host owns request data — **plugin must copy if needed**
-- ✅ Thread-safe callbacks — `send_result` callable from any thread
-- ✅ Panic-safe FFI — handled automatically by `define_plugin!`
-- ❌ No `unwrap()` in production — **proper error handling required**
-- ✅ Concurrent access — Host uses `DashMap` for fine-grained locking
-- ✅ Entry-based routing — Plugins support multiple handlers
+### ⚠️ Consider Alternatives For
+- Cross-language plugins (use direct FFI)
+- Very low latency requirements (<10ns)
+- Single-threaded only workloads
 
 ---
 
-## ❌ Error Handling
+## 📈 Benchmark Methodology
 
-Uses `thiserror` for clean error types:
+### ABI Benchmarks
+- **Tool**: Criterion.rs with statistical analysis
+- **Iterations**: 100 samples, outlier detection
+- **Warmup**: Automatic warmup period
+- **Output**: HTML reports in `target/criterion/`
 
-```rust
-// All functions return Result
-pub enum NylonRingHostError {
-    #[error("Failed to load library: {0}")]
-    LoadError(String),
-    
-    #[error("ABI version mismatch")]
-    VersionMismatch,
-    
-    // ... more variants
-}
-```
+### Host Overhead Benchmarks
+- **Method**: Full round-trip (host → plugin → callback)
+- **Plugin**: Example plugin with minimal work
+- **Runtime**: Tokio async runtime
+- **Builds**: Release builds only
 
-**Principles:**
-- ✅ All fallible functions return `Result`
-- ✅ Clear, descriptive error messages
-- ✅ No `anyhow` dependency
-- ✅ Panic-safe callbacks
-
-See `nylon-ring-host/src/error.rs` for implementation.
+### Multi-Thread Stress Test
+- **Method**: 10 threads, 130 req/batch, 10-second run
+- **Pattern**: Fire-and-forget (no response wait)
+- **Total**: 528.9M requests in 10 seconds
 
 ---
 
-## 🦀 Rust Coding Rules
+## 🔬 Design Principles
 
-Strict production-safety guidelines:
-
-1. ❌ No `unwrap()` or `expect()` in production (only tests/benchmarks)
-2. ❌ No `anyhow` — use `thiserror` for error types
-3. ✅ All fallible functions return `Result`
-4. ✅ Panic-safe `extern "C"` functions
-5. ✅ Single error enum per crate with `thiserror::Error`
-6. ✅ Clear, descriptive error messages
-7. ❌ Avoid `panic!` and `assert!` (only in tests/benchmarks)
-
----
-
-## 🌍 Multi-Language Support
-
-| Language | Support Level | Notes |
-|----------|---------------|-------|
-| **![Rust](https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white)** | ⭐⭐⭐⭐⭐ | First-class with `define_plugin!` macro |
-| **[![Go](https://img.shields.io/badge/Go-00ADD8?style=flat-square&logo=go&logoColor=white)](https://golang.org/)** | ⭐⭐⭐⭐⭐ | High-level SDK + low-level CGO |
-| **![C](https://img.shields.io/badge/C-000000?style=flat-square&logo=c&logoColor=white) / ![C++](https://img.shields.io/badge/C++-000000?style=flat-square&logo=c++&logoColor=white)** | ⭐⭐⭐⭐ | Direct C ABI match (low-level) |
-| **![Zig](https://img.shields.io/badge/Zig-000000?style=flat-square&logo=zig&logoColor=white)** | ⭐⭐⭐⭐ | C ABI support (low-level) |
-| **🔧 Others** | ⭐⭐⭐ | Any language with C FFI (low-level) |
-
-> **Note**: High-level SDKs for C, C++, Zig, and other languages are **coming soon**. Currently, only Rust and Go have high-level SDK support.
-
-### 📁 Examples
-
-- **Rust**: `nylon-ring-plugin-example/`
-- **Go SDK**: `nylon-ring-go/plugin-example-simple/`
-- **Go CGO**: `nylon-ring-go/plugin-example/`
+| Principle | Implementation |
+|-----------|----------------|
+| **ABI Stability** | All types are `#[repr(C)]` |
+| **Zero Atomic Ops** | Thread-local SID generation |
+| **Zero Copy** | `NrVec<u8>` ownership transfer |
+| **Panic Safety** | FFI boundaries catch panics |
+| **Thread Safety** | Safe for multi-threaded hosts |
+| **Fast Path** | Specialized optimizations available |
 
 ---
 
-## 💻 Platform Support
+## License
 
-| Platform | Extension | Status |
-|----------|-----------|--------|
-| **🐧 Linux** | `.so` | ✅ Supported |
-| **🍎 macOS** | `.dylib` | ✅ Supported |
-| **🪟 Windows** | `.dll` | ✅ Supported |
+MIT License
 
 ---
 
-## 📚 Additional Resources
+## Acknowledgments
 
-### Core Types
+Inspired by high-performance plugin systems and FFI best practices.
 
-- `NrStr` / `NrBytes` — ABI-stable string and byte slices
-- `NrRequest` — Request metadata (method, path, headers)
-- `NrStatus` — Status codes (`Ok`, `Err`, `Invalid`, `Unsupported`, `StreamEnd`)
-- `NrHostVTable` — Host function pointers (e.g., `send_result`)
-- `NrPluginVTable` — Plugin function pointers (`init`, `handle`, `shutdown`)
+Built with:
+- **Tokio** — Async runtime
+- **DashMap** — Concurrent hashmap
+- **FxHash** — Fast hashing
+- **Criterion** — Benchmarking
+- **libloading** — Dynamic library loading
 
-### Examples
-
-Run the examples to see everything in action:
-
-```bash
-make example              # All examples
-make example-simple      # Rust unary
-make example-streaming   # Rust streaming
-make example-go-plugin   # Go SDK
-```
-
----

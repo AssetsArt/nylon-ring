@@ -58,14 +58,16 @@ unsafe fn handle_uppercase(sid: u64, payload: NrBytes) -> NrStatus {
     NrStatus::Ok
 }
 
-// benchmark
-unsafe fn handle_benchmark(_sid: u64, _payload: NrBytes) -> NrStatus {
-    // let data = payload.as_slice();
-    // let _text = String::from_utf8_lossy(data);
-    // println!("[Plugin] Benchmark received: {}", text);
-    // Send response back to host
-    // send_result(sid, NrStatus::Ok, NrVec::from_nr_bytes(payload));
+// benchmark - fast handler for benchmarking
+unsafe fn handle_benchmark(sid: u64, payload: NrBytes) -> NrStatus {
+    // Echo back the payload for benchmark
+    let nr_vec = NrVec::from_nr_bytes(payload);
+    send_result(sid, NrStatus::Ok, nr_vec);
+    NrStatus::Ok
+}
 
+// benchmark - without response
+unsafe fn handle_benchmark_without_response(_sid: u64, _payload: NrBytes) -> NrStatus {
     NrStatus::Ok
 }
 
@@ -77,5 +79,6 @@ define_plugin! {
         "echo" => handle_echo,
         "uppercase" => handle_uppercase,
         "benchmark" => handle_benchmark,
+        "benchmark_without_response" => handle_benchmark_without_response,
     }
 }

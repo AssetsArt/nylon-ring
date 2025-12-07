@@ -7,3 +7,10 @@ edition = "2024"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "abi_types"
+harness = false

@@ -42,7 +42,10 @@ fn bench_call_response(c: &mut Criterion) {
     let host = setup_host();
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
-    c.bench_function("call_response", |b| {
+    let mut group = c.benchmark_group("call_response");
+    group.throughput(criterion::Throughput::Elements(1));
+
+    group.bench_function("call_response", |b| {
         b.iter(|| {
             runtime.block_on(async {
                 let payload = b"Hello";
@@ -51,6 +54,8 @@ fn bench_call_response(c: &mut Criterion) {
             })
         })
     });
+
+    group.finish();
 }
 
 fn bench_call_response_with_payload(c: &mut Criterion) {
@@ -58,6 +63,7 @@ fn bench_call_response_with_payload(c: &mut Criterion) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
     let mut group = c.benchmark_group("call_response_with_payload");
+    group.throughput(criterion::Throughput::Elements(1));
 
     for size in [128, 1024, 4096].iter() {
         let payload: Vec<u8> = vec![42u8; *size];
@@ -79,7 +85,10 @@ fn bench_call_response_fast(c: &mut Criterion) {
     let host = setup_host();
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
-    c.bench_function("call_response_fast", |b| {
+    let mut group = c.benchmark_group("call_response_fast");
+    group.throughput(criterion::Throughput::Elements(1));
+
+    group.bench_function("call_response_fast", |b| {
         b.iter(|| {
             runtime.block_on(async {
                 let payload = b"Hello";
@@ -90,13 +99,18 @@ fn bench_call_response_fast(c: &mut Criterion) {
             })
         })
     });
+
+    group.finish();
 }
 
 fn bench_call_without_response(c: &mut Criterion) {
     let host = setup_host();
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
-    c.bench_function("call_without_response", |b| {
+    let mut group = c.benchmark_group("call_without_response");
+    group.throughput(criterion::Throughput::Elements(1));
+
+    group.bench_function("call_without_response", |b| {
         b.iter(|| {
             runtime.block_on(async {
                 let payload = b"Hello";
@@ -107,6 +121,8 @@ fn bench_call_without_response(c: &mut Criterion) {
             })
         })
     });
+
+    group.finish();
 }
 
 criterion_group!(

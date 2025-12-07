@@ -9,10 +9,9 @@ pub use nylon_ring::NrStatus;
 use nylon_ring::{NrBytes, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrStr};
 use rustc_hash::FxBuildHasher;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::ffi::c_void;
-use std::panic;
 use std::sync::Arc;
-use std::{collections::HashMap, time::Instant};
 use tokio::sync::{mpsc, oneshot};
 
 type Result<T> = std::result::Result<T, NylonRingHostError>;
@@ -130,20 +129,10 @@ impl NylonRingHost {
 
             // Initialize plugin
             if let Some(init_fn) = plugin_vtable.init {
-                let status = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                    init_fn(
-                        Arc::as_ptr(&host.host_ctx) as *mut c_void,
-                        &*host.host_vtable,
-                    )
-                }));
-
-                match status {
-                    Ok(NrStatus::Ok) => {}
-                    Ok(other) => return Err(NylonRingHostError::PluginInitFailed(other)),
-                    Err(_) => {
-                        return Err(NylonRingHostError::PluginInitFailed(NrStatus::Err));
-                    }
-                }
+                init_fn(
+                    Arc::as_ptr(&host.host_ctx) as *mut c_void,
+                    &*host.host_vtable,
+                );
             }
 
             Ok(host)
@@ -156,76 +145,71 @@ impl NylonRingHost {
         status: NrStatus,
         payload: nylon_ring::NrVec<u8>,
     ) {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if host_ctx.is_null() {
-                return;
-            }
-            let ctx = &*(host_ctx as *const HostContext);
+        if host_ctx.is_null() {
+            return;
+        }
+        let ctx = &*(host_ctx as *const HostContext);
 
-            // Convert NrVec to Vec<u8> (Zero Copy)
-            let mut data_vec = Some(payload.into_vec());
+        // Convert NrVec to Vec<u8> (Zero Copy)
+        let mut data_vec = Some(payload.into_vec());
 
-            // ── ultra fast unary path ──
-            let mut handled_fast = false;
-            CURRENT_UNARY_TX.with(|cell| {
-                let ptr = cell.get();
-                if !ptr.is_null() {
-                    let slot: &mut Option<oneshot::Sender<(NrStatus, Vec<u8>)>> =
-                        unsafe { &mut *ptr };
+        // ── ultra fast unary path ──
+        let mut handled_fast = false;
+        CURRENT_UNARY_TX.with(|cell| {
+            let ptr = cell.get();
+            if !ptr.is_null() {
+                let slot: &mut Option<oneshot::Sender<(NrStatus, Vec<u8>)>> = unsafe { &mut *ptr };
 
-                    if let Some(tx) = slot.take() {
-                        if let Some(data) = data_vec.take() {
-                            let _ = tx.send((status, data));
-                        }
-                        ctx.state_per_sid.remove(&sid);
-                        handled_fast = true;
+                if let Some(tx) = slot.take() {
+                    if let Some(data) = data_vec.take() {
+                        let _ = tx.send((status, data));
                     }
+                    ctx.state_per_sid.remove(&sid);
+                    handled_fast = true;
                 }
-            });
-
-            if handled_fast {
-                return;
             }
+        });
 
-            let data_vec = match data_vec.take() {
-                Some(v) => v,
-                None => return, // Already consumed
-            };
+        if handled_fast {
+            return;
+        }
 
-            let should_clear_state = if let Some((_, entry)) = ctx.pending_requests.remove(&sid) {
-                match entry {
-                    Pending::Unary(tx) => {
-                        let _ = tx.send((status, data_vec));
-                        true
-                    }
-                    Pending::Stream(tx) => {
-                        let _ = tx.send(StreamFrame {
-                            status,
-                            data: data_vec,
-                        });
-                        let is_finished = matches!(
-                            status,
-                            NrStatus::Err
-                                | NrStatus::Invalid
-                                | NrStatus::Unsupported
-                                | NrStatus::StreamEnd
-                        );
-                        if !is_finished {
-                            ctx.pending_requests.insert(sid, Pending::Stream(tx));
-                        }
-                        is_finished
-                    }
+        let data_vec = match data_vec.take() {
+            Some(v) => v,
+            None => return, // Already consumed
+        };
+
+        let should_clear_state = if let Some((_, entry)) = ctx.pending_requests.remove(&sid) {
+            match entry {
+                Pending::Unary(tx) => {
+                    let _ = tx.send((status, data_vec));
+                    true
                 }
-            } else {
-                false
-            };
-
-            if should_clear_state {
-                ctx.state_per_sid.remove(&sid);
+                Pending::Stream(tx) => {
+                    let _ = tx.send(StreamFrame {
+                        status,
+                        data: data_vec,
+                    });
+                    let is_finished = matches!(
+                        status,
+                        NrStatus::Err
+                            | NrStatus::Invalid
+                            | NrStatus::Unsupported
+                            | NrStatus::StreamEnd
+                    );
+                    if !is_finished {
+                        ctx.pending_requests.insert(sid, Pending::Stream(tx));
+                    }
+                    is_finished
+                }
             }
-        }));
+        } else {
+            false
+        };
 
-        let _ = result;
+        if should_clear_state {
+            ctx.state_per_sid.remove(&sid);
+        }
     }
 
     unsafe extern "C" fn set_state_callback(
@@ -234,28 +218,23 @@ impl NylonRingHost {
         key: NrStr,
         value: NrBytes,
     ) -> NrBytes {
-        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            if host_ctx.is_null() {
-                return NrBytes::from_slice(&[]);
-            }
-            let ctx = &*(host_ctx as *const HostContext);
+        if host_ctx.is_null() {
+            return NrBytes::from_slice(&[]);
+        }
+        let ctx = &*(host_ctx as *const HostContext);
 
-            let key_str = key.as_str().to_string();
+        let key_str = key.as_str().to_string();
 
-            // Copy data from NrBytes to owned Vec<u8> to prevent memory leak
-            let value_vec = value.as_slice().to_vec();
+        // Copy data from NrBytes to owned Vec<u8> to prevent memory leak
+        let value_vec = value.as_slice().to_vec();
 
-            ctx.state_per_sid
-                .entry(sid)
-                .or_default()
-                .insert(key_str, value_vec);
+        ctx.state_per_sid
+            .entry(sid)
+            .or_default()
+            .insert(key_str, value_vec);
 
-            // Return empty bytes on success
-            NrBytes::from_slice(&[])
-        }));
-
-        // Return empty bytes on panic (safe fallback)
-        result.unwrap_or_else(|_| NrBytes::from_slice(&[]))
+        // Return empty bytes on success
+        NrBytes::from_slice(&[])
     }
 
     unsafe extern "C" fn get_state_callback(
@@ -280,8 +259,7 @@ impl NylonRingHost {
         NrBytes::from_slice(&[])
     }
 
-    pub async fn call(&self, entry: &str, payload: &[u8]) -> Result<(NrStatus, Vec<u8>)> {
-        let _now = Instant::now();
+    pub async fn call_response(&self, entry: &str, payload: &[u8]) -> Result<(NrStatus, Vec<u8>)> {
         let sid = self
             .next_sid
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -311,7 +289,7 @@ impl NylonRingHost {
         rx.await.map_err(|_| NylonRingHostError::OneshotClosed)
     }
 
-    pub async fn call_unary_fast(
+    pub async fn call_response_fast(
         &self,
         entry: &str,
         payload: &[u8],
@@ -320,10 +298,7 @@ impl NylonRingHost {
             .next_sid
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Sender/Receiver ปกติ
         let (tx, rx) = oneshot::channel::<(NrStatus, Vec<u8>)>();
-
-        // เก็บ Sender ไว้ใน Option เพื่อให้ callback มา .take() ไปใช้
         let mut tx_slot: Option<oneshot::Sender<(NrStatus, Vec<u8>)>> = Some(tx);
 
         CURRENT_UNARY_TX.with(|cell| {
@@ -344,18 +319,9 @@ impl NylonRingHost {
             }
         };
 
-        let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            handle_raw_fn(NrStr::new(entry), sid, payload_bytes)
-        }));
+        let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
         CURRENT_UNARY_TX.with(|cell| cell.set(std::ptr::null_mut()));
-
-        let status = match status {
-            Ok(s) => s,
-            Err(_) => {
-                return Err(NylonRingHostError::PluginHandleFailed(NrStatus::Err));
-            }
-        };
 
         if status != NrStatus::Ok {
             return Err(NylonRingHostError::PluginHandleFailed(status));
@@ -363,6 +329,26 @@ impl NylonRingHost {
 
         let (st, data) = rx.await.map_err(|_| NylonRingHostError::OneshotClosed)?;
         Ok((st, data))
+    }
+
+    pub async fn call(&self, entry: &str, payload: &[u8]) -> Result<NrStatus> {
+        let sid = self
+            .next_sid
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let payload_bytes = NrBytes::from_slice(payload);
+        let handle_raw_fn = match self.plugin_vtable.handle {
+            Some(f) => f,
+            None => {
+                return Err(NylonRingHostError::MissingRequiredFunctions);
+            }
+        };
+
+        let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
+
+        if status != NrStatus::Ok {
+            return Err(NylonRingHostError::PluginHandleFailed(status));
+        }
+        Ok(status)
     }
 
     pub async fn call_stream(&self, entry: &str, payload: &[u8]) -> Result<(u64, StreamReceiver)> {
@@ -388,17 +374,7 @@ impl NylonRingHost {
             }
         };
 
-        let status = panic::catch_unwind(panic::AssertUnwindSafe(|| unsafe {
-            handle_raw_fn(NrStr::new(entry), sid, payload_bytes)
-        }));
-
-        let status = match status {
-            Ok(s) => s,
-            Err(_) => {
-                let _ = self.host_ctx.pending_requests.remove(&sid);
-                return Err(NylonRingHostError::PluginHandleFailed(NrStatus::Err));
-            }
-        };
+        let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
         if status != NrStatus::Ok {
             let _ = self.host_ctx.pending_requests.remove(&sid);
@@ -413,16 +389,8 @@ impl NylonRingHost {
             Some(f) => f,
             None => return Err(NylonRingHostError::MissingRequiredFunctions),
         };
-
         let payload = NrBytes::from_slice(data);
-        let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            stream_data_fn(sid, payload)
-        }));
-
-        match status {
-            Ok(s) => Ok(s),
-            Err(_) => Err(NylonRingHostError::PluginHandleFailed(NrStatus::Err)),
-        }
+        Ok(unsafe { stream_data_fn(sid, payload) })
     }
 
     /// Close an active stream from the host side.
@@ -432,15 +400,7 @@ impl NylonRingHost {
             Some(f) => f,
             None => return Err(NylonRingHostError::MissingRequiredFunctions),
         };
-
-        let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            stream_close_fn(sid)
-        }));
-
-        match status {
-            Ok(s) => Ok(s),
-            Err(_) => Err(NylonRingHostError::PluginHandleFailed(NrStatus::Err)),
-        }
+        Ok(unsafe { stream_close_fn(sid) })
     }
 
     /// Get host extension pointer from host_ctx.

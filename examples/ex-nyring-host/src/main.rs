@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let message = b"Hello!";
     println!("Sending: {}", String::from_utf8_lossy(message));
 
-    let (status, response) = host.call("echo", message).await?;
+    let (status, response) = host.call_response("echo", message).await?;
     println!("Status: {:?}", status);
     println!(
         "Response: {}\n",
@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let message = b"make me loud";
     println!("Sending: {}", String::from_utf8_lossy(message));
 
-    let (status, response) = host.call("uppercase", message).await?;
+    let (status, response) = host.call_response("uppercase", message).await?;
     println!("Status: {:?}", status);
     println!(
         "Response: {}\n",
@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Demo 3: Multiple Calls ---");
     for i in 1..=5 {
         let message = format!("Message #{}", i);
-        let (status, _) = host.call("echo", message.as_bytes()).await?;
+        let (status, _) = host.call_response("echo", message.as_bytes()).await?;
         println!("Call {}: {:?}", i, status);
     }
 
@@ -115,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
                 for _ in 0..BATCH_SIZE {
-                    futures_batch.push(host.call("benchmark", payload));
+                    futures_batch.push(host.call_response("benchmark", payload));
                 }
                 let _ = join_all(futures_batch.drain(..)).await;
                 let batch_elapsed = batch_start.elapsed();

@@ -164,13 +164,7 @@ macro_rules! define_plugin {
             host_ctx: *mut std::ffi::c_void,
             host_vtable: *const $crate::NrHostVTable,
         ) -> $crate::NrStatus {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                $init_fn(host_ctx, host_vtable)
-            }));
-            match result {
-                Ok(status) => status,
-                Err(_) => $crate::NrStatus::Err,
-            }
+            $init_fn(host_ctx, host_vtable)
         }
 
         unsafe extern "C" fn plugin_shutdown_wrapper() {

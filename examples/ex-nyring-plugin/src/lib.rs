@@ -1,4 +1,4 @@
-use nylon_ring::{define_plugin, NrBytes, NrHostVTable, NrStatus};
+use nylon_ring::{define_plugin, NrBytes, NrHostVTable, NrStatus, NrVec};
 use std::ffi::c_void;
 
 // Global state to store host context and vtable
@@ -6,10 +6,10 @@ static mut HOST_CTX: *mut c_void = std::ptr::null_mut();
 static mut HOST_VTABLE: *const NrHostVTable = std::ptr::null();
 
 #[inline(always)]
-pub fn send_result(sid: u64, status: NrStatus, data: &[u8]) {
+pub fn send_result(sid: u64, status: NrStatus, data: nylon_ring::NrVec<u8>) {
     unsafe {
         let f = (*HOST_VTABLE).send_result;
-        f(HOST_CTX, sid, status, NrBytes::from_slice(data));
+        f(HOST_CTX, sid, status, data);
     }
 }
 
@@ -29,15 +29,19 @@ fn shutdown() {
 // Echo handler - simply returns the input data
 unsafe fn handle_echo(sid: u64, payload: NrBytes) -> NrStatus {
     let data = payload.as_slice();
-    let mut text = String::from_utf8_lossy(data);
-    println!("[Plugin] Echo received: {}", text);
+    let text_str = String::from_utf8_lossy(data);
+    println!("[Plugin] Echo received: {}", text_str);
 
     // Modify the text
-    text = format!("{}, Nylon Ring!", text).into();
+    let new_text = format!("{}, Nylon Ring!", text_str);
 
-    // Send response back to host
-    send_result(sid, NrStatus::Ok, text.as_bytes());
-    std::mem::forget(text);
+    // Convert to NrVec (Zero Copy transfer)
+    let vec_bytes = new_text.into_bytes();
+    let nr_vec = NrVec::from_vec(vec_bytes);
+
+    // Send response back to host (transfer ownership)
+    send_result(sid, NrStatus::Ok, nr_vec);
+
     NrStatus::Ok
 }
 
@@ -48,7 +52,8 @@ unsafe fn handle_uppercase(sid: u64, payload: NrBytes) -> NrStatus {
     println!("[Plugin] Uppercase received, sending back: {}", text);
 
     // Send response back to host
-    send_result(sid, NrStatus::Ok, text.as_bytes());
+    let nr_vec = NrVec::from_string(text);
+    send_result(sid, NrStatus::Ok, nr_vec);
 
     NrStatus::Ok
 }
@@ -58,9 +63,8 @@ unsafe fn handle_benchmark(sid: u64, payload: NrBytes) -> NrStatus {
     // let data = payload.as_slice();
     // let _text = String::from_utf8_lossy(data);
     // println!("[Plugin] Benchmark received: {}", text);
-
     // Send response back to host
-    send_result(sid, NrStatus::Ok, payload.as_slice());
+    send_result(sid, NrStatus::Ok, NrVec::from_nr_bytes(payload));
 
     NrStatus::Ok
 }

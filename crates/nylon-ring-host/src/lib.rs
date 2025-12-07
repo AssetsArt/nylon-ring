@@ -18,18 +18,18 @@ use tokio::sync::{mpsc, oneshot};
 type Result<T> = std::result::Result<T, NylonRingHostError>;
 enum Pending {
     #[allow(dead_code)]
-    Unary(oneshot::Sender<(NrStatus, NrBytes)>),
+    Unary(oneshot::Sender<(NrStatus, Vec<u8>)>),
     Stream(mpsc::UnboundedSender<StreamFrame>),
 }
 #[derive(Debug)]
 pub struct StreamFrame {
     pub status: NrStatus,
-    pub data: NrBytes,
+    pub data: Vec<u8>,
 }
 pub type StreamReceiver = mpsc::UnboundedReceiver<StreamFrame>;
 type FastPendingMap = DashMap<u64, Pending, FxBuildHasher>;
 type FastStateMap = DashMap<u64, HashMap<String, NrBytes>, FxBuildHasher>;
-type UnarySender = Option<oneshot::Sender<(NrStatus, NrBytes)>>;
+type UnarySender = Option<oneshot::Sender<(NrStatus, Vec<u8>)>>;
 #[repr(C)]
 struct HostContext {
     pending_requests: FastPendingMap,
@@ -99,7 +99,7 @@ impl NylonRingHost {
 
             // Create host vtable
             let host_vtable = Box::new(NrHostVTable {
-                send_result: Self::send_result_callback,
+                send_result: Self::send_result_vec_callback,
             });
 
             // Create host extension for state management
@@ -150,11 +150,11 @@ impl NylonRingHost {
         }
     }
 
-    unsafe extern "C" fn send_result_callback(
+    unsafe extern "C" fn send_result_vec_callback(
         host_ctx: *mut c_void,
         sid: u64,
         status: NrStatus,
-        payload: NrBytes,
+        payload: nylon_ring::NrVec<u8>,
     ) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if host_ctx.is_null() {
@@ -162,17 +162,21 @@ impl NylonRingHost {
             }
             let ctx = &*(host_ctx as *const HostContext);
 
+            // Convert NrVec to Vec<u8> (Zero Copy)
+            let mut data_vec = Some(payload.into_vec());
+
             // ── ultra fast unary path ──
             let mut handled_fast = false;
             CURRENT_UNARY_TX.with(|cell| {
                 let ptr = cell.get();
                 if !ptr.is_null() {
-                    // ptr: *mut Option<Sender<_>>
-                    let slot: &mut Option<oneshot::Sender<(NrStatus, NrBytes)>> =
+                    let slot: &mut Option<oneshot::Sender<(NrStatus, Vec<u8>)>> =
                         unsafe { &mut *ptr };
 
                     if let Some(tx) = slot.take() {
-                        let _ = tx.send((status, payload));
+                        if let Some(data) = data_vec.take() {
+                            let _ = tx.send((status, data));
+                        }
                         ctx.state_per_sid.remove(&sid);
                         handled_fast = true;
                     }
@@ -183,16 +187,21 @@ impl NylonRingHost {
                 return;
             }
 
+            let data_vec = match data_vec.take() {
+                Some(v) => v,
+                None => return, // Already consumed
+            };
+
             let should_clear_state = if let Some((_, entry)) = ctx.pending_requests.remove(&sid) {
                 match entry {
                     Pending::Unary(tx) => {
-                        let _ = tx.send((status, payload));
+                        let _ = tx.send((status, data_vec));
                         true
                     }
                     Pending::Stream(tx) => {
                         let _ = tx.send(StreamFrame {
                             status,
-                            data: payload,
+                            data: data_vec,
                         });
                         let is_finished = matches!(
                             status,
@@ -267,7 +276,7 @@ impl NylonRingHost {
         NrBytes::from_slice(&[])
     }
 
-    pub async fn call(&self, entry: &str, payload: &[u8]) -> Result<(NrStatus, NrBytes)> {
+    pub async fn call(&self, entry: &str, payload: &[u8]) -> Result<(NrStatus, Vec<u8>)> {
         let _now = Instant::now();
         let sid = self
             .next_sid
@@ -302,16 +311,16 @@ impl NylonRingHost {
         &self,
         entry: &str,
         payload: &[u8],
-    ) -> Result<(NrStatus, NrBytes)> {
+    ) -> Result<(NrStatus, Vec<u8>)> {
         let sid = self
             .next_sid
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Sender/Receiver ปกติ
-        let (tx, rx) = oneshot::channel::<(NrStatus, NrBytes)>();
+        let (tx, rx) = oneshot::channel::<(NrStatus, Vec<u8>)>();
 
         // เก็บ Sender ไว้ใน Option เพื่อให้ callback มา .take() ไปใช้
-        let mut tx_slot: Option<oneshot::Sender<(NrStatus, NrBytes)>> = Some(tx);
+        let mut tx_slot: Option<oneshot::Sender<(NrStatus, Vec<u8>)>> = Some(tx);
 
         CURRENT_UNARY_TX.with(|cell| {
             debug_assert!(

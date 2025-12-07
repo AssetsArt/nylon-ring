@@ -72,7 +72,7 @@ pub struct NrTuple<A, B> {
 #[derive(Debug, Copy, Clone)]
 pub struct NrHostVTable {
     pub send_result:
-        unsafe extern "C" fn(host_ctx: *mut c_void, sid: u64, status: NrStatus, payload: NrBytes),
+        unsafe extern "C" fn(host_ctx: *mut c_void, sid: u64, status: NrStatus, payload: NrVec<u8>),
 }
 
 /// Host extension table for state management.
@@ -297,7 +297,34 @@ impl NrPluginInfo {
     }
 }
 
+impl NrVec<u8> {
+    pub fn from_nr_bytes(bytes: NrBytes) -> Self {
+        let v = bytes.as_slice().to_vec();
+        Self::from_vec(v)
+    }
+    pub fn from_string(s: String) -> Self {
+        Self::from_vec(s.into_bytes())
+    }
+}
+
 impl<T> NrVec<T> {
+    pub fn from_vec(v: Vec<T>) -> Self {
+        let mut v = std::mem::ManuallyDrop::new(v);
+        let ptr = v.as_mut_ptr();
+        let len = v.len();
+        let cap = v.capacity();
+        Self {
+            ptr,
+            len: len as u64,
+            cap: cap as u64,
+        }
+    }
+
+    pub fn into_vec(self) -> Vec<T> {
+        let this = std::mem::ManuallyDrop::new(self);
+        unsafe { Vec::from_raw_parts(this.ptr, this.len as usize, this.cap as usize) }
+    }
+
     pub fn push(&mut self, value: T) {
         if self.len == self.cap {
             self.reserve(1);

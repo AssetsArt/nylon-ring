@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demo 1: Echo
     println!("--- Demo 1: Echo ---");
-    let message = b"Hello, Nylon Ring!";
+    let message = b"Hello!";
     println!("Sending: {}", String::from_utf8_lossy(message));
 
     let (status, response) = host.call("echo", message).await?;

@@ -29,12 +29,15 @@ fn shutdown() {
 // Echo handler - simply returns the input data
 unsafe fn handle_echo(sid: u64, payload: NrBytes) -> NrStatus {
     let data = payload.as_slice();
-    let text = String::from_utf8_lossy(data);
+    let mut text = String::from_utf8_lossy(data);
     println!("[Plugin] Echo received: {}", text);
 
-    // Send response back to host
-    send_result(sid, NrStatus::Ok, payload.as_slice());
+    // Modify the text
+    text = format!("{}, Nylon Ring!", text).into();
 
+    // Send response back to host
+    send_result(sid, NrStatus::Ok, text.as_bytes());
+    std::mem::forget(text);
     NrStatus::Ok
 }
 

@@ -1,0 +1,9 @@
+[package]
+name = "ex-nyring-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nylon-ring-host = { path = "../../crates/nylon-ring-host" }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"

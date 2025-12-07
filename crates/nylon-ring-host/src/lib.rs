@@ -28,7 +28,7 @@ pub struct StreamFrame {
 }
 pub type StreamReceiver = mpsc::UnboundedReceiver<StreamFrame>;
 type FastPendingMap = DashMap<u64, Pending, FxBuildHasher>;
-type FastStateMap = DashMap<u64, HashMap<String, NrBytes>, FxBuildHasher>;
+type FastStateMap = DashMap<u64, HashMap<String, Vec<u8>>, FxBuildHasher>;
 type UnarySender = Option<oneshot::Sender<(NrStatus, Vec<u8>)>>;
 #[repr(C)]
 struct HostContext {
@@ -242,10 +242,13 @@ impl NylonRingHost {
 
             let key_str = key.as_str().to_string();
 
+            // Copy data from NrBytes to owned Vec<u8> to prevent memory leak
+            let value_vec = value.as_slice().to_vec();
+
             ctx.state_per_sid
                 .entry(sid)
                 .or_default()
-                .insert(key_str, value);
+                .insert(key_str, value_vec);
 
             // Return empty bytes on success
             NrBytes::from_slice(&[])
@@ -268,7 +271,8 @@ impl NylonRingHost {
         let key_str = key.as_str();
         if let Some(sid_state) = ctx.state_per_sid.get(&sid) {
             if let Some(value) = sid_state.get(key_str) {
-                return *value;
+                // Return NrBytes pointing to the Vec<u8> data (safe as long as HashMap entry exists)
+                return NrBytes::from_slice(value.as_slice());
             }
         }
 

@@ -20,13 +20,11 @@
 > Benchmarked on **Apple M1 Pro (10-core)** — Release builds
 
 ```
-🚀 Multi-thread:  52.9M req/sec  (10 cores, fire-and-forget)
-⚡ Single-thread: 13.7M req/sec  (fire-and-forget)
-🎯 Unary call:     6.9M req/sec  (with response)
-💨 Fast path:      7.2M req/sec  (thread-local optimized)
+🚀 Multi-thread: 145M+ req/sec  (10 threads, fire-and-forget)
+⚡ Single-thread: 13.95M req/sec (fire-and-forget)
+🎯 Unary call:     6.98M req/sec (with response)
+💨 Fast path:      7.34M req/sec (thread-local optimized)
 ```
-
-**Latency**: 73-235ns per call • **Scaling**: 3.9x per core efficiency
 
 ---
 
@@ -38,15 +36,15 @@
 - Compatible with C, C++, Zig, Go, Rust, ...
 
 ### 🚀 **Extreme Performance**
-- **52.9M req/sec** multi-thread throughput
+- **145M+ req/sec** multi-thread throughput
 - **Thread-local SID** generation (zero atomic operations)
 - **Zero-copy** data transfer with `NrVec<u8>`
 - Sub-nanosecond ABI overhead
 
 ### ⚡ **Flexible Call Patterns**
-- **Fire-and-forget**: ~73ns (fastest)
-- **Unary with response**: ~144ns
-- **Fast path**: ~138ns (thread-local optimized)
+- **Fire-and-forget**: ~71.7ns (fastest)
+- **Unary with response**: ~143.2ns
+- **Fast path**: ~136.2ns (thread-local optimized)
 - **Streaming**: Bi-directional communication
 
 ### 🔧 **Production Ready**
@@ -112,14 +110,14 @@ use nylon_ring_host::NylonRingHost;
 
 let host = NylonRingHost::load("target/release/libmy_plugin.so")?;
 
-// Fire-and-forget - no response waiting (~73ns, 13.7M calls/sec)
+// Fire-and-forget - no response waiting (~71.7ns, 13.95M calls/sec)
 let status = host.call("handler_name", b"payload").await?;
 ```
 
 #### Unary with Response
 
 ```rust
-// Wait for response from plugin (~144ns, 6.9M calls/sec)
+// Wait for response from plugin (~143.2ns, 6.98M calls/sec)
 let (status, response) = host.call_response("handler_name", b"payload").await?;
 println!("Response: {}", String::from_utf8_lossy(&response));
 ```
@@ -127,7 +125,7 @@ println!("Response: {}", String::from_utf8_lossy(&response));
 #### Fast Path
 
 ```rust
-// Thread-local optimized path (~138ns, 7.2M calls/sec)
+// Thread-local optimized path (~136.2ns, 7.34M calls/sec)
 let (status, response) = host.call_response_fast("handler_name", b"payload").await?;
 ```
 
@@ -225,12 +223,12 @@ define_plugin! {
 
 | Operation | Time | Throughput | Notes |
 |-----------|------|------------|-------|
-| **Fire-and-forget** | **73 ns** | **13.7M calls/sec** | Fastest ⚡ |
-| **Fast path** | **138 ns** | **7.2M calls/sec** | Thread-local |
-| **Standard unary** | **144 ns** | **6.9M calls/sec** | With response |
-| **+ 128B payload** | **159 ns** | **6.3M calls/sec** | Small data |
-| **+ 1KB payload** | **196 ns** | **5.1M calls/sec** | Medium data |
-| **+ 4KB payload** | **235 ns** | **4.3M calls/sec** | Large data |
+| **Fire-and-forget** | **71.7 ns** | **13.95M calls/sec** | Fastest ⚡ |
+| **Fast path** | **136.2 ns** | **7.34M calls/sec** | Thread-local |
+| **Standard unary** | **143.2 ns** | **6.98M calls/sec** | With response |
+| **+ 128B payload** | **158.7 ns** | **6.30M calls/sec** | Small data |
+| **+ 1KB payload** | **193.7 ns** | **5.16M calls/sec** | Medium data |
+| **+ 4KB payload** | **228.5 ns** | **4.38M calls/sec** | Large data |
 
 ---
 
@@ -238,9 +236,7 @@ define_plugin! {
 
 | Configuration | Throughput | Latency |
 |--------------|------------|---------|
-| **10 cores (fire-and-forget)** | **52.9M req/sec** | **0.19 µs** |
-
-**Scaling Efficiency**: 3.9x per core (vs single-thread 13.7M)
+| **10 threads (fire-and-forget)** | **145M+ req/sec** | **70 ns** |
 
 **Key Optimization**: Thread-local SID generation eliminates atomic operations entirely
 
@@ -267,7 +263,7 @@ send_result(ctx, sid, status, nr_vec);
 ```
 
 #### 3. Safe for Long-Running Servers
-- SID wraps within thread range (~33 seconds at 3M req/sec per thread)
+- SID wraps within thread range (safe for long-running servers)
 - No collision between threads
 - Request lifetime << wrap time
 
@@ -324,9 +320,9 @@ send_result(ctx, sid, status, nr_vec);
 - **Builds**: Release builds only
 
 ### Multi-Thread Stress Test
-- **Method**: 10 threads, 130 req/batch, 10-second run
+- **Method**: 10 threads, 100 req/batch, 10-second run
 - **Pattern**: Fire-and-forget (no response wait)
-- **Total**: 528.9M requests in 10 seconds
+- **Total**: 1.45B+ requests in 10 seconds
 
 ---
 

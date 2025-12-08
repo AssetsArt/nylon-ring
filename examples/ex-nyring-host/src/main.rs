@@ -9,7 +9,7 @@ use std::{
 // --- CONFIGURATION ---
 const DURATION_SECS: u64 = 10;
 // BATCH_SIZE: used for Unary/Standard tests to create pipelining without spawn overhead
-const BATCH_SIZE: usize = 130;
+const BATCH_SIZE: usize = 100;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -149,11 +149,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total = total_requests.load(Ordering::Relaxed);
     let total_lat_nanos = total_latency_nanos.load(Ordering::Relaxed);
     let rps = total as f64 / elapsed.as_secs_f64();
-    let avg_latency_micros = (total_lat_nanos as f64 / total as f64) / 1000.0;
+    let avg_latency_nanos = total_lat_nanos / total;
 
     println!("  -> Processed {} requests in {:.2?}", total, elapsed);
     println!("  -> RPS: {:.2}/sec", rps);
-    println!("  -> Average latency: {:.2} µs/request", avg_latency_micros);
+    println!("  -> Average latency: {:.2} ns/request", avg_latency_nanos);
     // */
     println!("\n=== Demo Complete ===");
     Ok(())

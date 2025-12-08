@@ -148,8 +148,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let elapsed = start_time.elapsed();
     let total = total_requests.load(Ordering::Relaxed);
     let total_lat_nanos = total_latency_nanos.load(Ordering::Relaxed);
+
     let rps = total as f64 / elapsed.as_secs_f64();
-    let avg_latency_nanos = total_lat_nanos / total;
+    let avg_latency_nanos = if total > 0 {
+        total_lat_nanos / total
+    } else {
+        0
+    };
 
     println!("  -> Processed {} requests in {:.2?}", total, elapsed);
     println!("  -> RPS: {:.2}/sec", rps);

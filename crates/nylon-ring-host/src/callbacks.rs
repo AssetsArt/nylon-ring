@@ -71,30 +71,38 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
         return;
     }
 
-    // ── SLAB / WAKER PATH (God Mode) ──
+    // ── SHARDED MAP / CHANNEL PATH ──
     let data_vec = match data_vec.take() {
         Some(v) => v,
         None => return, // Already consumed
     };
 
-    crate::context::with_request_slot(ctx, sid, |slot| {
-        // STREAMING: If a stream channel is registered, send to it.
-        if let Some(tx) = &slot.stream_tx {
-            let _ = tx.send(StreamFrame {
-                status,
-                data: data_vec,
-            });
-            return;
-        }
+    // Try normal lookup/removal from Sharded Map
+    if let Some(entry) = crate::context::remove_pending(ctx, sid) {
+        match entry {
+            crate::types::Pending::Unary(tx) => {
+                // Oneshot: just send result
+                let _ = tx.send((status, data_vec));
+            }
+            crate::types::Pending::Stream(tx) => {
+                // Stream: send frame
+                let _ = tx.send(StreamFrame {
+                    status,
+                    data: data_vec,
+                });
 
-        // UNARY: Store result and wake future.
-        slot.data = Some(data_vec);
-        slot.status = status;
-        // If the host is waiting (Future is polled), wake it up.
-        if let Some(waker) = slot.waker.take() {
-            waker.wake();
+                // If stream is NOT finished, we must PUT IT BACK so next callback finds it.
+                let is_finished = matches!(
+                    status,
+                    NrStatus::Err | NrStatus::Invalid | NrStatus::Unsupported | NrStatus::StreamEnd
+                );
+
+                if !is_finished {
+                    crate::context::reinsert_pending(ctx, sid, crate::types::Pending::Stream(tx));
+                }
+            }
         }
-    });
+    }
 }
 
 /// Callback for setting per-SID state in the host.

@@ -247,39 +247,41 @@ define_plugin! {
 
 The **Nylon Ring** architecture is designed around a strictly defined ABI boundary that separates the Host runtime from Plugin logic, connected by a high-performance routing layer.
 
-```mermaid
-graph TD
-    subgraph Host ["Host Layer (nylon-ring-host)"]
-        API[Public API]
-        SID[ID Generator]
-        Router[Callback Router]
-        
-        subgraph State ["State Management"]
-            TLS["Thread-Local Slot<br>Zero Contention"]
-            Map["Sharded DashMap<br>64 Shards"]
-        end
-    end
-
-    subgraph ABI ["ABI Boundary (nylon-ring)"]
-        Structs["#[repr(C)] Types"]
-        VTable["VTable Interface"]
-    end
-
-    subgraph Plugin ["Plugin Layer"]
-        Logic[Business Logic]
-    end
-
-    API -->|1. Get SID| SID
-    API -->|2. FFI Call| VTable
-    VTable --> Logic
-    
-    Logic -->|3. send_result| Router
-    
-    Router -->|Waterfall Check 1| TLS
-    Router -->|Waterfall Check 2| Map
-    
-    TLS -.->|Synchronous Wake| API
-    Map -.->|Async Wake - Oneshot| API
+```text
++-----------------------------------------------------------+
+|               Host Layer (nylon-ring-host)                |
+|                                                           |
+|  [Public API]nylon_ring_host::NylonRingHost               |
+|       |                                                   |
+|       v (1. Get SID)                                      |
+|    [ID Generator] <-----> [State Management]              |
+|       |                   +---------------------------+   |
+|       |                   |  [Thread-Local Slot]      |   |
+|       |                   |   (Zero Contention)       |   |
+|       |                   +---------------------------+   |
+|       |                   |  [Sharded DashMap]        |   |
+|       |                   |   (64 Shards)             |   |
+|       |                   +---------------------------+   |
+|       |                                 ^                 |
+|       v (2. FFI Call)                   |                 |
++-------+---------------------------------+-----------------+
+        |                                 |
+        v                                 | (3. send_result)
++-------+---------------------------------+-----------------+
+|       |            ABI Boundary         |                 |
+|       v                                 |                 |
+|   [VTable Interface]               [Callback Router]      |
+|                                         ^                 |
+|                                         |                 |
++-----------------------------------------+-----------------+
+        |                                 |
+        v                                 |
++-------+---------------------------------+-----------------+
+|       |            Plugin Layer         |                 |
+|       v                                 |                 |
+|   [Business Logic] ---------------------+                 |
+|                                                           |
++-----------------------------------------------------------+
 ```
 
 #### 1. The Host Layer (`nylon-ring-host`)

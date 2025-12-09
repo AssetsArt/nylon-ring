@@ -1,62 +1,76 @@
-//! Host context and thread-local state management.
-
 use crate::types::{FastPendingMap, FastStateMap, Pending, UnaryResultSlot, UnarySender};
 use nylon_ring::NrHostExt;
 use rustc_hash::FxBuildHasher;
 use std::cell::Cell;
 
-/// Host context shared with the plugin (opaque on the plugin side).
-///
-/// Note:
-/// - `host_ext` now lives **inside** `HostContext` → no dangling pointer when
-///   `NylonRingHost` is dropped.
+/// จำนวน shard ต้องเป็น power-of-two (64 = 2^6)
+const SHARD_COUNT: usize = 64;
+const SHARD_MASK: usize = SHARD_COUNT - 1;
+
 #[repr(C)]
 pub(crate) struct HostContext {
-    pub(crate) pending_requests: FastPendingMap,
+    // ย้าย Shards เข้ามาอยู่ในนี้ (Box<[]> เพื่อให้ขนาด Struct เล็กและ Pointer indirection เร็ว)
+    pub(crate) pending_shards: Box<[FastPendingMap]>,
+
     pub(crate) state_per_sid: FastStateMap,
     pub(crate) host_ext: NrHostExt,
 }
 
 impl HostContext {
-    /// Create a new host context with the given extension callbacks.
     pub(crate) fn new(host_ext: NrHostExt) -> Self {
+        // Init shards แบบ Manual (เพราะ DashMap::new ไม่ใช่ const)
+        let mut shards = Vec::with_capacity(SHARD_COUNT);
+        for _ in 0..SHARD_COUNT {
+            shards.push(FastPendingMap::with_hasher(FxBuildHasher::default()));
+        }
+
         Self {
-            pending_requests: FastPendingMap::with_hasher(FxBuildHasher),
-            state_per_sid: FastStateMap::with_hasher(FxBuildHasher),
+            // Convert Vec -> Box<[T]> (Fixed size slice)
+            pending_shards: shards.into_boxed_slice(),
+            state_per_sid: FastStateMap::with_hasher(FxBuildHasher::default()),
             host_ext,
         }
     }
 }
 
-// Safety: HostContext can be safely shared across threads because:
-// - FastPendingMap and FastStateMap (DashMap) are thread-safe
-// - NrHostExt only contains function pointers, which are Send + Sync
+// Safety: OK
 unsafe impl Send for HostContext {}
 unsafe impl Sync for HostContext {}
 
+// --- Helper: Shard Indexing ---
+// Inline(always) เพื่อให้ Compiler เปลี่ยนเป็น Bitmask instruction ตัวเดียว
+#[inline(always)]
+fn get_shard(ctx: &HostContext, sid: u64) -> &FastPendingMap {
+    // Safety: เรา init มาครบ SHARD_COUNT แน่นอน และ mask รับประกันว่า index ไม่เกิน
+    unsafe {
+        ctx.pending_shards
+            .get_unchecked((sid as usize) & SHARD_MASK)
+    }
+}
+
+// --- Thread Locals (Fast Paths) ---
 thread_local! {
-    /// Fast-path for synchronous unary calls using oneshot channels.
-    /// Used by `call_response` method.
     pub(crate) static CURRENT_UNARY_TX: Cell<*mut UnarySender> =
         const { Cell::new(std::ptr::null_mut()) };
 
-    /// Ultra-fast path: plugin writes result directly to this slot.
-    /// Used by `call_response_fast` method for synchronous plugins.
     pub(crate) static CURRENT_UNARY_RESULT: Cell<*mut UnaryResultSlot> =
         const { Cell::new(std::ptr::null_mut()) };
 }
 
-/// Insert a pending request into the global map.
+// --- Operations ---
+
+#[inline]
 pub(crate) fn insert_pending(ctx: &HostContext, sid: u64, pending: Pending) {
-    ctx.pending_requests.insert(sid, pending);
+    get_shard(ctx, sid).insert(sid, pending);
 }
 
-/// Remove and return a pending request from the global map.
+#[inline]
 pub(crate) fn remove_pending(ctx: &HostContext, sid: u64) -> Option<Pending> {
-    ctx.pending_requests.remove(&sid).map(|(_, v)| v)
+    // ไม่ต้องมี Fallback แล้วครับ Shard อย่างเดียว เร็วและชัวร์กว่า
+    get_shard(ctx, sid).remove(&sid).map(|(_, v)| v)
 }
 
-/// Insert a pending request back into the map (for streaming continuations).
+#[inline]
 pub(crate) fn reinsert_pending(ctx: &HostContext, sid: u64, pending: Pending) {
-    ctx.pending_requests.insert(sid, pending);
+    get_shard(ctx, sid).insert(sid, pending);
 }

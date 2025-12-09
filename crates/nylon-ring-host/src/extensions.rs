@@ -142,7 +142,12 @@ impl Extensions {
             .entry(TypeId::of::<T>())
             .or_insert_with(|| Box::new(f()));
 
-        (**out).as_any_mut().downcast_mut().unwrap()
+        // Safety: TypeId::of::<T>() guarantees this entry contains type T,
+        // so the downcast cannot fail. Using expect instead of unwrap for clarity.
+        (**out)
+            .as_any_mut()
+            .downcast_mut()
+            .expect("TypeId mismatch: this is a bug in Extensions implementation")
     }
 
     /// Get a mutable reference to a type, inserting the type's default value if not already present

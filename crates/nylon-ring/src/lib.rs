@@ -344,12 +344,28 @@ impl<T> NrVec<T> {
                 std::cmp::max(self.cap * 2, required)
             };
 
-            let new_layout = std::alloc::Layout::array::<T>(new_cap).unwrap();
+            let new_layout = match std::alloc::Layout::array::<T>(new_cap) {
+                Ok(layout) => layout,
+                Err(_) => {
+                    // Layout calculation overflow - trigger allocation error
+                    std::alloc::handle_alloc_error(
+                        std::alloc::Layout::from_size_align(usize::MAX, 1)
+                            .unwrap_or_else(|_| std::alloc::Layout::new::<u8>()),
+                    )
+                }
+            };
 
             let new_ptr = if self.cap == 0 {
                 unsafe { std::alloc::alloc(new_layout) }
             } else {
-                let old_layout = std::alloc::Layout::array::<T>(self.cap).unwrap();
+                let old_layout = match std::alloc::Layout::array::<T>(self.cap) {
+                    Ok(layout) => layout,
+                    Err(_) => {
+                        // This should never happen since we successfully allocated before
+                        // But handle it defensively
+                        std::alloc::handle_alloc_error(new_layout)
+                    }
+                };
                 unsafe { std::alloc::realloc(self.ptr as *mut u8, old_layout, new_layout.size()) }
             };
 

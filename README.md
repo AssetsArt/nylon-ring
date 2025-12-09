@@ -358,7 +358,7 @@ The implementer of business logic.
 ### Multi-Thread Stress Test
 - **Method**: 10 threads, 100 req/batch, 10-second run
 - **Pattern**: Fire-and-forget (no response wait)
-- **Total**: 1.45B+ requests in 10 seconds
+- **Total**: 1.40B~ requests in 10 seconds
 
 ---
 

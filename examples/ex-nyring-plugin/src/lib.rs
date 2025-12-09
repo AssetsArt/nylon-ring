@@ -103,34 +103,28 @@ unsafe fn handle_async(sid: u64, payload: NrBytes) -> NrStatus {
         sid, text
     );
     println!("[Plugin] Spawning async task...");
-    std::io::Write::flush(&mut std::io::stdout()).ok();
 
     // Spawn async task on Tokio runtime
     let rt = get_runtime();
-    rt.block_on(async move {
+    rt.spawn(async move {
         println!("[Plugin] Async task running on Tokio runtime...");
-        std::io::Write::flush(&mut std::io::stdout()).ok();
 
         // Simulate async work (e.g., database query, HTTP request, etc.)
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         println!("[Plugin] Async work completed!");
-        std::io::Write::flush(&mut std::io::stdout()).ok();
 
         // Send result back to host
         let result = format!("Async result: {} (processed after 100ms)", text);
         println!("[Plugin] Sending result back to host: {}", result);
-        std::io::Write::flush(&mut std::io::stdout()).ok();
 
         let nr_vec = NrVec::from_string(result);
         send_result(sid, NrStatus::Ok, nr_vec);
 
         println!("[Plugin] Result sent!");
-        std::io::Write::flush(&mut std::io::stdout()).ok();
     });
 
     println!("[Plugin] Async handler returning Ok (task spawned)");
-    std::io::Write::flush(&mut std::io::stdout()).ok();
     NrStatus::Ok
 }
 

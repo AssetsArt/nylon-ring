@@ -243,30 +243,63 @@ define_plugin! {
 
 ---
 
-## 🏗️ Architecture
+### System Overview
 
-### Key Optimizations
+The **Nylon Ring** architecture is designed around a strictly defined ABI boundary that separates the Host runtime from Plugin logic, connected by a high-performance routing layer.
 
-#### 1. Thread-Local SID Generation
-```rust
-// Each thread has its own SID range (100M per thread)
-// Thread 0: 0-99,999,999
-// Thread 1: 100,000,000-199,999,999
-// Zero atomic operations on hot path!
+```mermaid
+graph TD
+    subgraph Host ["Host Layer (nylon-ring-host)"]
+        API[Public API]
+        SID[ID Generator]
+        Router[Callback Router]
+        
+        subgraph State ["State Management"]
+            TLS["Thread-Local Slot<br>(Zero Contention)"]
+            Map["Sharded DashMap<br>(64 Shards)"]
+        end
+    end
+
+    subgraph ABI ["ABI Boundary (nylon-ring)"]
+        Structs["#[repr(C)] Types"]
+        VTable["VTable Interface"]
+    end
+
+    subgraph Plugin ["Plugin Layer"]
+        Logic[Business Logic]
+    end
+
+    API -->|1. Get SID| SID
+    API -->|2. FFI Call| VTable
+    VTable --> Logic
+    
+    Logic -->|3. send_result| Router
+    
+    Router -->|Waterfall Check 1| TLS
+    Router -->|Waterfall Check 2| Map
+    
+    TLS -.->|Synchronous Wake| API
+    Map -.->|Async Wake (Oneshot)| API
 ```
 
-#### 2. Zero-Copy Data Transfer
-```rust
-// Plugin can transfer Vec<u8> ownership directly to host
-let data = vec![...];
-let nr_vec = NrVec::from_vec(data);  // No copy
-send_result(ctx, sid, status, nr_vec);
-```
+#### 1. The Host Layer (`nylon-ring-host`)
+The runtime environment that manages plugin lifecycles and request routing.
+- **Hybrid State Management**:
+    - **Fast Path (Sync)**: Uses `Thread-Local Storage` (TLS) to store result slots. This eliminates all lock contention and atomic operations for synchronous calls.
+    - **Standard Path (Async)**: Uses a **Sharded DashMap** (64 shards) to track pending requests. Sharding minimizes lock contention in multi-threaded environments.
+- **ID Generation**: simple, thread-local counter with blocked allocation (1M per block) to avoid global atomic contention.
+- **Routing**: The callback handler uses a **Waterfall Strategy**:
+    1.  Check **TLS Slot** (Is this a fast synchronous response on the same thread?).
+    2.  Check **Sharded Map** (Is this an async response from any thread?).
 
-#### 3. Safe for Long-Running Servers
-- SID wraps within thread range (safe for long-running servers)
-- No collision between threads
-- Request lifetime << wrap time
+#### 2. The ABI Layer (`nylon-ring`)
+Defines the strictly stable interface between Host and Plugin.
+- **Stable Memory Layout**: All exchanged types (`NrVec`, `NrStr`, `NrStatus`) are `#[repr(C)]`, guaranteeing identical memory representation across languages (Rust, C++, etc.).
+- **Zero-Copy Protocol**: `NrVec<T>` allows ownership of heap-allocated memory (like a `Vec<u8>`) to be transferred across the FFI boundary without copying.
+
+#### 3. The Plugin Layer
+The implementer of business logic.
+- **Stateless & Async-Agnostic**: Plugins receive an ID and Payload. They process it (sync or async) and call `send_result` when finished. The Host handles the complexity of mapping that result back to the original caller.
 
 ---
 

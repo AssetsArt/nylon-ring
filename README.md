@@ -255,8 +255,8 @@ graph TD
         Router[Callback Router]
         
         subgraph State ["State Management"]
-            TLS["Thread-Local Slot<br>(Zero Contention)"]
-            Map["Sharded DashMap<br>(64 Shards)"]
+            TLS["Thread-Local Slot<br>Zero Contention"]
+            Map["Sharded DashMap<br>64 Shards"]
         end
     end
 
@@ -279,7 +279,7 @@ graph TD
     Router -->|Waterfall Check 2| Map
     
     TLS -.->|Synchronous Wake| API
-    Map -.->|Async Wake (Oneshot)| API
+    Map -.->|Async Wake - Oneshot| API
 ```
 
 #### 1. The Host Layer (`nylon-ring-host`)

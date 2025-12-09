@@ -60,11 +60,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         String::from_utf8_lossy(response.as_slice())
     );
 
-    // Demo 2: call_response (Fast path with oneshot channel)
+    // Demo 2: call_response (Standard Async Path)
     println!("--- Demo 2: call_response() ---");
-    println!("  Path: FAST PATH with oneshot channel");
-    println!("  → Uses thread-local pending requests (zero DashMap contention)");
-    println!("  → Falls back to global DashMap for cross-thread");
+    println!("  Path: STANDARD ASYNC PATH (DashMap + Oneshot)");
+    println!("  → Uses Sharded DashMap for pending request tracking");
+    println!("  → Uses Tokio Oneshot channel for awaiting response");
+    println!("  → Safe for cross-thread (Plugin can reply from any thread)");
     let message = b"Hello via standard path!";
     println!("  Sending: {}", String::from_utf8_lossy(message));
     let now = std::time::Instant::now();
@@ -80,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Demo 3: call() ---");
     println!("  Path: FIRE-AND-FORGET (no response expected)");
     println!("  → Does not wait for plugin response");
-    println!("  → No pending request tracking");
+    println!("  → No pending request tracking (Zero Map overhead)");
     let message = b"Fire and forget!";
     println!("  Sending: {}", String::from_utf8_lossy(message));
     let now = std::time::Instant::now();
@@ -90,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demo 4: Async plugin handler (using Tokio runtime in plugin)
     println!("--- Demo 4: Async Plugin Handler ---");
-    println!("  Path: FAST PATH (call_response)");
+    println!("  Path: STANDARD ASYNC PATH (call_response)");
     println!("  → Plugin spawns async task on Tokio runtime");
     println!("  → Demonstrates async operations in plugin (100ms delay)");
     let message = b"Async test";
@@ -107,8 +108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Demo 5: call_stream() - Streaming responses
     println!("--- Demo 5: call_stream() ---");
     println!("  Path: STREAMING with unbounded channel");
-    println!("  → Uses thread-local for first insert, global DashMap for continuations");
-    println!("  → Multiple responses per request");
+    println!("  → Uses Sharded DashMap to register stream channel");
+    println!("  → Multiple responses per request via mpsc::UnboundedSender");
     let message = b"start";
     println!("  Sending: {}", String::from_utf8_lossy(message));
     let now = std::time::Instant::now();
@@ -139,11 +140,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Stream completed in {:?}", now.elapsed());
     println!("  Total frames received: {}\n", frame_count);
 
-    // Demo 6: Multiple rapid calls (showing thread-local optimization)
+    // Demo 6: Multiple rapid calls (showing Robustness)
     println!("--- Demo 6: Multiple Rapid Calls ---");
-    println!("  Path: Testing thread-local pending_requests optimization");
-    println!("  → Same-thread requests use thread-local HashMap");
-    println!("  → No DashMap contention");
+    println!("  Path: Testing Sharded DashMap under load");
+    println!("  → Running 10 sequential async calls");
+    println!("  → Verifies map insertion/removal consistency");
     let now = std::time::Instant::now();
     for i in 1..=10 {
         let message = format!("Message #{}", i);
@@ -163,10 +164,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n=== Demo Complete ===");
     println!("\nExecution Path Summary:");
-    println!("  1. call_response_fast() → ULTRA-FAST DIRECT SLOT");
-    println!("  2. call_response()      → FAST PATH (thread-local → global)");
-    println!("  3. call()               → FIRE-AND-FORGET");
-    println!("  4. async handler        → Plugin with Tokio runtime (async operations)");
-    println!("  5. call_stream()        → STREAMING (unbounded channel)");
+    println!("  1. call_response_fast() → ULTRA-FAST DIRECT SLOT (TLS)");
+    println!("  2. call_response()      → STANDARD ASYNC (DashMap + Oneshot)");
+    println!("  3. call()               → FIRE-AND-FORGET (No Map)");
+    println!("  4. async handler        → Verified Async Correctness");
+    println!("  5. call_stream()        → STREAMING (mpsc + Map)");
     Ok(())
 }

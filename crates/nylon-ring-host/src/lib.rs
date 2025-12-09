@@ -13,7 +13,7 @@ mod sid;
 mod types;
 
 use callbacks::{get_state_callback, send_result_vec_callback, set_state_callback};
-use context::{HostContext, CURRENT_UNARY_RESULT};
+use context::{insert_pending, remove_pending, HostContext, CURRENT_UNARY_RESULT};
 use libloading::{Library, Symbol};
 use nylon_ring::{NrBytes, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrStr};
 use sid::next_sid;
@@ -130,17 +130,14 @@ impl NylonRingHost {
         let sid = next_sid();
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        {
-            self.host_ctx
-                .pending_requests
-                .insert(sid, Pending::Unary(tx));
-        }
+        // Use thread-local insert for zero-contention
+        insert_pending(&self.host_ctx, sid, Pending::Unary(tx));
 
         let payload_bytes = NrBytes::from_slice(payload);
         let handle_raw_fn = match self.plugin_vtable.handle {
             Some(f) => f,
             None => {
-                let _ = self.host_ctx.pending_requests.remove(&sid);
+                let _ = remove_pending(&self.host_ctx, sid);
                 return Err(NylonRingHostError::MissingRequiredFunctions);
             }
         };
@@ -148,7 +145,7 @@ impl NylonRingHost {
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
         if status != NrStatus::Ok {
-            let _ = self.host_ctx.pending_requests.remove(&sid);
+            let _ = remove_pending(&self.host_ctx, sid);
             return Err(NylonRingHostError::PluginHandleFailed(status));
         }
 
@@ -259,18 +256,15 @@ impl NylonRingHost {
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<StreamFrame>();
 
-        {
-            self.host_ctx
-                .pending_requests
-                .insert(sid, Pending::Stream(tx));
-        }
+        // Use thread-local insert for zero-contention
+        insert_pending(&self.host_ctx, sid, Pending::Stream(tx));
 
         let payload_bytes = NrBytes::from_slice(payload);
 
         let handle_raw_fn = match self.plugin_vtable.handle {
             Some(f) => f,
             None => {
-                let _ = self.host_ctx.pending_requests.remove(&sid);
+                let _ = remove_pending(&self.host_ctx, sid);
                 return Err(NylonRingHostError::MissingRequiredFunctions);
             }
         };
@@ -278,7 +272,7 @@ impl NylonRingHost {
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
         if status != NrStatus::Ok {
-            let _ = self.host_ctx.pending_requests.remove(&sid);
+            let _ = remove_pending(&self.host_ctx, sid);
             return Err(NylonRingHostError::PluginHandleFailed(status));
         }
 

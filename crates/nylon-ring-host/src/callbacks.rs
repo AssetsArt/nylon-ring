@@ -1,6 +1,8 @@
 //! FFI callback handlers for the plugin interface.
 
-use crate::context::{HostContext, CURRENT_UNARY_RESULT, CURRENT_UNARY_TX};
+use crate::context::{
+    reinsert_pending, remove_pending, HostContext, CURRENT_UNARY_RESULT, CURRENT_UNARY_TX,
+};
 use crate::types::{Pending, StreamFrame, UnaryResultSlot, UnarySender};
 use nylon_ring::{NrBytes, NrStatus, NrStr};
 use std::ffi::c_void;
@@ -10,7 +12,7 @@ use std::ffi::c_void;
 /// This handles three different execution paths:
 /// 1. Ultra-fast direct slot (for `call_response_fast`)
 /// 2. Fast path with oneshot sender (for `call_response`)
-/// 3. Stream/async path with DashMap (for `call_stream`)
+/// 3. Stream/async path with thread-local → global map (for `call_stream`)
 ///
 /// # Safety
 ///
@@ -69,13 +71,13 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
         return;
     }
 
-    // ── STREAM / ASYNC PATH: DashMap ──
+    // ── STREAM / ASYNC PATH: Thread-local → Global Map ──
     let data_vec = match data_vec.take() {
         Some(v) => v,
         None => return, // Already consumed
     };
 
-    let should_clear_state = if let Some((_, entry)) = ctx.pending_requests.remove(&sid) {
+    let should_clear_state = if let Some(entry) = remove_pending(ctx, sid) {
         match entry {
             Pending::Unary(tx) => {
                 let _ = tx.send((status, data_vec));
@@ -91,7 +93,7 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
                     NrStatus::Err | NrStatus::Invalid | NrStatus::Unsupported | NrStatus::StreamEnd
                 );
                 if !is_finished {
-                    ctx.pending_requests.insert(sid, Pending::Stream(tx));
+                    reinsert_pending(ctx, sid, Pending::Stream(tx));
                 }
                 is_finished
             }

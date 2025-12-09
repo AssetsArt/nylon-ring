@@ -21,12 +21,12 @@ impl HostContext {
     pub(crate) fn new(host_ext: NrHostExt) -> Self {
         let mut shards = Vec::with_capacity(SHARD_COUNT);
         for _ in 0..SHARD_COUNT {
-            shards.push(FastPendingMap::with_hasher(FxBuildHasher::default()));
+            shards.push(FastPendingMap::with_hasher(FxBuildHasher));
         }
 
         Self {
             pending_shards: shards.into_boxed_slice(),
-            state_per_sid: FastStateMap::with_hasher(FxBuildHasher::default()),
+            state_per_sid: FastStateMap::with_hasher(FxBuildHasher),
             host_ext,
         }
     }

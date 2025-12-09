@@ -175,7 +175,7 @@ impl NylonRingHost {
         payload: &[u8],
     ) -> Result<(NrStatus, Vec<u8>)> {
         // Use a "Fast SID" that bypasses the Map (High bit set)
-        let sid = next_sid() | 0x8000_0000_0000_0000;
+        let sid = next_sid();
 
         let mut slot: types::UnaryResultSlot = None;
 

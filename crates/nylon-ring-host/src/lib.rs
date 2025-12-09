@@ -36,6 +36,7 @@ pub type StreamReceiver = mpsc::UnboundedReceiver<StreamFrame>;
 type FastPendingMap = DashMap<u64, Pending, FxBuildHasher>;
 type FastStateMap = DashMap<u64, HashMap<String, Vec<u8>>, FxBuildHasher>;
 type UnarySender = Option<oneshot::Sender<(NrStatus, Vec<u8>)>>;
+type UnaryResultSlot = Option<(NrStatus, Vec<u8>)>;
 
 /// Host context shared with the plugin (opaque on the plugin side).
 ///
@@ -76,7 +77,12 @@ struct SidBlock {
 }
 
 thread_local! {
+    // ใช้สำหรับ fast-path เดิม (call_response ที่ใช้ oneshot) – ตอนนี้ยังมีใช้แค่ใน call_response
     static CURRENT_UNARY_TX: Cell<*mut UnarySender> =
+        const { Cell::new(std::ptr::null_mut()) };
+
+    // ultra-fast path: plugin เขียน result ลง slot นี้ตรง ๆ
+    static CURRENT_UNARY_RESULT: Cell<*mut UnaryResultSlot> =
         const { Cell::new(std::ptr::null_mut()) };
 
     static THREAD_LOCAL_SID_BLOCK: Cell<SidBlock> = const { Cell::new(SidBlock {
@@ -180,15 +186,34 @@ impl NylonRingHost {
         }
         let ctx = &*(host_ctx as *const HostContext);
 
-        // Convert NrVec to Vec<u8> (Zero Copy)
+        // Convert NrVec to Vec<u8>
         let mut data_vec = Some(payload.into_vec());
 
-        // ── ultra fast unary path ──
+        // ── ULTRA FAST DIRECT SLOT (call_response_fast) ──
         let mut handled_fast = false;
+
+        CURRENT_UNARY_RESULT.with(|cell| {
+            let ptr = cell.get();
+            if !ptr.is_null() {
+                let slot: &mut UnaryResultSlot = unsafe { &mut *ptr };
+
+                if let Some(data) = data_vec.take() {
+                    *slot = Some((status, data));
+                }
+                ctx.state_per_sid.remove(&sid);
+                handled_fast = true;
+            }
+        });
+
+        if handled_fast {
+            return;
+        }
+
+        // ── FAST PATH: oneshot sender (call_response ปกติที่ใช้ pending_requests: Unary) ──
         CURRENT_UNARY_TX.with(|cell| {
             let ptr = cell.get();
             if !ptr.is_null() {
-                let slot: &mut Option<oneshot::Sender<(NrStatus, Vec<u8>)>> = unsafe { &mut *ptr };
+                let slot: &mut UnarySender = unsafe { &mut *ptr };
 
                 if let Some(tx) = slot.take() {
                     if let Some(data) = data_vec.take() {
@@ -204,6 +229,7 @@ impl NylonRingHost {
             return;
         }
 
+        // ── STREAM / ASYNC PATH: DashMap ──
         let data_vec = match data_vec.take() {
             Some(v) => v,
             None => return, // Already consumed
@@ -281,7 +307,6 @@ impl NylonRingHost {
         if let Some(sid_state) = ctx.state_per_sid.get(&sid) {
             if let Some(value) = sid_state.get(key_str) {
                 // Return NrBytes pointing to the Vec<u8> data
-                // (safe as long as HashMap entry exists)
                 return NrBytes::from_slice(value.as_slice());
             }
         }
@@ -319,6 +344,9 @@ impl NylonRingHost {
         rx.await.map_err(|_| NylonRingHostError::OneshotClosed)
     }
 
+    /// Ultra-fast unary call:
+    /// - plugin ต้องเรียก send_result แบบ synchronous บน thread เดียวกัน
+    /// - ห้ามใช้กับ plugin ที่ async / cross-thread
     pub async fn call_response_fast(
         &self,
         entry: &str,
@@ -326,15 +354,15 @@ impl NylonRingHost {
     ) -> Result<(NrStatus, Vec<u8>)> {
         let sid = next_sid();
 
-        let (tx, rx) = oneshot::channel::<(NrStatus, Vec<u8>)>();
-        let mut tx_slot: Option<oneshot::Sender<(NrStatus, Vec<u8>)>> = Some(tx);
+        let mut slot: UnaryResultSlot = None;
 
-        CURRENT_UNARY_TX.with(|cell| {
+        // bind TLS slot
+        CURRENT_UNARY_RESULT.with(|cell| {
             debug_assert!(
                 cell.get().is_null(),
-                "CURRENT_UNARY_TX already in use on this thread"
+                "CURRENT_UNARY_RESULT already in use on this thread"
             );
-            cell.set(&mut tx_slot as *mut _);
+            cell.set(&mut slot as *mut _);
         });
 
         let payload_bytes = NrBytes::from_slice(payload);
@@ -342,21 +370,24 @@ impl NylonRingHost {
         let handle_raw_fn = match self.plugin_vtable.handle {
             Some(f) => f,
             None => {
-                CURRENT_UNARY_TX.with(|cell| cell.set(std::ptr::null_mut()));
+                CURRENT_UNARY_RESULT.with(|cell| cell.set(std::ptr::null_mut()));
                 return Err(NylonRingHostError::MissingRequiredFunctions);
             }
         };
 
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
-        CURRENT_UNARY_TX.with(|cell| cell.set(std::ptr::null_mut()));
+        // unbind TLS slot
+        CURRENT_UNARY_RESULT.with(|cell| cell.set(std::ptr::null_mut()));
 
         if status != NrStatus::Ok {
             return Err(NylonRingHostError::PluginHandleFailed(status));
         }
 
-        let (st, data) = rx.await.map_err(|_| NylonRingHostError::OneshotClosed)?;
-        Ok((st, data))
+        match slot {
+            Some((st, data)) => Ok((st, data)),
+            None => Err(NylonRingHostError::OneshotClosed),
+        }
     }
 
     pub async fn call(&self, entry: &str, payload: &[u8]) -> Result<NrStatus> {

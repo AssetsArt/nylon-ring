@@ -189,7 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
                 for _ in 0..BATCH_SIZE {
-                    futures_batch.push(host.call_response("benchmark", payload));
+                    futures_batch.push(host.call_response_fast("benchmark", payload));
                 }
                 let _ = join_all(futures_batch.drain(..)).await;
                 let batch_elapsed = batch_start.elapsed();

@@ -139,8 +139,8 @@ impl NylonRingHost {
 
             // Create host context with internal host_ext
             let host_ctx = Arc::new(HostContext {
-                pending_requests: FastPendingMap::with_hasher(FxBuildHasher::default()),
-                state_per_sid: FastStateMap::with_hasher(FxBuildHasher::default()),
+                pending_requests: FastPendingMap::with_hasher(FxBuildHasher),
+                state_per_sid: FastStateMap::with_hasher(FxBuildHasher),
                 host_ext: NrHostExt {
                     set_state: Self::set_state_callback,
                     get_state: Self::get_state_callback,

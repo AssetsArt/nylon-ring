@@ -312,7 +312,7 @@ impl<T> NrVec<T> {
 
     pub fn into_vec(self) -> Vec<T> {
         let this = std::mem::ManuallyDrop::new(self);
-        unsafe { Vec::from_raw_parts(this.ptr, this.len as usize, this.cap as usize) }
+        unsafe { Vec::from_raw_parts(this.ptr, this.len, this.cap) }
     }
 
     pub fn push(&mut self, value: T) {
@@ -320,7 +320,7 @@ impl<T> NrVec<T> {
             self.reserve(1);
         }
         unsafe {
-            std::ptr::write(self.ptr.add(self.len as usize), value);
+            std::ptr::write(self.ptr.add(self.len), value);
         }
         self.len += 1;
     }
@@ -329,19 +329,19 @@ impl<T> NrVec<T> {
         while self.len > 0 {
             self.len -= 1;
             unsafe {
-                std::ptr::drop_in_place(self.ptr.add(self.len as usize));
+                std::ptr::drop_in_place(self.ptr.add(self.len));
             }
         }
     }
 
     pub fn reserve(&mut self, additional: usize) {
-        let available = self.cap as usize - self.len as usize;
+        let available = self.cap - self.len;
         if available < additional {
-            let required = self.len as usize + additional;
+            let required = self.len + additional;
             let new_cap = if self.cap == 0 {
                 std::cmp::max(1, required)
             } else {
-                std::cmp::max(self.cap as usize * 2, required)
+                std::cmp::max(self.cap * 2, required)
             };
 
             let new_layout = std::alloc::Layout::array::<T>(new_cap).unwrap();
@@ -349,7 +349,7 @@ impl<T> NrVec<T> {
             let new_ptr = if self.cap == 0 {
                 unsafe { std::alloc::alloc(new_layout) }
             } else {
-                let old_layout = std::alloc::Layout::array::<T>(self.cap as usize).unwrap();
+                let old_layout = std::alloc::Layout::array::<T>(self.cap).unwrap();
                 unsafe { std::alloc::realloc(self.ptr as *mut u8, old_layout, new_layout.size()) }
             };
 
@@ -375,11 +375,11 @@ impl<T> Drop for NrVec<T> {
             }
             unsafe {
                 // Drop elements
-                let s = std::slice::from_raw_parts_mut(self.ptr, self.len as usize);
+                let s = std::slice::from_raw_parts_mut(self.ptr, self.len);
                 std::ptr::drop_in_place(s);
 
                 // Deallocate
-                if let Ok(layout) = std::alloc::Layout::array::<T>(self.cap as usize) {
+                if let Ok(layout) = std::alloc::Layout::array::<T>(self.cap) {
                     std::alloc::dealloc(self.ptr as *mut u8, layout);
                 }
             }
@@ -400,7 +400,7 @@ impl<T> NrVec<T> {
         if self.ptr.is_null() {
             &[]
         } else {
-            unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) }
+            unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
         }
     }
 
@@ -408,7 +408,7 @@ impl<T> NrVec<T> {
         if self.ptr.is_null() {
             &mut []
         } else {
-            unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len as usize) }
+            unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
         }
     }
 }
@@ -490,8 +490,8 @@ impl<T> IntoIterator for NrVec<T> {
         let this = std::mem::ManuallyDrop::new(self);
 
         let ptr = this.ptr;
-        let cap = this.cap as usize;
-        let len = this.len as usize;
+        let cap = this.cap;
+        let len = this.len;
 
         unsafe {
             IntoIter {

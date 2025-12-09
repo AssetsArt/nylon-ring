@@ -68,7 +68,7 @@ fn bench_nr_vec(c: &mut Criterion) {
 
     c.bench_function("NrVec::push", |b| {
         b.iter_batched(
-            || NrVec::<u32>::default(),
+            NrVec::<u32>::default,
             |mut nr_vec| {
                 for i in 0..100 {
                     nr_vec.push(black_box(i));

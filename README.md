@@ -20,10 +20,9 @@
 > Benchmarked on **Apple M1 Pro (10-core)** — Release builds
 
 ```
-🚀 Multi-thread: 145M+ req/sec  (10 threads, fire-and-forget)
-⚡ Single-thread: 13.95M req/sec (fire-and-forget)
-🎯 Unary call:     6.98M req/sec (with response)
-💨 Fast path:      7.34M req/sec (thread-local optimized)
+call(...):               140M~ req/sec (10 threads, fire-and-forget)
+call_response_fast(...): 124M~ req/sec (10 threads, unary fast with response *thread-local optimized*)
+call_response(...):      27M~ req/sec (10 threads, unary with response)
 ```
 
 ---
@@ -36,7 +35,7 @@
 - Compatible with C, C++, Zig, Go, Rust, ...
 
 ### 🚀 **Extreme Performance**
-- **145M+ req/sec** multi-thread throughput
+- **140M+ req/sec** multi-thread throughput
 - **Thread-local SID** generation (zero atomic operations)
 - **Zero-copy** data transfer with `NrVec<u8>`
 - Sub-nanosecond ABI overhead
@@ -44,7 +43,7 @@
 ### ⚡ **Flexible Call Patterns**
 - **Fire-and-forget**: ~71.7ns (fastest)
 - **Unary with response**: ~143.2ns
-- **Fast path**: ~136.2ns (thread-local optimized)
+- **Fast path**: ~95.5ns (thread-local optimized)
 - **Streaming**: Bi-directional communication
 
 ### 🔧 **Production Ready**
@@ -125,7 +124,7 @@ println!("Response: {}", String::from_utf8_lossy(&response));
 #### Fast Path
 
 ```rust
-// Thread-local optimized path (~136.2ns, 7.34M calls/sec)
+// Thread-local optimized path (~95.5ns, 10.47M calls/sec)
 let (status, response) = host.call_response_fast("handler_name", b"payload").await?;
 ```
 
@@ -224,7 +223,7 @@ define_plugin! {
 | Operation | Time | Throughput | Notes |
 |-----------|------|------------|-------|
 | **Fire-and-forget** | **71.7 ns** | **13.95M calls/sec** | Fastest ⚡ |
-| **Fast path** | **136.2 ns** | **7.34M calls/sec** | Thread-local |
+| **Fast path** | **95.5 ns** | **10.47M calls/sec** | Thread-local |
 | **Standard unary** | **143.2 ns** | **6.98M calls/sec** | With response |
 | **+ 128B payload** | **158.7 ns** | **6.30M calls/sec** | Small data |
 | **+ 1KB payload** | **193.7 ns** | **5.16M calls/sec** | Medium data |
@@ -236,7 +235,9 @@ define_plugin! {
 
 | Configuration | Throughput | Latency |
 |--------------|------------|---------|
-| **10 threads (fire-and-forget)** | **145M+ req/sec** | **70 ns** |
+| **10 threads (fire-and-forget)** | **140M+ req/sec** | **70 ns** |
+| **10 threads (fast path)** | **124.8M req/sec** | **77 ns** |
+| **10 threads (standard)** | **27.3M req/sec** | **362 ns** |
 
 **Key Optimization**: Thread-local SID generation eliminates atomic operations entirely
 

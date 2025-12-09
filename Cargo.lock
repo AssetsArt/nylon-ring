@@ -439,11 +439,14 @@ name = "nylon-ring-host"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "crossbeam-utils",
  "dashmap",
  "libloading",
  "log",
  "nylon-ring",
+ "parking_lot",
  "rustc-hash",
+ "slab",
  "thiserror",
  "tokio",
 ]

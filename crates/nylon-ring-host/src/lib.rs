@@ -13,13 +13,13 @@ mod sid;
 mod types;
 
 use callbacks::{get_state_callback, send_result_vec_callback, set_state_callback};
-use context::{insert_pending, remove_pending, HostContext, CURRENT_UNARY_RESULT};
+use context::{HostContext, CURRENT_UNARY_RESULT};
 use libloading::{Library, Symbol};
 use nylon_ring::{NrBytes, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrStr};
 use sid::next_sid;
 use std::ffi::c_void;
 use std::sync::Arc;
-use types::{Pending, Result, StreamFrame, StreamReceiver};
+use types::{Result, StreamFrame, StreamReceiver};
 
 pub use error::NylonRingHostError;
 pub use extensions::Extensions;
@@ -127,17 +127,20 @@ impl NylonRingHost {
     ///
     /// Returns a tuple of (status, response data) on success.
     pub async fn call_response(&self, entry: &str, payload: &[u8]) -> Result<(NrStatus, Vec<u8>)> {
-        let sid = next_sid();
+        // Create Oneshot Channel
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        // Use thread-local insert for zero-contention
-        insert_pending(&self.host_ctx, sid, Pending::Unary(tx));
+        // Generate SID
+        let sid = next_sid();
+
+        // Insert into Map (Async Path)
+        context::insert_pending(&self.host_ctx, sid, types::Pending::Unary(tx));
 
         let payload_bytes = NrBytes::from_slice(payload);
         let handle_raw_fn = match self.plugin_vtable.handle {
             Some(f) => f,
             None => {
-                let _ = remove_pending(&self.host_ctx, sid);
+                context::remove_pending(&self.host_ctx, sid);
                 return Err(NylonRingHostError::MissingRequiredFunctions);
             }
         };
@@ -145,10 +148,11 @@ impl NylonRingHost {
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
         if status != NrStatus::Ok {
-            let _ = remove_pending(&self.host_ctx, sid);
+            context::remove_pending(&self.host_ctx, sid);
             return Err(NylonRingHostError::PluginHandleFailed(status));
         }
 
+        // Wait for response (Allocation here for oneshot state)
         rx.await.map_err(|_| NylonRingHostError::OneshotClosed)
     }
 
@@ -170,6 +174,7 @@ impl NylonRingHost {
         entry: &str,
         payload: &[u8],
     ) -> Result<(NrStatus, Vec<u8>)> {
+        // Use a "Fast SID" that bypasses the Map (High bit set)
         let sid = next_sid();
 
         let mut slot: types::UnaryResultSlot = None;
@@ -221,7 +226,8 @@ impl NylonRingHost {
     ///
     /// Returns the immediate status from the plugin's handle function.
     pub async fn call(&self, entry: &str, payload: &[u8]) -> Result<NrStatus> {
-        let sid = next_sid();
+        // Use Fast SID
+        let sid = next_sid() | 0x8000_0000_0000_0000;
 
         let payload_bytes = NrBytes::from_slice(payload);
         let handle_raw_fn = match self.plugin_vtable.handle {
@@ -256,15 +262,15 @@ impl NylonRingHost {
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<StreamFrame>();
 
-        // Use thread-local insert for zero-contention
-        insert_pending(&self.host_ctx, sid, Pending::Stream(tx));
+        // Register the stream channel (Map)
+        context::insert_pending(&self.host_ctx, sid, types::Pending::Stream(tx));
 
         let payload_bytes = NrBytes::from_slice(payload);
 
         let handle_raw_fn = match self.plugin_vtable.handle {
             Some(f) => f,
             None => {
-                let _ = remove_pending(&self.host_ctx, sid);
+                context::remove_pending(&self.host_ctx, sid);
                 return Err(NylonRingHostError::MissingRequiredFunctions);
             }
         };
@@ -272,7 +278,7 @@ impl NylonRingHost {
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
         if status != NrStatus::Ok {
-            let _ = remove_pending(&self.host_ctx, sid);
+            context::remove_pending(&self.host_ctx, sid);
             return Err(NylonRingHostError::PluginHandleFailed(status));
         }
 

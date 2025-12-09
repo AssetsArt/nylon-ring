@@ -8,83 +8,102 @@ use libloading::{Library, Symbol};
 pub use nylon_ring::NrStatus;
 use nylon_ring::{NrBytes, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrStr};
 use rustc_hash::FxBuildHasher;
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Arc;
+use std::{
+    cell::Cell,
+    sync::atomic::{AtomicU64, Ordering},
+};
 use tokio::sync::{mpsc, oneshot};
 
 type Result<T> = std::result::Result<T, NylonRingHostError>;
+
 enum Pending {
     #[allow(dead_code)]
     Unary(oneshot::Sender<(NrStatus, Vec<u8>)>),
     Stream(mpsc::UnboundedSender<StreamFrame>),
 }
+
 #[derive(Debug)]
 pub struct StreamFrame {
     pub status: NrStatus,
     pub data: Vec<u8>,
 }
+
 pub type StreamReceiver = mpsc::UnboundedReceiver<StreamFrame>;
+
 type FastPendingMap = DashMap<u64, Pending, FxBuildHasher>;
 type FastStateMap = DashMap<u64, HashMap<String, Vec<u8>>, FxBuildHasher>;
 type UnarySender = Option<oneshot::Sender<(NrStatus, Vec<u8>)>>;
+
+/// Host context shared with the plugin (opaque on the plugin side).
+///
+/// Note:
+/// - `host_ext` now lives **inside** `HostContext` → no dangling pointer when
+///   `NylonRingHost` is dropped.
 #[repr(C)]
 struct HostContext {
     pending_requests: FastPendingMap,
     state_per_sid: FastStateMap,
-    host_ext: *const NrHostExt,
+    host_ext: NrHostExt,
 }
 
 // Safety: HostContext can be safely shared across threads because:
-// - FastPendingMap and FastStateMap (DashMap) are already thread-safe
-// - host_ext is a raw pointer to a stable Box that outlives HostContext
+// - FastPendingMap and FastStateMap (DashMap) are thread-safe
+// - NrHostExt only contains function pointers, which are Send + Sync
 unsafe impl Send for HostContext {}
 unsafe impl Sync for HostContext {}
+
 pub struct NylonRingHost {
     _lib: Library,
     plugin_vtable: &'static NrPluginVTable,
     plugin_ctx: *mut c_void,
     host_ctx: Arc<HostContext>,
     host_vtable: Box<NrHostVTable>,
-    #[allow(dead_code)]
-    host_ext: Box<NrHostExt>,
 }
+
 unsafe impl Send for NylonRingHost {}
 unsafe impl Sync for NylonRingHost {}
+
+const SID_BLOCK_SIZE: u64 = 1_000_000;
+static GLOBAL_SID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Copy, Clone)]
+struct SidBlock {
+    base: u64,
+    offset: u64,
+}
 
 thread_local! {
     static CURRENT_UNARY_TX: Cell<*mut UnarySender> =
         const { Cell::new(std::ptr::null_mut()) };
 
-    // Thread-local SID counter for zero-contention multi-threading
-    // Safe for long-running HTTP servers with proper range wrapping
-    static THREAD_LOCAL_SID: Cell<(u64, u64)> = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+    static THREAD_LOCAL_SID_BLOCK: Cell<SidBlock> = const { Cell::new(SidBlock {
+         base: 0,
+         offset: SID_BLOCK_SIZE,
+     }) };
+}
 
-        // Generate unique base SID per thread using thread ID
-        let thread_id = std::thread::current().id();
-        let mut hasher = DefaultHasher::new();
-        thread_id.hash(&mut hasher);
-        let hash = hasher.finish();
-
-        // Each thread gets 100M SID range (increased from 10M for long-running servers)
-        // Thread 0: 0-99,999,999
-        // Thread 1: 100,000,000-199,999,999, etc.
-        // This provides ~3.3 seconds per thread at 30M RPS before wrapping
-        const RANGE_SIZE: u64 = 100_000_000;
-        let thread_base = (hash % 1000) * RANGE_SIZE;
-
-        // Store (base, offset) instead of absolute SID
-        Cell::new((thread_base, 0))
-    };
+fn next_sid() -> u64 {
+    THREAD_LOCAL_SID_BLOCK.with(|cell| {
+        let mut block = cell.get();
+        if block.offset >= SID_BLOCK_SIZE {
+            let base = GLOBAL_SID.fetch_add(SID_BLOCK_SIZE, Ordering::Relaxed);
+            block = SidBlock { base, offset: 0 };
+        }
+        let sid = block.base + block.offset;
+        block.offset += 1;
+        cell.set(block);
+        sid
+    })
 }
 
 impl NylonRingHost {
     pub fn load(path: &str) -> Result<Self> {
         unsafe {
             let lib = Library::new(path).map_err(NylonRingHostError::FailedToLoadLibrary)?;
+
             let get_plugin: Symbol<extern "C" fn() -> *const NrPluginInfo> =
                 lib.get(b"nylon_ring_get_plugin_v1\0").map_err(|_| {
                     NylonRingHostError::MissingSymbol("nylon_ring_get_plugin_v1".to_string())
@@ -112,10 +131,14 @@ impl NylonRingHost {
                 return Err(NylonRingHostError::MissingRequiredFunctions);
             }
 
+            // Create host context with internal host_ext
             let host_ctx = Arc::new(HostContext {
-                pending_requests: FastPendingMap::with_hasher(FxBuildHasher),
-                state_per_sid: FastStateMap::with_hasher(FxBuildHasher),
-                host_ext: std::ptr::null(), // Will be set after creating host_ext
+                pending_requests: FastPendingMap::with_hasher(FxBuildHasher::default()),
+                state_per_sid: FastStateMap::with_hasher(FxBuildHasher::default()),
+                host_ext: NrHostExt {
+                    set_state: Self::set_state_callback,
+                    get_state: Self::get_state_callback,
+                },
             });
 
             // Create host vtable
@@ -123,26 +146,12 @@ impl NylonRingHost {
                 send_result: Self::send_result_vec_callback,
             });
 
-            // Create host extension for state management
-            let host_ext = Box::new(NrHostExt {
-                set_state: Self::set_state_callback,
-                get_state: Self::get_state_callback,
-            });
-            let host_ext_ptr = &*host_ext as *const NrHostExt;
-
-            // Update host_ctx with host_ext pointer
-            {
-                let ctx_ptr = Arc::as_ptr(&host_ctx) as *mut HostContext;
-                (*ctx_ptr).host_ext = host_ext_ptr;
-            }
-
             let mut host = Self {
                 _lib: lib,
                 plugin_vtable,
                 plugin_ctx: std::ptr::null_mut(), // Will be set from plugin info
                 host_ctx,
                 host_vtable,
-                host_ext,
             };
 
             // plugin_ctx from plugin info
@@ -246,7 +255,7 @@ impl NylonRingHost {
 
         let key_str = key.as_str().to_string();
 
-        // Copy data from NrBytes to owned Vec<u8> to prevent memory leak
+        // Copy data from NrBytes to owned Vec<u8>
         let value_vec = value.as_slice().to_vec();
 
         ctx.state_per_sid
@@ -271,7 +280,8 @@ impl NylonRingHost {
         let key_str = key.as_str();
         if let Some(sid_state) = ctx.state_per_sid.get(&sid) {
             if let Some(value) = sid_state.get(key_str) {
-                // Return NrBytes pointing to the Vec<u8> data (safe as long as HashMap entry exists)
+                // Return NrBytes pointing to the Vec<u8> data
+                // (safe as long as HashMap entry exists)
                 return NrBytes::from_slice(value.as_slice());
             }
         }
@@ -281,15 +291,7 @@ impl NylonRingHost {
     }
 
     pub async fn call_response(&self, entry: &str, payload: &[u8]) -> Result<(NrStatus, Vec<u8>)> {
-        // Use thread-local SID for zero contention
-        const RANGE_SIZE: u64 = 100_000_000;
-        let sid = THREAD_LOCAL_SID.with(|cell| {
-            let (base, offset) = cell.get();
-            let current_sid = base + offset;
-            let next_offset = (offset + 1) % RANGE_SIZE;
-            cell.set((base, next_offset));
-            current_sid
-        });
+        let sid = next_sid();
         let (tx, rx) = oneshot::channel();
 
         {
@@ -313,6 +315,7 @@ impl NylonRingHost {
             let _ = self.host_ctx.pending_requests.remove(&sid);
             return Err(NylonRingHostError::PluginHandleFailed(status));
         }
+
         rx.await.map_err(|_| NylonRingHostError::OneshotClosed)
     }
 
@@ -321,15 +324,7 @@ impl NylonRingHost {
         entry: &str,
         payload: &[u8],
     ) -> Result<(NrStatus, Vec<u8>)> {
-        // Use thread-local SID for zero contention
-        const RANGE_SIZE: u64 = 100_000_000;
-        let sid = THREAD_LOCAL_SID.with(|cell| {
-            let (base, offset) = cell.get();
-            let current_sid = base + offset;
-            let next_offset = (offset + 1) % RANGE_SIZE;
-            cell.set((base, next_offset));
-            current_sid
-        });
+        let sid = next_sid();
 
         let (tx, rx) = oneshot::channel::<(NrStatus, Vec<u8>)>();
         let mut tx_slot: Option<oneshot::Sender<(NrStatus, Vec<u8>)>> = Some(tx);
@@ -365,20 +360,7 @@ impl NylonRingHost {
     }
 
     pub async fn call(&self, entry: &str, payload: &[u8]) -> Result<NrStatus> {
-        // Use thread-local SID with safe wrapping within range
-        // For long-running HTTP servers, this ensures no collision between threads
-        const RANGE_SIZE: u64 = 100_000_000;
-
-        let sid = THREAD_LOCAL_SID.with(|cell| {
-            let (base, offset) = cell.get();
-            let current_sid = base + offset;
-
-            // Wrap offset within thread's range
-            let next_offset = (offset + 1) % RANGE_SIZE;
-            cell.set((base, next_offset));
-
-            current_sid
-        });
+        let sid = next_sid();
 
         let payload_bytes = NrBytes::from_slice(payload);
         let handle_raw_fn = match self.plugin_vtable.handle {
@@ -397,15 +379,7 @@ impl NylonRingHost {
     }
 
     pub async fn call_stream(&self, entry: &str, payload: &[u8]) -> Result<(u64, StreamReceiver)> {
-        // Use thread-local SID for zero contention
-        const RANGE_SIZE: u64 = 100_000_000;
-        let sid = THREAD_LOCAL_SID.with(|cell| {
-            let (base, offset) = cell.get();
-            let current_sid = base + offset;
-            let next_offset = (offset + 1) % RANGE_SIZE;
-            cell.set((base, next_offset));
-            current_sid
-        });
+        let sid = next_sid();
 
         let (tx, rx) = mpsc::unbounded_channel::<StreamFrame>();
 
@@ -466,7 +440,7 @@ impl NylonRingHost {
             return std::ptr::null();
         }
         let ctx = &*(host_ctx as *const HostContext);
-        ctx.host_ext
+        &ctx.host_ext as *const NrHostExt
     }
 }
 

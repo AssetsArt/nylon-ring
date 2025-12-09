@@ -8,3 +8,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 nylon-ring = { path = "../../crates/nylon-ring" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }

@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 pub type Result<T> = std::result::Result<T, NylonRingHostError>;
 
 /// Pending request state.
+#[derive(Debug)]
 pub(crate) enum Pending {
     #[allow(dead_code)]
     Unary(oneshot::Sender<(NrStatus, Vec<u8>)>),

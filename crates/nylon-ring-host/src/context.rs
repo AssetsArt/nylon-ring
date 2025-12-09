@@ -69,7 +69,6 @@ pub(crate) fn insert_pending(_ctx: &HostContext, sid: u64, pending: Pending) {
 pub(crate) fn remove_pending(ctx: &HostContext, sid: u64) -> Option<Pending> {
     // Try thread-local first
     let local_result = THREAD_LOCAL_PENDING.with(|map| map.borrow_mut().remove(&sid));
-
     if local_result.is_some() {
         return local_result;
     }

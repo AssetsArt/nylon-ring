@@ -1,9 +1,7 @@
 //! FFI callback handlers for the plugin interface.
 
-use crate::context::{
-    reinsert_pending, remove_pending, HostContext, CURRENT_UNARY_RESULT, CURRENT_UNARY_TX,
-};
-use crate::types::{Pending, StreamFrame, UnaryResultSlot, UnarySender};
+use crate::context::{HostContext, CURRENT_UNARY_RESULT, CURRENT_UNARY_TX};
+use crate::types::{StreamFrame, UnaryResultSlot, UnarySender};
 use nylon_ring::{NrBytes, NrStatus, NrStr};
 use std::ffi::c_void;
 
@@ -11,8 +9,8 @@ use std::ffi::c_void;
 ///
 /// This handles three different execution paths:
 /// 1. Ultra-fast direct slot (for `call_response_fast`)
-/// 2. Fast path with oneshot sender (for `call_response`)
-/// 3. Stream/async path with thread-local → global map (for `call_stream`)
+/// 2. Fast path with oneshot sender (legacy optimization, mostly replaced by Slab)
+/// 3. Slab/Waker path (God Mode)
 ///
 /// # Safety
 ///
@@ -42,7 +40,10 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
             if let Some(data) = data_vec.take() {
                 *slot = Some((status, data));
             }
-            ctx.state_per_sid.remove(&sid);
+            // For Slab architecture, if we allocated a slot, we might need to clear it?
+            // Assuming call_response_fast might NOT allocate a Slab slot if it uses a special SID range?
+            // Or if it DOES allocate, the caller is responsible for freeing it.
+            // But here we just set the thread-local result.
             handled_fast = true;
         }
     });
@@ -51,7 +52,7 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
         return;
     }
 
-    // ── FAST PATH: oneshot sender (call_response) ──
+    // ── FAST PATH: oneshot sender (Legacy / Thread Local Fast Path) ──
     CURRENT_UNARY_TX.with(|cell| {
         let ptr = cell.get();
         if !ptr.is_null() {
@@ -61,7 +62,6 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
                 if let Some(data) = data_vec.take() {
                     let _ = tx.send((status, data));
                 }
-                ctx.state_per_sid.remove(&sid);
                 handled_fast = true;
             }
         }
@@ -71,40 +71,30 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
         return;
     }
 
-    // ── STREAM / ASYNC PATH: Thread-local → Global Map ──
+    // ── SLAB / WAKER PATH (God Mode) ──
     let data_vec = match data_vec.take() {
         Some(v) => v,
         None => return, // Already consumed
     };
 
-    let should_clear_state = if let Some(entry) = remove_pending(ctx, sid) {
-        match entry {
-            Pending::Unary(tx) => {
-                let _ = tx.send((status, data_vec));
-                true
-            }
-            Pending::Stream(tx) => {
-                let _ = tx.send(StreamFrame {
-                    status,
-                    data: data_vec,
-                });
-                let is_finished = matches!(
-                    status,
-                    NrStatus::Err | NrStatus::Invalid | NrStatus::Unsupported | NrStatus::StreamEnd
-                );
-                if !is_finished {
-                    reinsert_pending(ctx, sid, Pending::Stream(tx));
-                }
-                is_finished
-            }
+    crate::context::with_request_slot(ctx, sid, |slot| {
+        // STREAMING: If a stream channel is registered, send to it.
+        if let Some(tx) = &slot.stream_tx {
+            let _ = tx.send(StreamFrame {
+                status,
+                data: data_vec,
+            });
+            return;
         }
-    } else {
-        false
-    };
 
-    if should_clear_state {
-        ctx.state_per_sid.remove(&sid);
-    }
+        // UNARY: Store result and wake future.
+        slot.data = Some(data_vec);
+        slot.status = status;
+        // If the host is waiting (Future is polled), wake it up.
+        if let Some(waker) = slot.waker.take() {
+            waker.wake();
+        }
+    });
 }
 
 /// Callback for setting per-SID state in the host.

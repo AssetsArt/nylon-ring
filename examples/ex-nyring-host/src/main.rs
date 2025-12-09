@@ -152,10 +152,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("  10 calls completed in {:?}\n", now.elapsed());
 
-    // Demo 7: Fire-and-Forget Benchmark
+    // Fire-and-Forget Benchmark
     benchmark::run_fire_and_forget_benchmark(host.clone()).await;
 
-    // Demo 8: Request-Response Benchmark
+    // Request-Response Fast Benchmark
+    benchmark::run_request_response_fast_benchmark(host.clone()).await;
+
+    // Request-Response Benchmark
     benchmark::run_request_response_benchmark(host.clone()).await;
 
     println!("\n=== Demo Complete ===");

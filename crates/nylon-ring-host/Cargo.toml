@@ -11,6 +11,9 @@ thiserror = { workspace = true }
 log = { workspace = true }
 dashmap = { workspace = true }
 rustc-hash = { workspace = true }
+slab = { workspace = true }
+parking_lot = { workspace = true }
+crossbeam-utils = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

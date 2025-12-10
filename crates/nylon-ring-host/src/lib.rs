@@ -307,10 +307,8 @@ impl NylonRingHost {
             plugins_to_reload.push((name.clone(), plugin.path.clone()));
         }
 
-        // Remove all first (triggers shutdown)
-        self.plugins.clear();
-
-        // Load them back
+        // Load new versions - insert() will atomically replace old ones
+        // This ensures zero downtime (plugin() always returns a value)
         for (name, path) in plugins_to_reload {
             self.load(&name, &path)?;
         }

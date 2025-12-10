@@ -12,6 +12,12 @@ pub enum NrStatus {
     StreamEnd = 4,
 }
 
+impl Default for NrStatus {
+    fn default() -> Self {
+        Self::Ok
+    }
+}
+
 /// A UTF-8 string slice with a pointer and length.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
@@ -73,6 +79,137 @@ pub struct NrTuple<A, B> {
 pub struct NrHostVTable {
     pub send_result:
         unsafe extern "C" fn(host_ctx: *mut c_void, sid: u64, status: NrStatus, payload: NrVec<u8>),
+
+    pub dispatch_sync: unsafe extern "C" fn(
+        host_ctx: *mut c_void,
+        target_plugin: NrStr,
+        entry: NrStr,
+        payload: NrBytes,
+    ) -> NrTuple<NrStatus, NrVec<u8>>,
+
+    pub dispatch_fast: unsafe extern "C" fn(
+        host_ctx: *mut c_void,
+        target_plugin: NrStr,
+        entry: NrStr,
+        payload: NrBytes,
+    ) -> NrTuple<NrStatus, NrVec<u8>>,
+
+    pub dispatch_async: unsafe extern "C" fn(
+        host_ctx: *mut c_void,
+        target_plugin: NrStr,
+        entry: NrStr,
+        payload: NrBytes,
+    ) -> NrStatus,
+
+    pub dispatch_stream: unsafe extern "C" fn(
+        host_ctx: *mut c_void,
+        target_plugin: NrStr,
+        entry: NrStr,
+        payload: NrBytes,
+    ) -> NrTuple<NrStatus, u64>,
+
+    pub stream_read:
+        unsafe extern "C" fn(host_ctx: *mut c_void, stream_id: u64) -> NrTuple<NrStatus, NrVec<u8>>,
+
+    pub stream_write:
+        unsafe extern "C" fn(host_ctx: *mut c_void, stream_id: u64, data: NrBytes) -> NrStatus,
+
+    pub stream_close: unsafe extern "C" fn(host_ctx: *mut c_void, stream_id: u64) -> NrStatus,
+}
+
+/// Helper for dispatching calls to other plugins.
+pub struct PluginDispatcher<'a> {
+    host_ctx: *mut c_void,
+    host_vtable: &'a NrHostVTable,
+    target_plugin: &'a str,
+}
+
+impl<'a> PluginDispatcher<'a> {
+    /// Create a new dispatcher targeting a specific plugin.
+    ///
+    /// # Safety
+    ///
+    /// `host_ctx` must be the valid host context pointer provided during initialization.
+    pub unsafe fn new(
+        host_ctx: *mut c_void,
+        host_vtable: &'a NrHostVTable,
+        target_plugin: &'a str,
+    ) -> Self {
+        Self {
+            host_ctx,
+            host_vtable,
+            target_plugin,
+        }
+    }
+
+    /// Synchronous call (blocks until response)
+    pub fn call_response(&self, entry: &str, payload: &[u8]) -> (NrStatus, NrVec<u8>) {
+        unsafe {
+            let tuple = (self.host_vtable.dispatch_sync)(
+                self.host_ctx,
+                NrStr::new(self.target_plugin),
+                NrStr::new(entry),
+                NrBytes::from_slice(payload),
+            );
+            (tuple.a, tuple.b)
+        }
+    }
+
+    /// Fast path synchronous call
+    pub fn call_response_fast(&self, entry: &str, payload: &[u8]) -> (NrStatus, NrVec<u8>) {
+        unsafe {
+            let tuple = (self.host_vtable.dispatch_fast)(
+                self.host_ctx,
+                NrStr::new(self.target_plugin),
+                NrStr::new(entry),
+                NrBytes::from_slice(payload),
+            );
+            (tuple.a, tuple.b)
+        }
+    }
+
+    /// Fire-and-forget call
+    pub fn call(&self, entry: &str, payload: &[u8]) -> NrStatus {
+        unsafe {
+            (self.host_vtable.dispatch_async)(
+                self.host_ctx,
+                NrStr::new(self.target_plugin),
+                NrStr::new(entry),
+                NrBytes::from_slice(payload),
+            )
+        }
+    }
+
+    /// Start a stream
+    pub fn call_stream(&self, entry: &str, payload: &[u8]) -> (NrStatus, u64) {
+        unsafe {
+            let tuple = (self.host_vtable.dispatch_stream)(
+                self.host_ctx,
+                NrStr::new(self.target_plugin),
+                NrStr::new(entry),
+                NrBytes::from_slice(payload),
+            );
+            (tuple.a, tuple.b)
+        }
+    }
+
+    /// Read next frame from stream (blocking)
+    pub fn stream_read(&self, sid: u64) -> (NrStatus, NrVec<u8>) {
+        unsafe {
+            let tuple = (self.host_vtable.stream_read)(self.host_ctx, sid);
+            (tuple.a, tuple.b)
+        }
+    }
+
+    /// Write data to stream
+    pub fn send_stream_data(&self, sid: u64, data: &[u8]) -> NrStatus {
+        unsafe { (self.host_vtable.stream_write)(self.host_ctx, sid, NrBytes::from_slice(data)) }
+    }
+
+    /// Close stream
+    pub fn close_stream(&self, sid: u64) -> NrStatus {
+        unsafe { (self.host_vtable.stream_close)(self.host_ctx, sid) }
+    }
 }
 
 /// Host extension table for state management.

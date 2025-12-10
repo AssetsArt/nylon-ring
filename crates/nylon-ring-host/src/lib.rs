@@ -12,12 +12,15 @@ mod extensions;
 mod sid;
 mod types;
 
-use callbacks::{get_state_callback, send_result_vec_callback, set_state_callback};
+use callbacks::{
+    dispatch_async, dispatch_fast, dispatch_stream, dispatch_sync, get_state_callback,
+    send_result_vec_callback, set_state_callback, stream_close, stream_read, stream_write,
+};
 use context::{HostContext, CURRENT_UNARY_RESULT};
+use dashmap::DashMap;
 use libloading::{Library, Symbol};
 use nylon_ring::{NrBytes, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrStr};
 use sid::next_sid;
-use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Arc;
 use types::{Result, StreamFrame, StreamReceiver};
@@ -30,7 +33,7 @@ pub use types::StreamFrame as PublicStreamFrame;
 /// A loaded plugin instance.
 pub struct LoadedPlugin {
     _lib: Library,
-    vtable: &'static NrPluginVTable,
+    pub(crate) vtable: &'static NrPluginVTable,
     #[allow(dead_code)]
     plugin_ctx: *mut c_void,
     host_ctx: Arc<HostContext>,
@@ -158,7 +161,7 @@ impl PluginHandle {
     pub async fn call_stream(&self, entry: &str, payload: &[u8]) -> Result<(u64, StreamReceiver)> {
         let sid = next_sid();
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<StreamFrame>();
+        let (tx, rx) = std::sync::mpsc::channel::<StreamFrame>();
 
         // Register the stream channel (Map)
         context::insert_pending(&self.plugin.host_ctx, sid, types::Pending::Stream(tx));
@@ -205,7 +208,7 @@ impl PluginHandle {
 
 /// The main host for loading and managing nylon-ring plugins.
 pub struct NylonRingHost {
-    plugins: HashMap<String, Arc<LoadedPlugin>>,
+    plugins: types::PluginRegistry,
     host_ctx: Arc<HostContext>,
     host_vtable: Box<NrHostVTable>,
 }
@@ -222,17 +225,29 @@ impl Default for NylonRingHost {
 impl NylonRingHost {
     /// Create a new empty host.
     pub fn new() -> Self {
-        let host_ctx = Arc::new(HostContext::new(NrHostExt {
-            set_state: set_state_callback,
-            get_state: get_state_callback,
-        }));
+        let plugins = Arc::new(DashMap::new());
+
+        let host_ctx = Arc::new(HostContext::new(
+            NrHostExt {
+                set_state: set_state_callback,
+                get_state: get_state_callback,
+            },
+            Arc::downgrade(&plugins),
+        ));
 
         let host_vtable = Box::new(NrHostVTable {
             send_result: send_result_vec_callback,
+            dispatch_sync,
+            dispatch_fast,
+            dispatch_async,
+            dispatch_stream,
+            stream_read,
+            stream_write,
+            stream_close,
         });
 
         Self {
-            plugins: HashMap::new(),
+            plugins,
             host_ctx,
             host_vtable,
         }
@@ -303,8 +318,8 @@ impl NylonRingHost {
     /// Reload all plugins.
     pub fn reload(&mut self) -> Result<()> {
         let mut plugins_to_reload = Vec::new();
-        for (name, plugin) in &self.plugins {
-            plugins_to_reload.push((name.clone(), plugin.path.clone()));
+        for entry in self.plugins.iter() {
+            plugins_to_reload.push((entry.key().clone(), entry.value().path.clone()));
         }
 
         // Remove all first (triggers shutdown)

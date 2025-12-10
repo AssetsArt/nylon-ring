@@ -441,6 +441,7 @@ dependencies = [
  "criterion",
  "crossbeam-utils",
  "dashmap",
+ "futures",
  "libloading",
  "log",
  "nylon-ring",

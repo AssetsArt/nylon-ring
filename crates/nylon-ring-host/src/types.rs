@@ -5,17 +5,21 @@ use dashmap::DashMap;
 use nylon_ring::NrStatus;
 use rustc_hash::FxBuildHasher;
 use std::collections::HashMap;
-use tokio::sync::{mpsc, oneshot};
+use std::sync::mpsc;
+use tokio::sync::oneshot;
 
 /// Result type alias for this crate.
 pub type Result<T> = std::result::Result<T, NylonRingHostError>;
+
+/// Thread-safe registry of loaded plugins.
+pub type PluginRegistry = std::sync::Arc<DashMap<String, std::sync::Arc<crate::LoadedPlugin>>>;
 
 /// Pending request state.
 #[derive(Debug)]
 pub(crate) enum Pending {
     #[allow(dead_code)]
     Unary(oneshot::Sender<(NrStatus, Vec<u8>)>),
-    Stream(mpsc::UnboundedSender<StreamFrame>),
+    Stream(mpsc::Sender<StreamFrame>),
 }
 
 /// A frame in a streaming response.
@@ -26,7 +30,7 @@ pub struct StreamFrame {
 }
 
 /// A receiver for streaming responses.
-pub type StreamReceiver = mpsc::UnboundedReceiver<StreamFrame>;
+pub type StreamReceiver = mpsc::Receiver<StreamFrame>;
 
 /// Fast hash map for pending requests using FxHash.
 pub(crate) type FastPendingMap = DashMap<u64, Pending, FxBuildHasher>;

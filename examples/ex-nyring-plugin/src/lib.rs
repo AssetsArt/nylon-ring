@@ -141,6 +141,134 @@ unsafe fn handle_benchmark_without_response(_sid: u64, _payload: NrBytes) -> NrS
     NrStatus::Ok
 }
 
+unsafe fn handle_dispatch_sync(_sid: u64, payload: NrBytes) -> NrStatus {
+    let msg = payload.as_slice();
+    println!("[Plugin] Dispatch Sync: {:?}", String::from_utf8_lossy(msg));
+
+    let dispatcher = nylon_ring::PluginDispatcher::new(HOST_CTX, &*HOST_VTABLE, "default");
+    let (status, response) = dispatcher.call_response("echo", msg);
+
+    println!(
+        "[Plugin] Dispatch Sync Response: {:?} (Status: {:?})",
+        String::from_utf8_lossy(response.as_slice()),
+        status
+    );
+
+    // Send result back to host for the outer sync call
+    let response_msg = format!(
+        "Dispatch Sync Result: {}",
+        String::from_utf8_lossy(response.as_slice())
+    );
+    send_result(
+        _sid,
+        NrStatus::Ok,
+        nylon_ring::NrVec::from_string(response_msg),
+    );
+
+    status
+}
+
+unsafe fn handle_dispatch_fast(_sid: u64, payload: NrBytes) -> NrStatus {
+    let msg = payload.as_slice();
+    println!("[Plugin] Dispatch Fast: {:?}", String::from_utf8_lossy(msg));
+
+    let dispatcher = nylon_ring::PluginDispatcher::new(HOST_CTX, &*HOST_VTABLE, "default");
+    // We assume 'echo' can handle fast path (it's sync)
+    // Note: 'echo' in this plugin uses 'send_result' which checks CURRENT_UNARY_RESULT.
+    // So call_response_fast should work if we wired it up correctly!
+    let (status, response) = dispatcher.call_response_fast("echo", msg);
+
+    println!(
+        "[Plugin] Dispatch Fast Response: {:?} (Status: {:?})",
+        String::from_utf8_lossy(response.as_slice()),
+        status
+    );
+
+    // Send result back for outer call
+    let response_msg = format!(
+        "Dispatch Fast Result: {}",
+        String::from_utf8_lossy(response.as_slice())
+    );
+    send_result(
+        _sid,
+        NrStatus::Ok,
+        nylon_ring::NrVec::from_string(response_msg),
+    );
+
+    status
+}
+
+unsafe fn handle_dispatch_async(_sid: u64, payload: NrBytes) -> NrStatus {
+    let msg = payload.as_slice();
+    println!(
+        "[Plugin] Dispatch Async: {:?}",
+        String::from_utf8_lossy(msg)
+    );
+
+    let dispatcher = nylon_ring::PluginDispatcher::new(HOST_CTX, &*HOST_VTABLE, "default");
+    let status = dispatcher.call("echo", msg); // Fire and forget
+
+    println!("[Plugin] Dispatch Async Sent (Status: {:?})", status);
+
+    // Send acknowledgement
+    send_result(
+        _sid,
+        NrStatus::Ok,
+        nylon_ring::NrVec::from_string("Async Dispatch Sent".to_string()),
+    );
+
+    status
+}
+
+unsafe fn handle_dispatch_stream(sid: u64, _payload: NrBytes) -> NrStatus {
+    println!("[Plugin] Dispatch Stream Started");
+
+    // We will call 'stream' entry on ourselves
+    let dispatcher = nylon_ring::PluginDispatcher::new(HOST_CTX, &*HOST_VTABLE, "default");
+    let (status, stream_sid) = dispatcher.call_stream("stream", b"start");
+
+    if status != NrStatus::Ok {
+        return status;
+    }
+
+    println!("[Plugin] Stream established, SID: {}", stream_sid);
+
+    // Consume the stream synchronously
+    loop {
+        let (st, data) = dispatcher.stream_read(stream_sid);
+        match st {
+            NrStatus::Ok => {
+                println!(
+                    "[Plugin] Stream Frame: {:?}",
+                    String::from_utf8_lossy(data.as_slice())
+                );
+            }
+            NrStatus::StreamEnd => {
+                println!("[Plugin] Stream End");
+                break;
+            }
+            _ => {
+                println!("[Plugin] Stream Error: {:?}", st);
+                break;
+            }
+        }
+    }
+
+    dispatcher.close_stream(stream_sid);
+
+    // Send success back to host
+    // Send success back to host
+    let send_result_fn = (*HOST_VTABLE).send_result;
+    send_result_fn(
+        HOST_CTX,
+        sid,
+        NrStatus::Ok,
+        nylon_ring::NrVec::from_vec(b"Stream Consumed".to_vec()),
+    );
+
+    NrStatus::Ok
+}
+
 // Define the plugin with its entry points
 define_plugin! {
     init: init,
@@ -152,5 +280,9 @@ define_plugin! {
         "async" => handle_async,
         "benchmark" => handle_benchmark,
         "benchmark_without_response" => handle_benchmark_without_response,
+        "dispatch_sync" => handle_dispatch_sync,
+        "dispatch_fast" => handle_dispatch_fast,
+        "dispatch_async" => handle_dispatch_async,
+        "dispatch_stream" => handle_dispatch_stream
     }
 }

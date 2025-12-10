@@ -1,7 +1,12 @@
-use crate::types::{FastPendingMap, FastStateMap, Pending, UnaryResultSlot, UnarySender};
+use crate::types::{
+    FastPendingMap, FastStateMap, Pending, StreamFrame, StreamReceiver, UnaryResultSlot,
+    UnarySender,
+};
+use dashmap::DashMap;
 use nylon_ring::NrHostExt;
 use rustc_hash::FxBuildHasher;
 use std::cell::Cell;
+use std::sync::{Arc, Weak};
 
 /// Number of shards for the pending requests.
 const SHARD_COUNT: usize = 64;
@@ -15,10 +20,22 @@ pub(crate) struct HostContext {
 
     pub(crate) state_per_sid: FastStateMap,
     pub(crate) host_ext: NrHostExt,
+
+    /// Weak reference to the plugin registry to avoid cycles.
+    pub(crate) registry_weak: Weak<DashMap<String, Arc<crate::LoadedPlugin>>>,
+
+    /// Active stream receivers (poll-based reading for plugins)
+    pub(crate) stream_receivers: DashMap<u64, StreamReceiver, FxBuildHasher>,
+
+    /// Map SID to Target Plugin (for stream writes/closes)
+    pub(crate) stream_targets: DashMap<u64, Arc<crate::LoadedPlugin>, FxBuildHasher>,
 }
 
 impl HostContext {
-    pub(crate) fn new(host_ext: NrHostExt) -> Self {
+    pub(crate) fn new(
+        host_ext: NrHostExt,
+        registry_weak: Weak<DashMap<String, Arc<crate::LoadedPlugin>>>,
+    ) -> Self {
         let mut shards = Vec::with_capacity(SHARD_COUNT);
         for _ in 0..SHARD_COUNT {
             shards.push(FastPendingMap::with_hasher(FxBuildHasher));
@@ -28,6 +45,18 @@ impl HostContext {
             pending_shards: shards.into_boxed_slice(),
             state_per_sid: FastStateMap::with_hasher(FxBuildHasher),
             host_ext,
+            registry_weak,
+            stream_receivers: DashMap::with_hasher(FxBuildHasher),
+            stream_targets: DashMap::with_hasher(FxBuildHasher),
+        }
+    }
+
+    /// Resolve a plugin by name from the registry.
+    pub(crate) fn get_plugin(&self, name: &str) -> Option<Arc<crate::LoadedPlugin>> {
+        if let Some(registry) = self.registry_weak.upgrade() {
+            registry.get(name).map(|p| p.clone())
+        } else {
+            None
         }
     }
 }
@@ -73,6 +102,27 @@ pub(crate) fn remove_pending(ctx: &HostContext, sid: u64) -> Option<Pending> {
 pub(crate) fn reinsert_pending(ctx: &HostContext, sid: u64, pending: Pending) {
     // Always insert into Global Shard for continuations to support cross-thread access
     get_shard(ctx, sid).insert(sid, pending);
+}
+
+// --- Stream Management ---
+
+pub(crate) fn insert_stream_receiver(ctx: &HostContext, sid: u64, rx: StreamReceiver) {
+    ctx.stream_receivers.insert(sid, rx);
+}
+
+pub(crate) fn get_stream_receiver(
+    ctx: &HostContext,
+    sid: u64,
+) -> Option<dashmap::mapref::one::RefMut<'_, u64, StreamReceiver>> {
+    ctx.stream_receivers.get_mut(&sid)
+}
+
+pub(crate) fn insert_stream_target(ctx: &HostContext, sid: u64, plugin: Arc<crate::LoadedPlugin>) {
+    ctx.stream_targets.insert(sid, plugin);
+}
+
+pub(crate) fn get_stream_target(ctx: &HostContext, sid: u64) -> Option<Arc<crate::LoadedPlugin>> {
+    ctx.stream_targets.get(&sid).map(|p| p.clone())
 }
 
 // --- Thread Local Optimization for Unary Results ---

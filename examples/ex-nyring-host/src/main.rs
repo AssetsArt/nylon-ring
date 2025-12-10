@@ -23,21 +23,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Load the plugin
-    #[cfg(not(debug_assertions))]
     let plugin_path = if cfg!(target_os = "macos") {
         "target/release/libex_nyring_plugin.dylib"
     } else if cfg!(target_os = "windows") {
         "target/release/ex_nyring_plugin.dll"
     } else {
         "target/release/libex_nyring_plugin.so"
-    };
-    #[cfg(debug_assertions)]
-    let plugin_path = if cfg!(target_os = "macos") {
-        "target/debug/libex_nyring_plugin.dylib"
-    } else if cfg!(target_os = "windows") {
-        "target/debug/ex_nyring_plugin.dll"
-    } else {
-        "target/debug/libex_nyring_plugin.so"
     };
 
     println!("Loading plugin from: {}\n", plugin_path);
@@ -120,9 +111,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (sid, mut rx) = plugin.call_stream("stream", message).await?;
     println!("  Stream started with SID: {}", sid);
 
-    // Receive streaming frames
+    // Receive streaming frames (blocking read is safe here since we are using std::sync::mpsc)
     let mut frame_count = 0;
-    while let Some(frame) = rx.recv().await {
+    for frame in rx {
         frame_count += 1;
         println!(
             "  Frame {}: status={:?}, data={}",
@@ -156,6 +147,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Call {}: {:?}", i, status);
     }
     println!("  10 calls completed in {:?}\n", now.elapsed());
+
+    // Demo 7: Full Dispatcher API
+    println!("--- Demo 7: Full Dispatcher API ---");
+    println!("  Path: Plugin -> Host -> Plugin (Dispatch)");
+    println!("  Verifying all dispatcher modes:");
+
+    // 7.1 Sync
+    let message = b"Dispatch Sync";
+    println!(
+        "  [7.1] Sync: Sending {:?}",
+        String::from_utf8_lossy(message)
+    );
+    let (status, response) = plugin.call_response("dispatch_sync", message).await?;
+    println!("  Status: {:?}", status);
+    println!("  Response: {}\n", String::from_utf8_lossy(&response));
+
+    // 7.2 Fast
+    let message = b"Dispatch Fast";
+    println!(
+        "  [7.2] Fast: Sending {:?}",
+        String::from_utf8_lossy(message)
+    );
+    let (status, response) = plugin.call_response("dispatch_fast", message).await?;
+    println!("  Status: {:?}", status);
+    println!("  Response: {}\n", String::from_utf8_lossy(&response));
+
+    // 7.3 Async (Fire and forget from plugin)
+    let message = b"Dispatch Async";
+    println!(
+        "  [7.3] Async: Sending {:?}",
+        String::from_utf8_lossy(message)
+    );
+    let (status, _) = plugin.call_response("dispatch_async", message).await?; // We use call_response to wait for plugin to *send* the dispatch
+    println!("  Status: {:?}\n", status);
+
+    // 7.4 Stream
+    let message = b"Dispatch Stream";
+    println!(
+        "  [7.4] Stream: Sending {:?}",
+        String::from_utf8_lossy(message)
+    );
+    // The plugin consumes the stream internally and sends us a result once done.
+    let (status, response) = plugin.call_response("dispatch_stream", message).await?;
+    println!("  Status: {:?}", status);
+    println!("  Response: {}\n", String::from_utf8_lossy(&response));
 
     // Fire-and-Forget Benchmark
     benchmark::run_fire_and_forget_benchmark(plugin.clone()).await;

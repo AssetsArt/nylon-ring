@@ -14,6 +14,7 @@ rustc-hash = { workspace = true }
 slab = { workspace = true }
 parking_lot = { workspace = true }
 crossbeam-utils = { workspace = true }
+futures = "0.3"
 
 [dev-dependencies]
 criterion = { workspace = true }

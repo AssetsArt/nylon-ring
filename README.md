@@ -44,7 +44,8 @@ call_response(...):      27M~ req/sec (10 threads, unary with response)
 - **Fire-and-forget**: ~71.7ns (fastest)
 - **Unary with response**: ~143.2ns
 - **Fast path**: ~95.5ns (thread-local optimized)
-- **Streaming**: Bi-directional communication
+- **Streaming**: Bi-directional communication (Host ↔ Plugin)
+- **Plugin-to-Plugin**: Low-latency dispatch between plugins
 
 ### 🔧 **Production Ready**
 - Thread-safe for 24/7 HTTP servers
@@ -59,7 +60,7 @@ call_response(...):      27M~ req/sec (10 threads, unary with response)
 ```
 nylon-ring/
 ├── crates/
-│   ├── nylon-ring/              # Core ABI library
+│   ├── nylon-ring/              # Core ABI library & Plugin Dispatcher
 │   │   ├── src/                 # NrStr, NrBytes, NrKV, NrVec
 │   │   └── benches/             # ABI benchmarks
 │   │
@@ -68,7 +69,7 @@ nylon-ring/
 │       └── benches/             # Host overhead benchmarks
 │
 └── examples/
-    ├── ex-nyring-plugin/        # Example plugin
+    ├── ex-nyring-plugin/        # Example plugin (Async, Stream, Dispatch)
     └── ex-nyring-host/          # Example host + stress test
 ```
 
@@ -141,7 +142,6 @@ let status = plugin.call("handler_name", b"payload").await?;
 
 ```rust
 // Wait for response from plugin (~143.2ns, 6.98M calls/sec)
-// Wait for response from plugin (~143.2ns, 6.98M calls/sec)
 let (status, response) = plugin.call_response("handler_name", b"payload").await?;
 println!("Response: {}", String::from_utf8_lossy(&response));
 ```
@@ -150,32 +150,41 @@ println!("Response: {}", String::from_utf8_lossy(&response));
 
 ```rust
 // Thread-local optimized path (~95.5ns, 10.47M calls/sec)
-// Thread-local optimized path (~95.5ns, 10.47M calls/sec)
+// Synchronous, avoids DashMap overhead by using Thread-Local Storage.
 let (status, response) = plugin.call_response_fast("handler_name", b"payload").await?;
 ```
 
 #### Streaming
 
+Bi-directional streaming support. Example: Plugin produces multiple frames.
+
 ```rust
 use nylon_ring::NrStatus;
 
-// Start streaming
-// Start streaming
-let (sid, mut rx) = plugin.call_stream("stream_handler", b"payload").await?;
+// Start streaming call
+let (sid, rx) = plugin.call_stream("stream_handler", b"payload").await?;
 
-// Receive frames
-while let Some(frame) = rx.recv().await {
+// Receive frames using blocking iterator (compatible with async runtime)
+for frame in rx {
     println!("Data: {}", String::from_utf8_lossy(&frame.data));
     
     if matches!(frame.status, NrStatus::StreamEnd | NrStatus::Err) {
         break;
     }
 }
+
+// Host can also send data TO the stream
+plugin.send_stream_data(sid, b"host_data")?;
+
+// Close stream from host side
+plugin.close_stream(sid)?;
 ```
 
 ---
 
 ### Plugin: Implementing Handlers
+
+Using the `define_plugin!` macro and `NrVec` for zero-copy transfers.
 
 ```rust
 use nylon_ring::{define_plugin, NrBytes, NrHostVTable, NrStatus, NrVec};
@@ -189,21 +198,52 @@ static mut HOST_VTABLE: *const NrHostVTable = std::ptr::null();
 unsafe fn init(host_ctx: *mut c_void, host_vtable: *const NrHostVTable) -> NrStatus {
     HOST_CTX = host_ctx;
     HOST_VTABLE = host_vtable;
+    println!("[Plugin] Initialized!");
     NrStatus::Ok
 }
 
-// Handler example
+// 1. Unary Handler (Zero-Copy Response)
 unsafe fn handle_echo(sid: u64, payload: NrBytes) -> NrStatus {
-    // Echo back using zero-copy NrVec
-    let nr_vec = NrVec::from_slice(payload.as_slice());
-    let send_result = (*HOST_VTABLE).send_result;
-    send_result(HOST_CTX, sid, NrStatus::Ok, nr_vec);
+    // Zero-copy read
+    let data = payload.as_slice();
+    let text = String::from_utf8_lossy(data);
+    
+    // Create zero-copy response vector
+    let response = format!("Echo: {}", text);
+    let nr_vec = NrVec::from_string(response);
+
+    // Send result back to host
+    ((*HOST_VTABLE).send_result)(HOST_CTX, sid, NrStatus::Ok, nr_vec);
+    
+    NrStatus::Ok
+}
+
+// 2. Stream Handler (Multiple Frames)
+unsafe fn handle_stream(sid: u64, _payload: NrBytes) -> NrStatus {
+    for i in 1..=3 {
+        let msg = format!("Frame {}", i);
+        let nr_vec = NrVec::from_string(msg);
+        ((*HOST_VTABLE).send_result)(HOST_CTX, sid, NrStatus::Ok, nr_vec);
+    }
+    // End stream
+    ((*HOST_VTABLE).send_result)(HOST_CTX, sid, NrStatus::StreamEnd, NrVec::new());
+    NrStatus::Ok
+}
+
+// 3. Plugin-to-Plugin Dispatch
+unsafe fn handle_dispatch(_sid: u64, _payload: NrBytes) -> NrStatus {
+    // Create a dispatcher helper
+    let dispatcher = nylon_ring::PluginDispatcher::new(HOST_CTX, &*HOST_VTABLE, "other_plugin");
+    
+    // Call another plugin
+    let (status, response) = dispatcher.call_response("entry_point", b"hello");
+    
     NrStatus::Ok
 }
 
 // Plugin shutdown
 fn shutdown() {
-    // Cleanup
+    println!("[Plugin] Shutdown");
 }
 
 // Define plugin with entry points
@@ -212,14 +252,16 @@ define_plugin! {
     shutdown: shutdown,
     entries: {
         "echo" => handle_echo,
-    },
+        "stream" => handle_stream,
+        "dispatch" => handle_dispatch,
+    }
 }
 ```
 
 **The `define_plugin!` macro:**
 - ✅ Creates panic-safe FFI wrappers
 - ✅ Exports `nylon_ring_get_plugin_v1()` entry point
-- ✅ Routes requests by entry name
+- ✅ Routes requests by method name
 - ✅ Handles panics across FFI boundaries
 
 ---
@@ -270,131 +312,6 @@ define_plugin! {
 
 ---
 
-### System Overview
-
-The **Nylon Ring** architecture is designed around a strictly defined ABI boundary that separates the Host runtime from Plugin logic, connected by a high-performance routing layer.
-
-```text
-+-----------------------------------------------------------+
-|               Host Layer (nylon-ring-host)                |
-|                                                           |
-|  [Public API] NylonRingHost (Container)                   |
-|       |          |                                        |
-|       |          +---- [LoadedPlugin A] <----+            |
-|       |          |                           |            |
-|       |          +---- [LoadedPlugin B]      |            |
-|       |                                      |            |
-|       v (1. Get SID)                         |            |
-|    [ID Generator] <-----> [Shared Host Context]           |
-|       |                   +---------------------------+   |
-|       |                   |  [Thread-Local Slot]      |   |
-|       |                   |   (Zero Contention)       |   |
-|       |                   +---------------------------+   |
-|       |                   |  [Sharded DashMap]        |   |
-|       |                   |   (64 Shards)             |   |
-|       |                   +---------------------------+   |
-|       |                                 ^                 |
-|       v (2. FFI Call via PluginHandle)  |                 |
-|    [PluginHandle] ----------------------+                 |
-+-------+---------------------------------+-----------------+
-        |                                 |
-        v                                 | (3. send_result)
-+-------+---------------------------------+-----------------+
-|       |            ABI Boundary         |                 |
-|       v                                 |                 |
-|   [VTable Interface]               [Callback Router]      |
-|                                         ^                 |
-|                                         |                 |
-+-----------------------------------------+-----------------+
-        |                                 |
-        v                                 |
-+-------+---------------------------------+-----------------+
-|       |            Plugin Layer         |                 |
-|       v                                 |                 |
-|   [Business Logic] ---------------------+                 |
-|                                                           |
-+-----------------------------------------------------------+
-```
-
-#### 1. The Host Layer (`nylon-ring-host`)
-The runtime environment that manages plugin lifecycles and request routing.
-- **Multi-Plugin Support**: `NylonRingHost` acts as a container for multiple `LoadedPlugin` instances. Each plugin is isolated but shares the underlying host context (state map, ID generator).
-- **Hybrid State Management**:
-    - **Fast Path (Sync)**: Uses `Thread-Local Storage` (TLS) to store result slots. This eliminates all lock contention and atomic operations for synchronous calls.
-    - **Standard Path (Async)**: Uses a **Sharded DashMap** (64 shards) to track pending requests. Sharding minimizes lock contention in multi-threaded environments.
-- **ID Generation**: simple, thread-local counter with blocked allocation (1M per block) to avoid global atomic contention.
-- **Routing**: The callback handler uses a **Waterfall Strategy**:
-    1.  Check **TLS Slot** (Is this a fast synchronous response on the same thread?).
-    2.  Check **Sharded Map** (Is this an async response from any thread?).
-
-#### 2. The ABI Layer (`nylon-ring`)
-Defines the strictly stable interface between Host and Plugin.
-- **Stable Memory Layout**: All exchanged types (`NrVec`, `NrStr`, `NrStatus`) are `#[repr(C)]`, guaranteeing identical memory representation across languages (Rust, C++, etc.).
-- **Zero-Copy Protocol**: `NrVec<T>` allows ownership of heap-allocated memory (like a `Vec<u8>`) to be transferred across the FFI boundary without copying.
-
-#### 3. The Plugin Layer
-The implementer of business logic.
-- **Stateless & Async-Agnostic**: Plugins receive an ID and Payload. They process it (sync or async) and call `send_result` when finished. The Host handles the complexity of mapping that result back to the original caller.
-
----
-
-## Core Types
-
-### ABI Types (`nylon-ring`)
-
-- **`NrStr`** — String view (`&str` equivalent)
-- **`NrBytes`** — Byte slice view (`&[u8]` equivalent)
-- **`NrKV`** — Key-value pair
-- **`NrVec<T>`** — Owned vector with zero-copy transfer
-- **`NrStatus`** — Result status enum
-- **`NrHostVTable`** — Host callbacks
-- **`NrPluginVTable`** — Plugin entry points
-
-### Host Types (`nylon-ring-host`)
-
-- **`NylonRingHost`** — Main host interface
-- **`StreamFrame`** — Streaming data frame
-- **`StreamReceiver`** — Stream receiver channel
-
----
-
-## 🎯 Use Cases
-
-### ✅ Perfect For
-- **High-throughput HTTP servers** (REST, GraphQL)
-- **WebSocket backends**
-- **RPC services**
-- **Plugin systems** requiring isolation
-- **Hot-reloadable** business logic
-
-### ⚠️ Consider Alternatives For
-- Cross-language plugins (use direct FFI)
-- Very low latency requirements (<10ns)
-- Single-threaded only workloads
-
----
-
-## 📈 Benchmark Methodology
-
-### ABI Benchmarks
-- **Tool**: Criterion.rs with statistical analysis
-- **Iterations**: 100 samples, outlier detection
-- **Warmup**: Automatic warmup period
-- **Output**: HTML reports in `target/criterion/`
-
-### Host Overhead Benchmarks
-- **Method**: Full round-trip (host → plugin → callback)
-- **Plugin**: Example plugin with minimal work
-- **Runtime**: Tokio async runtime
-- **Builds**: Release builds only
-
-### Multi-Thread Stress Test
-- **Method**: 10 threads, 100 req/batch, 10-second run
-- **Pattern**: Fire-and-forget (no response wait)
-- **Total**: 1.40B~ requests in 10 seconds
-
----
-
 ## 🔬 Design Principles
 
 | Principle | Implementation |
@@ -404,7 +321,7 @@ The implementer of business logic.
 | **Zero Copy** | `NrVec<u8>` ownership transfer |
 | **Panic Safety** | FFI boundaries catch panics |
 | **Thread Safety** | Safe for multi-threaded hosts |
-| **Fast Path** | Specialized optimizations available |
+| **Fast Path** | Specialized optimizations for sync calls |
 
 ---
 
@@ -424,4 +341,3 @@ Built with:
 - **FxHash** — Fast hashing
 - **Criterion** — Benchmarking
 - **libloading** — Dynamic library loading
-

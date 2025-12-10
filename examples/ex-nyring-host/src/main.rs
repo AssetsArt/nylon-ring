@@ -1,7 +1,6 @@
 mod benchmark;
 
 use nylon_ring_host::NylonRingHost;
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,7 +41,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!("Loading plugin from: {}\n", plugin_path);
-    let host = Arc::new(NylonRingHost::load(plugin_path).expect("Failed to load plugin"));
+    let mut host = NylonRingHost::new();
+    host.load("default", plugin_path)
+        .expect("Failed to load plugin");
+
+    // Get a handle to the plugin
+    let plugin = host.plugin("default").expect("Plugin not found");
 
     // Demo 1: call_response_fast (Ultra-fast synchronous path)
     println!("--- Demo 1: call_response_fast() ---");
@@ -52,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let message = b"Hello via fast path!";
     println!("  Sending: {}", String::from_utf8_lossy(message));
     let now = std::time::Instant::now();
-    let (status, response) = host.call_response_fast("echo", message).await?;
+    let (status, response) = plugin.call_response_fast("echo", message).await?;
     println!("  Round trip time: {:?}", now.elapsed());
     println!("  Status: {:?}", status);
     println!(
@@ -69,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let message = b"Hello via standard path!";
     println!("  Sending: {}", String::from_utf8_lossy(message));
     let now = std::time::Instant::now();
-    let (status, response) = host.call_response("echo", message).await?;
+    let (status, response) = plugin.call_response("echo", message).await?;
     println!("  Round trip time: {:?}", now.elapsed());
     println!("  Status: {:?}", status);
     println!(
@@ -85,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let message = b"Fire and forget!";
     println!("  Sending: {}", String::from_utf8_lossy(message));
     let now = std::time::Instant::now();
-    let status = host.call("echo", message).await?;
+    let status = plugin.call("echo", message).await?;
     println!("  Call time: {:?}", now.elapsed());
     println!("  Status: {:?}\n", status);
 
@@ -97,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let message = b"Async test";
     println!("  Sending: {}", String::from_utf8_lossy(message));
     let now = std::time::Instant::now();
-    let (status, response) = host.call_response("async", message).await?;
+    let (status, response) = plugin.call_response("async", message).await?;
     println!("  Round trip time: {:?}", now.elapsed());
     println!("  Status: {:?}", status);
     println!(
@@ -113,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let message = b"start";
     println!("  Sending: {}", String::from_utf8_lossy(message));
     let now = std::time::Instant::now();
-    let (sid, mut rx) = host.call_stream("stream", message).await?;
+    let (sid, mut rx) = plugin.call_stream("stream", message).await?;
     println!("  Stream started with SID: {}", sid);
 
     // Receive streaming frames
@@ -148,19 +152,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let now = std::time::Instant::now();
     for i in 1..=10 {
         let message = format!("Message #{}", i);
-        let (status, _) = host.call_response("echo", message.as_bytes()).await?;
+        let (status, _) = plugin.call_response("echo", message.as_bytes()).await?;
         println!("  Call {}: {:?}", i, status);
     }
     println!("  10 calls completed in {:?}\n", now.elapsed());
 
     // Fire-and-Forget Benchmark
-    benchmark::run_fire_and_forget_benchmark(host.clone()).await;
+    benchmark::run_fire_and_forget_benchmark(plugin.clone()).await;
 
     // Request-Response Fast Benchmark
-    benchmark::run_request_response_fast_benchmark(host.clone()).await;
+    benchmark::run_request_response_fast_benchmark(plugin.clone()).await;
 
     // Request-Response Benchmark
-    benchmark::run_request_response_benchmark(host.clone()).await;
+    benchmark::run_request_response_benchmark(plugin.clone()).await;
 
     println!("\n=== Demo Complete ===");
     println!("\nExecution Path Summary:");

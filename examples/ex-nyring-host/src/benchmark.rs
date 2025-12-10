@@ -1,5 +1,5 @@
 use futures::future::join_all;
-use nylon_ring_host::NylonRingHost;
+use nylon_ring_host::PluginHandle;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,7 +9,7 @@ const DURATION_SECS: u64 = 10;
 const BATCH_SIZE: usize = 100;
 
 /// Run a fire-and-forget benchmark (calls without waiting for response)
-pub async fn run_fire_and_forget_benchmark(host: Arc<NylonRingHost>) {
+pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle) {
     println!("\n--- Benchmark: Fire-and-Forget ---");
 
     let concurrency = std::thread::available_parallelism()
@@ -29,7 +29,7 @@ pub async fn run_fire_and_forget_benchmark(host: Arc<NylonRingHost>) {
     println!("  -> Payload Size: {}", payload.len());
 
     for _ in 0..concurrency {
-        let host = host.clone();
+        let plugin = plugin.clone();
         let counter = total_requests.clone();
         let latency_counter = total_latency_nanos.clone();
         let start_signal = start_signal.clone();
@@ -45,7 +45,7 @@ pub async fn run_fire_and_forget_benchmark(host: Arc<NylonRingHost>) {
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
                 for _ in 0..BATCH_SIZE {
-                    futures_batch.push(host.call("benchmark_without_response", payload));
+                    futures_batch.push(plugin.call("benchmark_without_response", payload));
                 }
                 let _ = join_all(futures_batch.drain(..)).await;
                 let batch_elapsed = batch_start.elapsed();
@@ -84,7 +84,7 @@ pub async fn run_fire_and_forget_benchmark(host: Arc<NylonRingHost>) {
 }
 
 /// Run a request-response benchmark
-pub async fn run_request_response_benchmark(host: Arc<NylonRingHost>) {
+pub async fn run_request_response_benchmark(plugin: PluginHandle) {
     println!("\n--- Benchmark: Request-Response ---");
 
     let concurrency = std::thread::available_parallelism()
@@ -104,7 +104,7 @@ pub async fn run_request_response_benchmark(host: Arc<NylonRingHost>) {
     println!("  -> Payload Size: {}", payload.len());
 
     for _ in 0..concurrency {
-        let host = host.clone();
+        let plugin = plugin.clone();
         let counter = total_requests.clone();
         let latency_counter = total_latency_nanos.clone();
         let start_signal = start_signal.clone();
@@ -120,7 +120,7 @@ pub async fn run_request_response_benchmark(host: Arc<NylonRingHost>) {
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
                 for _ in 0..BATCH_SIZE {
-                    futures_batch.push(host.call_response("benchmark", payload));
+                    futures_batch.push(plugin.call_response("benchmark", payload));
                 }
                 let _ = join_all(futures_batch.drain(..)).await;
                 let batch_elapsed = batch_start.elapsed();
@@ -159,7 +159,7 @@ pub async fn run_request_response_benchmark(host: Arc<NylonRingHost>) {
 }
 
 /// Run a request-response fast benchmark
-pub async fn run_request_response_fast_benchmark(host: Arc<NylonRingHost>) {
+pub async fn run_request_response_fast_benchmark(plugin: PluginHandle) {
     println!("\n--- Benchmark: Request-Response Fast ---");
 
     let concurrency = std::thread::available_parallelism()
@@ -179,7 +179,7 @@ pub async fn run_request_response_fast_benchmark(host: Arc<NylonRingHost>) {
     println!("  -> Payload Size: {}", payload.len());
 
     for _ in 0..concurrency {
-        let host = host.clone();
+        let plugin = plugin.clone();
         let counter = total_requests.clone();
         let latency_counter = total_latency_nanos.clone();
         let start_signal = start_signal.clone();
@@ -195,7 +195,7 @@ pub async fn run_request_response_fast_benchmark(host: Arc<NylonRingHost>) {
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
                 for _ in 0..BATCH_SIZE {
-                    futures_batch.push(host.call_response_fast("benchmark", payload));
+                    futures_batch.push(plugin.call_response_fast("benchmark", payload));
                 }
                 let _ = join_all(futures_batch.drain(..)).await;
                 let batch_elapsed = batch_start.elapsed();

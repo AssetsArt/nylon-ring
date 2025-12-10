@@ -75,6 +75,80 @@ nylon-ring/
 
 ---
 
+## 🏗️ System Overview (Architecture)
+
+The **Nylon Ring** architecture is designed around a strictly defined ABI boundary that separates the Host runtime from Plugin logic, connected by a high-performance routing layer.
+
+```text
++-----------------------------------------------------------+
+|               Host Layer (nylon-ring-host)                |
+|                                                           |
+|  [Public API] NylonRingHost (Container)                   |
+|       |          |                                        |
+|       |          +---- [LoadedPlugin A] <----+            |
+|       |          |                           |            |
+|       |          +---- [LoadedPlugin B]      |            |
+|       |                                      |            |
+|       v (1. Get SID)                         |            |
+|    [ID Generator] <-----> [Shared Host Context]           |
+|       |                   +---------------------------+   |
+|       |                   |  [Thread-Local Slot]      |   |
+|       |                   |   (Zero Contention)       |   |
+|       |                   +---------------------------+   |
+|       |                   |  [Sharded DashMap]        |   |
+|       |                   |   (64 Shards)             |   |
+|       |                   +---------------------------+   |
+|       |                                 ^                 |
+|       v (2. FFI Call via PluginHandle)  |                 |
+|    [PluginHandle] ----------------------+                 |
+|       |                                 |                 |
+|       v                                 | (3. send_result)|
++-------+---------------------------------+-------^---------+
+|       |            ABI Boundary         |       |         |
+|       v                                 |       |         |
+|   [VTable Interface]               [Callback Router]      |
+|                                         ^       ^         |
+|                                         |       |         |
++-------+---------------------------------+-------+---------+
+        |                                 |       |
+        v                                 |       | (4. Dispatch)
++-------+---------------------------------+-------+---------+
+|       |            Plugin Layer         |       |         |
+|       v                                 |       |         |
+|   [Business Logic] ---------------------+       |         |
+|         |                                       |         |
+|         +----> [PluginDispatcher] --------------+         |
+|                                                           |
++-----------------------------------------------------------+
+```
+
+### 1. The Host Layer (`nylon-ring-host`)
+The runtime environment that manages plugin lifecycles and request routing.
+- **Multi-Plugin Support**: `NylonRingHost` acts as a container for multiple `LoadedPlugin` instances. Each plugin is isolated but shares the underlying host context (state map, ID generator).
+- **Hybrid State Management**:
+    - **Fast Path (Sync)**: Uses `Thread-Local Storage` (TLS) to store result slots. This eliminates all lock contention and atomic operations for synchronous calls.
+    - **Standard Path (Async)**: Uses a **Sharded DashMap** (64 shards) to track pending requests. Sharding minimizes lock contention in multi-threaded environments.
+- **ID Generation**: simple, thread-local counter with blocked allocation (1M per block) to avoid global atomic contention.
+- **Routing**: The callback handler uses a **Waterfall Strategy**:
+    1.  Check **TLS Slot** (Is this a fast synchronous response on the same thread?).
+    2.  Check **Sharded Map** (Is this an async response from any thread?).
+
+### 2. The ABI Layer (`nylon-ring`)
+Defines the strictly stable interface between Host and Plugin.
+- **Stable Memory Layout**: All exchanged types (`NrVec`, `NrStr`, `NrStatus`) are `#[repr(C)]`, guaranteeing identical memory representation across languages (Rust, C++, etc.).
+- **Zero-Copy Protocol**: `NrVec<T>` allows ownership of heap-allocated memory (like a `Vec<u8>`) to be transferred across the FFI boundary without copying.
+
+### 3. The Plugin Layer
+The implementer of business logic.
+- **Stateless & Async-Agnostic**: Plugins receive an ID and Payload. They process it (sync or async) and call `send_result` when finished. The Host handles the complexity of mapping that result back to the original caller.
+
+### 4. The Dispatcher Layer
+Enables advanced plugin interaction.
+- **Plugin-to-Plugin calls**: The `PluginDispatcher` allows a plugin to call back into the Host to invoke another plugin.
+- **Streaming**: Manages stream initiation and frame transmission back to the host.
+
+---
+
 ## 🚀 Quick Start
 
 ### Build

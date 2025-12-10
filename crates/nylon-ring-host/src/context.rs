@@ -1,6 +1,5 @@
 use crate::types::{
-    FastPendingMap, FastStateMap, Pending, StreamFrame, StreamReceiver, UnaryResultSlot,
-    UnarySender,
+    FastPendingMap, FastStateMap, Pending, StreamReceiver, UnaryResultSlot, UnarySender,
 };
 use dashmap::DashMap;
 use nylon_ring::NrHostExt;

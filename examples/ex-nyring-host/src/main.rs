@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let message = b"start";
     println!("  Sending: {}", String::from_utf8_lossy(message));
     let now = std::time::Instant::now();
-    let (sid, mut rx) = plugin.call_stream("stream", message).await?;
+    let (sid, rx) = plugin.call_stream("stream", message).await?;
     println!("  Stream started with SID: {}", sid);
 
     // Receive streaming frames (blocking read is safe here since we are using std::sync::mpsc)

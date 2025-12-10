@@ -416,6 +416,7 @@ pub(crate) unsafe extern "C" fn dispatch_stream(
 
     crate::context::insert_pending(&plugin.host_ctx, sid, crate::types::Pending::Stream(tx));
     crate::context::insert_stream_receiver(ctx, sid, rx);
+    crate::context::insert_stream_target(ctx, sid, plugin.clone());
 
     let status = handle_fn(entry, sid, payload);
     nylon_ring::NrTuple { a: status, b: sid }
@@ -435,7 +436,7 @@ pub(crate) unsafe extern "C" fn stream_read(
     let ctx = &*(host_ctx as *const HostContext);
 
     // Blocking read from receiver
-    if let Some(mut rx_guard) = crate::context::get_stream_receiver(ctx, sid) {
+    if let Some(rx_guard) = crate::context::get_stream_receiver(ctx, sid) {
         match rx_guard.recv() {
             Ok(frame) => nylon_ring::NrTuple {
                 a: frame.status,

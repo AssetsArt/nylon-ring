@@ -2,20 +2,15 @@ use std::ffi::c_void;
 
 /// Status codes for the Nylon Ring ABI.
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Default)]
 pub enum NrStatus {
+    #[default]
     Ok = 0,
     Err = 1,
     Invalid = 2,
     Unsupported = 3,
     /// Streaming completed normally.
     StreamEnd = 4,
-}
-
-impl Default for NrStatus {
-    fn default() -> Self {
-        Self::Ok
-    }
 }
 
 /// A UTF-8 string slice with a pointer and length.

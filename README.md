@@ -100,24 +100,49 @@ cargo bench --package nylon-ring-host # Host overhead only
 
 ## 💻 Usage
 
-### Host: Loading a Plugin
+### Host: Plugin Management
+
+```rust
+use nylon_ring_host::NylonRingHost;
+
+let mut host = NylonRingHost::new();
+
+// Load plugins
+host.load("plugin_a", "libs/plugin_a.so")?;
+host.load("plugin_b", "libs/plugin_b.so")?;
+
+// Get a handle to a specific plugin
+let plugin_a = host.plugin("plugin_a").expect("Plugin A not found");
+
+// Reload all plugins (useful for hot-swapping)
+host.reload()?;
+
+// Unload a plugin
+host.unload("plugin_b")?;
+```
+
+### Host: Calling a Plugin
 
 #### Fire-and-Forget (Fastest)
 
 ```rust
 use nylon_ring_host::NylonRingHost;
 
-let host = NylonRingHost::load("target/release/libmy_plugin.so")?;
+let mut host = NylonRingHost::new();
+host.load("default", "target/release/libmy_plugin.so")?;
+
+let plugin = host.plugin("default").expect("Plugin not found");
 
 // Fire-and-forget - no response waiting (~71.7ns, 13.95M calls/sec)
-let status = host.call("handler_name", b"payload").await?;
+let status = plugin.call("handler_name", b"payload").await?;
 ```
 
 #### Unary with Response
 
 ```rust
 // Wait for response from plugin (~143.2ns, 6.98M calls/sec)
-let (status, response) = host.call_response("handler_name", b"payload").await?;
+// Wait for response from plugin (~143.2ns, 6.98M calls/sec)
+let (status, response) = plugin.call_response("handler_name", b"payload").await?;
 println!("Response: {}", String::from_utf8_lossy(&response));
 ```
 
@@ -125,7 +150,8 @@ println!("Response: {}", String::from_utf8_lossy(&response));
 
 ```rust
 // Thread-local optimized path (~95.5ns, 10.47M calls/sec)
-let (status, response) = host.call_response_fast("handler_name", b"payload").await?;
+// Thread-local optimized path (~95.5ns, 10.47M calls/sec)
+let (status, response) = plugin.call_response_fast("handler_name", b"payload").await?;
 ```
 
 #### Streaming
@@ -134,7 +160,8 @@ let (status, response) = host.call_response_fast("handler_name", b"payload").awa
 use nylon_ring::NrStatus;
 
 // Start streaming
-let (sid, mut rx) = host.call_stream("stream_handler", b"payload").await?;
+// Start streaming
+let (sid, mut rx) = plugin.call_stream("stream_handler", b"payload").await?;
 
 // Receive frames
 while let Some(frame) = rx.recv().await {
@@ -251,10 +278,14 @@ The **Nylon Ring** architecture is designed around a strictly defined ABI bounda
 +-----------------------------------------------------------+
 |               Host Layer (nylon-ring-host)                |
 |                                                           |
-|  [Public API]nylon_ring_host::NylonRingHost               |
-|       |                                                   |
-|       v (1. Get SID)                                      |
-|    [ID Generator] <-----> [State Management]              |
+|  [Public API] NylonRingHost (Container)                   |
+|       |          |                                        |
+|       |          +---- [LoadedPlugin A] <----+            |
+|       |          |                           |            |
+|       |          +---- [LoadedPlugin B]      |            |
+|       |                                      |            |
+|       v (1. Get SID)                         |            |
+|    [ID Generator] <-----> [Shared Host Context]           |
 |       |                   +---------------------------+   |
 |       |                   |  [Thread-Local Slot]      |   |
 |       |                   |   (Zero Contention)       |   |
@@ -263,7 +294,8 @@ The **Nylon Ring** architecture is designed around a strictly defined ABI bounda
 |       |                   |   (64 Shards)             |   |
 |       |                   +---------------------------+   |
 |       |                                 ^                 |
-|       v (2. FFI Call)                   |                 |
+|       v (2. FFI Call via PluginHandle)  |                 |
+|    [PluginHandle] ----------------------+                 |
 +-------+---------------------------------+-----------------+
         |                                 |
         v                                 | (3. send_result)
@@ -286,6 +318,7 @@ The **Nylon Ring** architecture is designed around a strictly defined ABI bounda
 
 #### 1. The Host Layer (`nylon-ring-host`)
 The runtime environment that manages plugin lifecycles and request routing.
+- **Multi-Plugin Support**: `NylonRingHost` acts as a container for multiple `LoadedPlugin` instances. Each plugin is isolated but shares the underlying host context (state map, ID generator).
 - **Hybrid State Management**:
     - **Fast Path (Sync)**: Uses `Thread-Local Storage` (TLS) to store result slots. This eliminates all lock contention and atomic operations for synchronous calls.
     - **Standard Path (Async)**: Uses a **Sharded DashMap** (64 shards) to track pending requests. Sharding minimizes lock contention in multi-threaded environments.

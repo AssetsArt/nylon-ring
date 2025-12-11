@@ -136,7 +136,7 @@ impl PluginHandle {
     /// Fire-and-forget call to a plugin entry point.
     pub async fn call(&self, entry: &str, payload: &[u8]) -> Result<NrStatus> {
         // Use Fast SID
-        let sid = next_sid() | 0x8000_0000_0000_0000;
+        let sid = next_sid();
 
         let payload_bytes = NrBytes::from_slice(payload);
         let handle_raw_fn = match self.plugin.vtable.handle {

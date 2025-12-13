@@ -230,6 +230,7 @@ name = "ex-nyring-plugin"
 version = "0.1.0"
 dependencies = [
  "nylon-ring",
+ "once_cell",
  "tokio",
 ]
 

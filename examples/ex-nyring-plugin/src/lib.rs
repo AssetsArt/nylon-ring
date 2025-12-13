@@ -1,6 +1,7 @@
 use nylon_ring::{define_plugin, NrBytes, NrHostVTable, NrStatus, NrVec};
 use std::ffi::c_void;
 use std::sync::OnceLock;
+use tokio::sync::mpsc;
 
 // Global state to store host context and vtable
 static mut HOST_CTX: *mut c_void = std::ptr::null_mut();
@@ -9,10 +10,15 @@ static mut HOST_VTABLE: *const NrHostVTable = std::ptr::null();
 // Tokio runtime for async operations
 static TOKIO_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
+thread_local! {
+    static ASYNC_Q_BENCHMARK: once_cell::sync::OnceCell<mpsc::UnboundedSender<(u64, NrBytes)>> = const { once_cell::sync::OnceCell::new() };
+    static ASYNC_Q: once_cell::sync::OnceCell<mpsc::UnboundedSender<(u64, NrBytes)>> = const { once_cell::sync::OnceCell::new() };
+}
+
 fn get_runtime() -> &'static tokio::runtime::Runtime {
     TOKIO_RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4)
+            .worker_threads(10)
             .enable_all()
             .build()
             .expect("Failed to create Tokio runtime")
@@ -35,6 +41,9 @@ unsafe fn init(host_ctx: *mut c_void, host_vtable: *const NrHostVTable) -> NrSta
     println!("[Plugin] Tokio runtime initialized with 4 worker threads");
     HOST_CTX = host_ctx;
     HOST_VTABLE = host_vtable;
+
+    async_worker_benchmark();
+    async_worker();
     NrStatus::Ok
 }
 
@@ -94,46 +103,65 @@ unsafe fn handle_stream(sid: u64, _payload: NrBytes) -> NrStatus {
     NrStatus::Ok
 }
 
-// Async handler - demonstrates async operations using Tokio runtime
-unsafe fn handle_async(sid: u64, payload: NrBytes) -> NrStatus {
-    let data = payload.as_slice();
-    let text = String::from_utf8_lossy(data).to_string();
-    println!(
-        "[Plugin] Async handler started for SID: {} with: {}",
-        sid, text
-    );
-    println!("[Plugin] Spawning async task...");
-
-    // Spawn async task on Tokio runtime
-    let rt = get_runtime();
-    rt.spawn(async move {
-        println!("[Plugin] Async task running on Tokio runtime...");
-
-        // Simulate async work (e.g., database query, HTTP request, etc.)
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        println!("[Plugin] Async work completed!");
-
-        // Send result back to host
-        let result = format!("Async result: {} (processed after 100ms)", text);
-        println!("[Plugin] Sending result back to host: {}", result);
-
-        let nr_vec = NrVec::from_string(result);
-        send_result(sid, NrStatus::Ok, nr_vec);
-
-        println!("[Plugin] Result sent!");
+pub fn async_worker_benchmark() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<(u64, NrBytes)>();
+    ASYNC_Q_BENCHMARK.with(|cell| {
+        cell.set(tx).ok();
     });
 
-    println!("[Plugin] Async handler returning Ok (task spawned)");
-    NrStatus::Ok
+    get_runtime().spawn(async move {
+        while let Some((sid, payload)) = rx.recv().await {
+            let nr_vec = NrVec::from_nr_bytes(payload);
+            send_result(sid, NrStatus::Ok, nr_vec);
+        }
+    });
+}
+
+pub fn async_worker() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<(u64, NrBytes)>();
+    ASYNC_Q.with(|cell| {
+        cell.set(tx).ok();
+    });
+
+    get_runtime().spawn(async move {
+        while let Some((sid, payload)) = rx.recv().await {
+            let data = payload.as_slice();
+            let text = String::from_utf8_lossy(data).to_string();
+            println!(
+                "[Plugin] Async handler started for SID: {} with: {}",
+                sid, text
+            );
+            println!("[Plugin] Spawning async task...");
+            println!("[Plugin] Async task running on Tokio runtime...");
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            println!("[Plugin] Async task completed!");
+            let result = format!("Async result: {} (processed after 100ms)", text);
+            let nr_vec = NrVec::from_string(result);
+            send_result(sid, NrStatus::Ok, nr_vec);
+        }
+    });
+}
+
+// Async handler - demonstrates async operations using Tokio runtime
+unsafe fn handle_async(sid: u64, payload: NrBytes) -> NrStatus {
+    ASYNC_Q.with(|cell| {
+        if let Some(tx) = cell.get() {
+            let _ = tx.send((sid, payload));
+            return NrStatus::Ok;
+        }
+        NrStatus::Err
+    })
 }
 
 // benchmark - fast handler for benchmarking
 unsafe fn handle_benchmark(sid: u64, payload: NrBytes) -> NrStatus {
-    // Echo back the payload for benchmark
-    let nr_vec = NrVec::from_nr_bytes(payload);
-    send_result(sid, NrStatus::Ok, nr_vec);
-    NrStatus::Ok
+    ASYNC_Q_BENCHMARK.with(|cell| {
+        if let Some(tx) = cell.get() {
+            let _ = tx.send((sid, payload));
+            return NrStatus::Ok;
+        }
+        NrStatus::Err
+    })
 }
 
 // benchmark - without response

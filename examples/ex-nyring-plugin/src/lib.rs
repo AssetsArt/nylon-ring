@@ -17,8 +17,11 @@ thread_local! {
 
 fn get_runtime() -> &'static tokio::runtime::Runtime {
     TOKIO_RT.get_or_init(|| {
+        let concurrency = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8);
         tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(10)
+            .worker_threads(concurrency)
             .enable_all()
             .build()
             .expect("Failed to create Tokio runtime")

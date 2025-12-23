@@ -38,6 +38,38 @@ pub struct NrKV {
     pub value: NrStr,
 }
 
+/// A key-value pair with any type as value.
+/// This struct is `#[repr(C)]` and ABI-stable.
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct NrKVAny {
+    pub key: NrStr,
+    pub value: NrAny,
+}
+
+/// A map/dictionary type implemented as a vector of key-value pairs.
+/// This struct is `#[repr(C)]` and ABI-stable.
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct NrMap {
+    pub entries: NrVec<NrKVAny>,
+}
+
+/// A type-erased value that can hold any data type.
+/// This struct is `#[repr(C)]` and ABI-stable.
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct NrAny {
+    /// Pointer to the data
+    pub data: *mut c_void,
+    /// Size of the data in bytes
+    pub size: u64,
+    /// Type identifier (user-defined tag)
+    pub type_tag: u32,
+    /// Optional destructor function pointer (can be null)
+    pub drop_fn: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
 /// A vector with a pointer, length, and capacity.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
@@ -54,6 +86,34 @@ impl<T> Default for NrVec<T> {
             ptr: std::ptr::null_mut(),
             len: 0,
             cap: 0,
+        }
+    }
+}
+
+impl Default for NrKVAny {
+    fn default() -> Self {
+        Self {
+            key: NrStr::default(),
+            value: NrAny::default(),
+        }
+    }
+}
+
+impl Default for NrMap {
+    fn default() -> Self {
+        Self {
+            entries: NrVec::default(),
+        }
+    }
+}
+
+impl Default for NrAny {
+    fn default() -> Self {
+        Self {
+            data: std::ptr::null_mut(),
+            size: 0,
+            type_tag: 0,
+            drop_fn: None,
         }
     }
 }
@@ -282,6 +342,167 @@ impl NrKV {
 
     pub fn from_nr_str(key: NrStr, value: NrStr) -> Self {
         Self { key, value }
+    }
+}
+
+impl NrKVAny {
+    pub fn new(key: &str, value: NrAny) -> Self {
+        Self {
+            key: NrStr::new(key),
+            value,
+        }
+    }
+
+    pub fn from_nr_str(key: NrStr, value: NrAny) -> Self {
+        Self { key, value }
+    }
+}
+
+impl NrMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, key: &str, value: NrAny) {
+        let kv = NrKVAny::new(key, value);
+        self.entries.push(kv);
+    }
+
+    pub fn insert_nr(&mut self, key: NrStr, value: NrAny) {
+        let kv = NrKVAny::from_nr_str(key, value);
+        self.entries.push(kv);
+    }
+
+    pub fn get(&self, key: &str) -> Option<&NrAny> {
+        for kv in self.entries.iter() {
+            if kv.key.as_str() == key {
+                return Some(&kv.value);
+            }
+        }
+        None
+    }
+
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut NrAny> {
+        for kv in self.entries.iter_mut() {
+            if kv.key.as_str() == key {
+                return Some(&mut kv.value);
+            }
+        }
+        None
+    }
+
+    pub fn remove(&mut self, key: &str) -> Option<NrKVAny> {
+        // Find the index first
+        let found_index = self.entries.iter().position(|kv| kv.key.as_str() == key);
+
+        if let Some(i) = found_index {
+            // Temporarily take ownership of entries
+            let entries = std::mem::take(&mut self.entries);
+            // Convert to Vec, remove item, convert back
+            let mut entries_vec = entries.into_vec();
+            let removed = entries_vec.remove(i);
+            self.entries = NrVec::from_vec(entries_vec);
+            Some(removed)
+        } else {
+            None
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.len == 0
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+impl NrAny {
+    pub fn new<T>(value: T, type_tag: u32) -> Self {
+        let size = std::mem::size_of::<T>() as u64;
+        let data = Box::into_raw(Box::new(value)) as *mut c_void;
+        Self {
+            data,
+            size,
+            type_tag,
+            drop_fn: Some(drop_any::<T>),
+        }
+    }
+
+    pub fn from_bytes(bytes: NrBytes, type_tag: u32) -> Self {
+        let size = bytes.len;
+        let data = if size > 0 {
+            let v = bytes.as_slice().to_vec();
+            Box::into_raw(Box::new(v)) as *mut c_void
+        } else {
+            std::ptr::null_mut()
+        };
+        Self {
+            data,
+            size,
+            type_tag,
+            drop_fn: Some(drop_bytes),
+        }
+    }
+
+    pub fn as_ptr<T>(&self) -> Option<*const T> {
+        if self.data.is_null() {
+            None
+        } else {
+            Some(self.data as *const T)
+        }
+    }
+
+    pub fn as_mut_ptr<T>(&mut self) -> Option<*mut T> {
+        if self.data.is_null() {
+            None
+        } else {
+            Some(self.data as *mut T)
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.data.is_null()
+    }
+
+    pub fn type_tag(&self) -> u32 {
+        self.type_tag
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+unsafe extern "C" fn drop_any<T>(ptr: *mut c_void) {
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Box::from_raw(ptr as *mut T);
+        }
+    }
+}
+
+unsafe extern "C" fn drop_bytes(ptr: *mut c_void) {
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Box::from_raw(ptr as *mut Vec<u8>);
+        }
+    }
+}
+
+impl Drop for NrAny {
+    fn drop(&mut self) {
+        if let Some(drop_fn) = self.drop_fn {
+            if !self.data.is_null() {
+                unsafe {
+                    drop_fn(self.data);
+                }
+            }
+        }
     }
 }
 
@@ -531,6 +752,15 @@ unsafe impl Sync for NrBytes {}
 unsafe impl Send for NrKV {}
 unsafe impl Sync for NrKV {}
 
+unsafe impl Send for NrKVAny {}
+unsafe impl Sync for NrKVAny {}
+
+unsafe impl Send for NrMap {}
+unsafe impl Sync for NrMap {}
+
+unsafe impl Send for NrAny {}
+unsafe impl Sync for NrAny {}
+
 unsafe impl Send for NrHostVTable {}
 unsafe impl Sync for NrHostVTable {}
 
@@ -659,5 +889,87 @@ mod tests {
 
         let collected: Vec<u32> = v.iter().cloned().collect();
         assert_eq!(collected, vec![10, 20]);
+    }
+
+    #[test]
+    fn test_nr_map() {
+        let mut map = NrMap::new();
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+
+        // Insert string values
+        let str_value1 = NrAny::new(String::from("value1"), 1);
+        let str_value2 = NrAny::new(String::from("value2"), 1);
+        map.insert("key1", str_value1);
+        map.insert("key2", str_value2);
+        assert_eq!(map.len(), 2);
+
+        // Get and verify string values
+        let value1 = map.get("key1").unwrap();
+        let str_ptr1 = value1.as_ptr::<String>().unwrap();
+        unsafe {
+            assert_eq!(*str_ptr1, "value1");
+        }
+
+        let value2 = map.get("key2").unwrap();
+        let str_ptr2 = value2.as_ptr::<String>().unwrap();
+        unsafe {
+            assert_eq!(*str_ptr2, "value2");
+        }
+
+        assert!(map.get("key3").is_none());
+
+        // Test that get_mut returns a mutable reference
+        let value_mut = map.get_mut("key1");
+        assert!(value_mut.is_some());
+
+        // Insert integer value
+        let int_value = NrAny::new(42i32, 2);
+        map.insert("key3", int_value);
+        assert_eq!(map.len(), 3);
+
+        let int_val = map.get("key3").unwrap();
+        let int_ptr = int_val.as_ptr::<i32>().unwrap();
+        unsafe {
+            assert_eq!(*int_ptr, 42);
+        }
+
+        let removed = map.remove("key2");
+        assert!(removed.is_some());
+        assert_eq!(map.len(), 2);
+        assert!(map.get("key2").is_none());
+
+        map.clear();
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_nr_any() {
+        let any_int = NrAny::new(42i32, 1);
+        assert!(!any_int.is_null());
+        assert_eq!(any_int.type_tag(), 1);
+        assert_eq!(any_int.size(), std::mem::size_of::<i32>() as u64);
+
+        let ptr = any_int.as_ptr::<i32>().unwrap();
+        unsafe {
+            assert_eq!(*ptr, 42);
+        }
+
+        let any_string = NrAny::new(String::from("hello"), 2);
+        assert_eq!(any_string.type_tag(), 2);
+        let str_ptr = any_string.as_ptr::<String>().unwrap();
+        unsafe {
+            assert_eq!(*str_ptr, "hello");
+        }
+
+        let bytes = NrBytes::from_slice(b"test");
+        let any_bytes = NrAny::from_bytes(bytes, 3);
+        assert_eq!(any_bytes.type_tag(), 3);
+        assert_eq!(any_bytes.size(), 4);
+
+        let default_any = NrAny::default();
+        assert!(default_any.is_null());
+        assert_eq!(default_any.type_tag(), 0);
+        assert_eq!(default_any.size(), 0);
     }
 }

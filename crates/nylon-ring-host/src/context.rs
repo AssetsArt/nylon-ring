@@ -36,21 +36,6 @@ impl HostContext {
 unsafe impl Send for HostContext {}
 unsafe impl Sync for HostContext {}
 
-// --- Operations (Sharded Map) ---
-
-// Thread-Local Shard Index (Sticky Sharding to avoid contention)
-thread_local! {
-    static LOCAL_SHARD_IDX: usize = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        // Hash Thread ID to get a stable random shard for this thread
-        let thread_id = std::thread::current().id();
-        let mut hasher = DefaultHasher::new();
-        thread_id.hash(&mut hasher);
-        (hasher.finish() as usize) & (SHARD_COUNT - 1)
-    };
-}
-
 #[inline(always)]
 fn get_shard(ctx: &HostContext, sid: u64) -> &FastPendingMap {
     unsafe {

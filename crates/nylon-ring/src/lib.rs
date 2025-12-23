@@ -47,12 +47,26 @@ pub struct NrKVAny {
     pub value: NrAny,
 }
 
-/// A map/dictionary type implemented as a vector of key-value pairs.
+/// Index slot for hash table lookup.
+/// This struct is `#[repr(C)]` and ABI-stable.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
+pub struct NrIndexSlot {
+    pub hash: u64,
+    pub entry_idx: u32, // index into entries
+    pub state: u8,      // 0=empty, 1=full, 2=tombstone
+    pub _pad: [u8; 3],
+}
+
+/// A map/dictionary type implemented as a vector of key-value pairs with hash index.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct NrMap {
     pub entries: NrVec<NrKVAny>,
+    pub index: NrVec<NrIndexSlot>, // hash index table
+    pub used: u32,                 // number of full slots
+    pub tomb: u32,                 // number of tombstones
 }
 
 /// A type-erased value that can hold any data type.
@@ -103,6 +117,9 @@ impl Default for NrMap {
     fn default() -> Self {
         Self {
             entries: NrVec::default(),
+            index: NrVec::default(),
+            used: 0,
+            tomb: 0,
         }
     }
 }
@@ -358,54 +375,315 @@ impl NrKVAny {
     }
 }
 
+// Hash function: FNV-1a
+#[inline]
+fn hash_str(s: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut h = FNV_OFFSET;
+    for &b in s.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
 impl NrMap {
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[inline]
+    fn index_len(&self) -> usize {
+        self.index.len
+    }
+
+    fn ensure_index(&mut self) {
+        // Create index when we have enough entries (threshold = 8)
+        if self.index.ptr.is_null() && self.entries.len >= 8 {
+            self.rehash(16);
+        }
+    }
+
+    fn rehash(&mut self, mut new_cap: usize) {
+        // Make it a power of 2 for fast masking
+        new_cap = new_cap.next_power_of_two().max(16);
+
+        // Create empty slots
+        let mut slots = Vec::with_capacity(new_cap);
+        slots.resize_with(new_cap, NrIndexSlot::default);
+
+        self.index = NrVec::from_vec(slots);
+        self.used = 0;
+        self.tomb = 0;
+
+        // Insert all entries into index
+        for i in 0..self.entries.len {
+            let kv = unsafe { &*self.entries.ptr.add(i) };
+            let k = kv.key.as_str();
+            self.index_insert(hash_str(k), i as u32);
+        }
+    }
+
+    #[inline]
+    fn should_grow(&self) -> bool {
+        // Load factor approximately > 0.7 or too many tombstones
+        if self.index.ptr.is_null() {
+            return false;
+        }
+        let cap = self.index_len() as u32;
+        (self.used + self.tomb) * 10 >= cap * 7
+    }
+
+    fn maybe_grow(&mut self) {
+        if self.should_grow() {
+            let cap = self.index_len();
+            self.rehash(cap * 2);
+        }
+    }
+
+    fn index_insert(&mut self, hash: u64, entry_idx: u32) {
+        let cap = self.index_len();
+        if cap == 0 {
+            return;
+        }
+        let mask = cap - 1;
+        let mut pos = (hash as usize) & mask;
+        let mut first_tomb: Option<usize> = None;
+
+        for _ in 0..cap {
+            let slot = unsafe { &mut *self.index.ptr.add(pos) };
+            match slot.state {
+                0 => {
+                    let target = first_tomb.unwrap_or(pos);
+                    let s2 = unsafe { &mut *self.index.ptr.add(target) };
+                    s2.hash = hash;
+                    s2.entry_idx = entry_idx;
+                    s2.state = 1;
+                    if first_tomb.is_some() {
+                        self.tomb -= 1;
+                    }
+                    self.used += 1;
+                    return;
+                }
+                2 => {
+                    if first_tomb.is_none() {
+                        first_tomb = Some(pos);
+                    }
+                }
+                _ => {}
+            }
+            pos = (pos + 1) & mask;
+        }
+
+        // Table is unexpectedly full -> rehash and try again
+        let cap2 = cap * 2;
+        self.rehash(cap2);
+        self.index_insert(hash, entry_idx);
+    }
+
     pub fn insert(&mut self, key: &str, value: NrAny) {
+        // If key exists, replace the value (set behavior)
+        if let Some(v) = self.get_mut(key) {
+            *v = value;
+            return;
+        }
+
         let kv = NrKVAny::new(key, value);
         self.entries.push(kv);
+
+        self.ensure_index();
+        if !self.index.ptr.is_null() {
+            self.maybe_grow();
+            let idx = (self.entries.len - 1) as u32;
+            self.index_insert(hash_str(key), idx);
+        }
     }
 
     pub fn insert_nr(&mut self, key: NrStr, value: NrAny) {
+        let key_str = key.as_str();
+        // If key exists, replace the value (set behavior)
+        if let Some(v) = self.get_mut(key_str) {
+            *v = value;
+            return;
+        }
+
         let kv = NrKVAny::from_nr_str(key, value);
         self.entries.push(kv);
+
+        self.ensure_index();
+        if !self.index.ptr.is_null() {
+            self.maybe_grow();
+            let idx = (self.entries.len - 1) as u32;
+            self.index_insert(hash_str(key_str), idx);
+        }
     }
 
     pub fn get(&self, key: &str) -> Option<&NrAny> {
-        for kv in self.entries.iter() {
-            if kv.key.as_str() == key {
-                return Some(&kv.value);
+        if self.index.ptr.is_null() {
+            // Fallback to linear search (acceptable for small maps)
+            for kv in self.entries.iter() {
+                if kv.key.as_str() == key {
+                    return Some(&kv.value);
+                }
             }
+            return None;
+        }
+
+        let h = hash_str(key);
+        let cap = self.index.len;
+        let mask = cap - 1;
+        let mut pos = (h as usize) & mask;
+
+        for _ in 0..cap {
+            let slot = unsafe { &*self.index.ptr.add(pos) };
+            match slot.state {
+                0 => return None, // Empty slot found, key doesn't exist
+                1 if slot.hash == h => {
+                    let kv = unsafe { &*self.entries.ptr.add(slot.entry_idx as usize) };
+                    if kv.key.as_str() == key {
+                        return Some(&kv.value);
+                    }
+                }
+                _ => {}
+            }
+            pos = (pos + 1) & mask;
         }
         None
     }
 
     pub fn get_mut(&mut self, key: &str) -> Option<&mut NrAny> {
-        for kv in self.entries.iter_mut() {
-            if kv.key.as_str() == key {
-                return Some(&mut kv.value);
+        if self.index.ptr.is_null() {
+            for kv in self.entries.iter_mut() {
+                if kv.key.as_str() == key {
+                    return Some(&mut kv.value);
+                }
             }
+            return None;
+        }
+
+        let h = hash_str(key);
+        let cap = self.index.len;
+        let mask = cap - 1;
+        let mut pos = (h as usize) & mask;
+
+        for _ in 0..cap {
+            let slot = unsafe { &*self.index.ptr.add(pos) };
+            match slot.state {
+                0 => return None,
+                1 if slot.hash == h => {
+                    let kv = unsafe { &mut *self.entries.ptr.add(slot.entry_idx as usize) };
+                    if kv.key.as_str() == key {
+                        return Some(&mut kv.value);
+                    }
+                }
+                _ => {}
+            }
+            pos = (pos + 1) & mask;
         }
         None
     }
 
     pub fn remove(&mut self, key: &str) -> Option<NrKVAny> {
-        // Find the index first
-        let found_index = self.entries.iter().position(|kv| kv.key.as_str() == key);
-
-        if let Some(i) = found_index {
-            // Temporarily take ownership of entries
-            let entries = std::mem::take(&mut self.entries);
-            // Convert to Vec, remove item, convert back
-            let mut entries_vec = entries.into_vec();
-            let removed = entries_vec.remove(i);
-            self.entries = NrVec::from_vec(entries_vec);
-            Some(removed)
+        // Find the index of the entry to remove
+        let idx = if self.index.ptr.is_null() {
+            // Fallback to linear search
+            self.entries.iter().position(|kv| kv.key.as_str() == key)?
         } else {
-            None
+            // Use hash lookup
+            let h = hash_str(key);
+            let cap = self.index.len;
+            let mask = cap - 1;
+            let mut pos = (h as usize) & mask;
+            let mut found_idx: Option<usize> = None;
+
+            for _ in 0..cap {
+                let slot = unsafe { &*self.index.ptr.add(pos) };
+                match slot.state {
+                    0 => break, // Empty slot found, key doesn't exist
+                    1 if slot.hash == h => {
+                        let entry_idx = slot.entry_idx as usize;
+                        let kv = unsafe { &*self.entries.ptr.add(entry_idx) };
+                        if kv.key.as_str() == key {
+                            found_idx = Some(entry_idx);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                pos = (pos + 1) & mask;
+            }
+
+            found_idx?
+        };
+
+        let last = self.entries.len - 1;
+
+        // take removed
+        let removed = unsafe { std::ptr::read(self.entries.ptr.add(idx)) };
+
+        if idx != last {
+            // Move last into idx (swap_remove)
+            unsafe {
+                let last_val = std::ptr::read(self.entries.ptr.add(last));
+                std::ptr::write(self.entries.ptr.add(idx), last_val);
+            }
+
+            // Update index for the moved entry (last -> idx)
+            if !self.index.ptr.is_null() {
+                let h_last = unsafe {
+                    let kv = &*self.entries.ptr.add(idx);
+                    hash_str(kv.key.as_str())
+                };
+                let cap = self.index.len;
+                let mask = cap - 1;
+                let mut pos = (h_last as usize) & mask;
+
+                for _ in 0..cap {
+                    let slot = unsafe { &mut *self.index.ptr.add(pos) };
+                    if slot.state == 1 && slot.entry_idx == last as u32 {
+                        slot.entry_idx = idx as u32;
+                        break;
+                    }
+                    pos = (pos + 1) & mask;
+                }
+            }
         }
+
+        self.entries.len -= 1;
+
+        // Remove slot from index (mark as tombstone or rehash)
+        if !self.index.ptr.is_null() {
+            let h = hash_str(key);
+            let cap = self.index.len;
+            let mask = cap - 1;
+            let mut pos = (h as usize) & mask;
+
+            for _ in 0..cap {
+                let slot = unsafe { &mut *self.index.ptr.add(pos) };
+                match slot.state {
+                    0 => break,
+                    1 if slot.hash == h => {
+                        let entry_idx = slot.entry_idx as usize;
+                        if entry_idx == idx || (idx == last && entry_idx == last) {
+                            slot.state = 2; // tombstone
+                            self.used -= 1;
+                            self.tomb += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                pos = (pos + 1) & mask;
+            }
+
+            // Rehash if too many tombstones
+            if self.should_grow() {
+                self.rehash(self.index_len().max(16));
+            }
+        }
+
+        Some(removed)
     }
 
     pub fn len(&self) -> usize {
@@ -418,6 +696,11 @@ impl NrMap {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        if !self.index.ptr.is_null() {
+            self.index.clear();
+        }
+        self.used = 0;
+        self.tomb = 0;
     }
 }
 

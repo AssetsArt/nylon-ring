@@ -345,6 +345,9 @@ impl NrBytes {
     }
 
     pub fn as_slice(&self) -> &[u8] {
+        if self.ptr.is_null() {
+            return &[];
+        }
         unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) }
     }
 }

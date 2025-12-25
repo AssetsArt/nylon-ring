@@ -735,20 +735,26 @@ impl NrAny {
         }
     }
 
-    pub fn as_ptr<T>(&self) -> Option<*const T> {
+    pub fn as_ptr<T>(&self) -> Result<*const T, NrStatus> {
         if self.data.is_null() {
-            None
-        } else {
-            Some(self.data as *const T)
+            return Err(NrStatus::Invalid);
         }
+        let expected_size = std::mem::size_of::<T>() as u64;
+        if self.size != expected_size {
+            return Err(NrStatus::Err);
+        }
+        Ok(self.data as *const T)
     }
 
-    pub fn as_mut_ptr<T>(&mut self) -> Option<*mut T> {
+    pub fn as_mut_ptr<T>(&mut self) -> Result<*mut T, NrStatus> {
         if self.data.is_null() {
-            None
-        } else {
-            Some(self.data as *mut T)
+            return Err(NrStatus::Invalid);
         }
+        let expected_size = std::mem::size_of::<T>() as u64;
+        if self.size != expected_size {
+            return Err(NrStatus::Err);
+        }
+        Ok(self.data as *mut T)
     }
 
     pub fn is_null(&self) -> bool {
@@ -1257,5 +1263,16 @@ mod tests {
         assert!(default_any.is_null());
         assert_eq!(default_any.type_tag(), 0);
         assert_eq!(default_any.size(), 0);
+
+        // Test null pointer error
+        assert_eq!(default_any.as_ptr::<i32>(), Err(NrStatus::Invalid));
+        let mut default_any_mut = NrAny::default();
+        assert_eq!(default_any_mut.as_mut_ptr::<i32>(), Err(NrStatus::Invalid));
+
+        // Test type mismatch error
+        let any_int = NrAny::new(42i32, 1);
+        assert_eq!(any_int.as_ptr::<u64>(), Err(NrStatus::Err)); // i32 size != u64 size
+        let mut any_int_mut = NrAny::new(42i32, 1);
+        assert_eq!(any_int_mut.as_mut_ptr::<u64>(), Err(NrStatus::Err));
     }
 }

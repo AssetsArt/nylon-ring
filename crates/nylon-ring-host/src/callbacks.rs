@@ -77,7 +77,27 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
         None => return, // Already consumed
     };
 
-    // Try normal lookup/removal from Sharded Map
+    // Optimization: Try to get stream sender with Read Lock first (99% case for streams)
+    if let Some(tx) = crate::context::get_pending_stream(ctx, sid) {
+        let _ = tx.send(StreamFrame {
+            status,
+            data: data_vec,
+        });
+
+        let is_finished = matches!(
+            status,
+            NrStatus::Err | NrStatus::Invalid | NrStatus::Unsupported | NrStatus::StreamEnd
+        );
+
+        if is_finished {
+            // Only remove if finished (Upgrade to Write Lock)
+            crate::context::remove_pending(ctx, sid);
+        }
+        return;
+    }
+
+    // Fallback: Try normal lookup/removal from Sharded Map (Write Lock)
+    // This handles Unary requests (which are always removed)
     if let Some(entry) = crate::context::remove_pending(ctx, sid) {
         match entry {
             crate::types::Pending::Unary(tx) => {
@@ -85,6 +105,7 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
                 let _ = tx.send((status, data_vec));
             }
             crate::types::Pending::Stream(tx) => {
+                // Should technically be caught by optimization above, but handle race conditions or edge cases
                 // Stream: send frame
                 let _ = tx.send(StreamFrame {
                     status,

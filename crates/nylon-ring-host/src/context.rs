@@ -60,6 +60,19 @@ pub(crate) fn reinsert_pending(ctx: &HostContext, sid: u64, pending: Pending) {
     get_shard(ctx, sid).insert(sid, pending);
 }
 
+/// Get a pending stream sender without removing it (Read Lock).
+pub(crate) fn get_pending_stream(
+    ctx: &HostContext,
+    sid: u64,
+) -> Option<tokio::sync::mpsc::UnboundedSender<crate::types::StreamFrame>> {
+    if let Some(entry) = get_shard(ctx, sid).get(&sid) {
+        if let crate::types::Pending::Stream(tx) = entry.value() {
+            return Some(tx.clone());
+        }
+    }
+    None
+}
+
 // --- Thread Local Optimization for Unary Results ---
 thread_local! {
     pub(crate) static CURRENT_UNARY_RESULT: Cell<*mut UnaryResultSlot> = const { Cell::new(std::ptr::null_mut()) };

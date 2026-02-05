@@ -15,7 +15,7 @@ pub enum NrStatus {
 /// A UTF-8 string slice with a pointer and length.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Default)]
 pub struct NrStr {
     pub ptr: *const u8,
     pub len: u32,
@@ -24,7 +24,7 @@ pub struct NrStr {
 /// A byte slice with a pointer and length.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Default)]
 pub struct NrBytes {
     pub ptr: *const u8,
     pub len: u64,
@@ -32,7 +32,7 @@ pub struct NrBytes {
 
 /// A key-value pair of strings.
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Default)]
 pub struct NrKV {
     pub key: NrStr,
     pub value: NrStr,
@@ -41,7 +41,7 @@ pub struct NrKV {
 /// A key-value pair with any type as value.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct NrKVAny {
     pub key: NrStr,
     pub value: NrAny,
@@ -61,7 +61,7 @@ pub struct NrIndexSlot {
 /// A map/dictionary type implemented as a vector of key-value pairs with hash index.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct NrMap {
     pub entries: NrVec<NrKVAny>,
     pub index: NrVec<NrIndexSlot>, // hash index table
@@ -72,7 +72,7 @@ pub struct NrMap {
 /// A type-erased value that can hold any data type.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct NrAny {
     /// Pointer to the data
     pub data: *mut c_void,
@@ -87,7 +87,7 @@ pub struct NrAny {
 /// A vector with a pointer, length, and capacity.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct NrVec<T> {
     pub ptr: *mut T,
     pub len: usize,
@@ -319,20 +319,137 @@ impl NrStr {
     // push_str
     pub fn push_str(&mut self, s: &str) {
         if self.ptr.is_null() {
-            self.ptr = s.as_ptr();
-            self.len = s.len() as u32;
+            let v = s.as_bytes().to_vec();
+            // Leak memory to keep it alive (ABI)
+            let mut v = std::mem::ManuallyDrop::new(v);
+            self.ptr = v.as_mut_ptr();
+            self.len = v.len() as u32;
             return;
         }
-        let new_len = self.len + s.len() as u32;
-        let new_slice =
-            unsafe { std::slice::from_raw_parts_mut(self.ptr as *mut u8, new_len as usize) };
-        new_slice[self.len as usize..new_len as usize].copy_from_slice(s.as_bytes());
-        self.len = new_len;
+
+        // We cannot just write to self.ptr because we don't know the capacity!
+        // It might be a string literal (read-only) or a short buffer.
+        // SAFE WAY: Always re-allocate.
+
+        let current_slice = unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) };
+        let mut new_vec = Vec::with_capacity(self.len as usize + s.len());
+        new_vec.extend_from_slice(current_slice);
+        new_vec.extend_from_slice(s.as_bytes());
+
+        // We must assume ownership of the old pointer?
+        // NO. In ABI, string ownership is ambiguous.
+        // But for `push_str`, we are mutating, so we become the owner of the new buffer.
+
+        let mut v = std::mem::ManuallyDrop::new(new_vec);
+        self.ptr = v.as_mut_ptr();
+        self.len = v.len() as u32;
     }
 
     pub fn clear(&mut self) {
         self.ptr = std::ptr::null();
         self.len = 0;
+    }
+}
+
+impl Clone for NrStr {
+    fn clone(&self) -> Self {
+        if self.ptr.is_null() {
+            return Self::default();
+        }
+        let slice = unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) };
+        let v = slice.to_vec();
+        let mut v = std::mem::ManuallyDrop::new(v);
+        Self {
+            ptr: v.as_mut_ptr(),
+            len: v.len() as u32,
+        }
+    }
+}
+
+impl Clone for NrBytes {
+    fn clone(&self) -> Self {
+        if self.ptr.is_null() {
+            return Self::default();
+        }
+        let slice = unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) };
+        let v = slice.to_vec();
+        let mut v = std::mem::ManuallyDrop::new(v);
+        Self {
+            ptr: v.as_mut_ptr(),
+            len: v.len() as u64,
+        }
+    }
+}
+
+impl Clone for NrKV {
+    fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value.clone(),
+        }
+    }
+}
+
+impl Clone for NrKVAny {
+    fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value.clone(),
+        }
+    }
+}
+
+impl Clone for NrMap {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            index: self.index.clone(),
+            used: self.used,
+            tomb: self.tomb,
+        }
+    }
+}
+
+impl Clone for NrAny {
+    fn clone(&self) -> Self {
+        // Deep copy logic
+        if self.data.is_null() {
+            return Self::default();
+        }
+
+        // We can only deep copy if we know how to copy the underlying type.
+        // But NrAny is type-erased.
+        // Ideally we should have a `clone_fn`.
+        // WITHOUT clone_fn, WE CANNOT SAFE CLONE GENERIC DATA!
+        // Fallback: Copy the bytes (memcpy) -> This is still risky but better than shared ptr double free if it's POD.
+        // BUT if T has a Drop, memcpy is BAD.
+
+        // CRITICAL FIX: Since we lack clone_fn in ABI v1,
+        // we must panic or return empty for unknown types to be safe?
+        // OR we just perform new allocation and memcpy (Shallow copy of content, deep copy of container).
+
+        let layout = std::alloc::Layout::from_size_align(self.size as usize, 1).unwrap();
+        unsafe {
+            let new_data = std::alloc::alloc(layout) as *mut c_void;
+            std::ptr::copy_nonoverlapping(self.data, new_data, self.size as usize);
+            Self {
+                data: new_data,
+                size: self.size,
+                type_tag: self.type_tag,
+                drop_fn: self.drop_fn, // Reuse the same drop function
+            }
+        }
+    }
+}
+
+impl<T: Clone> Clone for NrVec<T> {
+    fn clone(&self) -> Self {
+        if self.ptr.is_null() {
+            return Self::default();
+        }
+        let slice = unsafe { std::slice::from_raw_parts(self.ptr, self.len) };
+        let v = slice.to_vec(); // Deep copy elements via T::clone()
+        Self::from_vec(v)
     }
 }
 

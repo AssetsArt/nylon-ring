@@ -18,6 +18,9 @@ pub enum NylonRingHostError {
     #[error("incompatible ABI version: expected {expected}, got {actual}")]
     IncompatibleAbiVersion { expected: u32, actual: u32 },
 
+    #[error("incompatible NrPluginInfo struct size: host expected {expected}, plugin reported {actual}")]
+    IncompatibleStructSize { expected: u32, actual: u32 },
+
     #[error("plugin vtable is null")]
     NullPluginVTable,
 
@@ -35,4 +38,7 @@ pub enum NylonRingHostError {
 
     #[error("oneshot channel closed")]
     OneshotClosed,
+
+    #[error("plugin call timed out")]
+    Timeout,
 }

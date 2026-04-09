@@ -302,6 +302,16 @@ pub struct NrPluginInfo {
 }
 
 impl NrStr {
+    /// Create a borrowed `NrStr` view over an existing `&str`.
+    ///
+    /// # Ownership
+    ///
+    /// The returned value **does not own** the bytes — it is a non-owning
+    /// view, equivalent to `&str`. The caller must ensure the source string
+    /// outlives the `NrStr`. Do **not** call [`NrStr::push_str`] on a borrowed
+    /// view that points into a string literal or borrowed buffer; doing so
+    /// will replace the pointer with a freshly allocated, leaked buffer (see
+    /// `push_str` docs) but the original borrow is *not* freed.
     pub fn new(s: &str) -> Self {
         Self {
             ptr: s.as_ptr(),
@@ -316,7 +326,29 @@ impl NrStr {
         }
     }
 
-    // push_str
+    /// Append `s` to this string by reallocating into a fresh leaked buffer.
+    ///
+    /// # Ownership semantics (ABI)
+    ///
+    /// `NrStr` carries no ownership flag, so this method takes the
+    /// conservative path: it always allocates a *new* buffer, copies the old
+    /// contents plus `s` into it, and replaces `self.ptr`/`self.len` to point
+    /// at the new buffer wrapped in `ManuallyDrop` (i.e. leaked from Rust's
+    /// perspective).
+    ///
+    /// **The previous pointer is not freed**, because the host has no way of
+    /// knowing whether it was a borrowed string literal, a slice owned by a
+    /// foreign allocator, or a previously-leaked buffer from this same
+    /// function. After this call:
+    ///
+    /// * Any prior copy of the old `(ptr, len)` is now stale — it still
+    ///   points at valid memory, but `self` no longer references it.
+    /// * The new buffer is owned by *no one* and will leak unless reclaimed
+    ///   by an explicit free path on the same allocator that produced it
+    ///   (currently the global allocator on the host side).
+    ///
+    /// Treat `NrStr` as immutable across the FFI boundary whenever possible
+    /// and prefer constructing fresh values instead of mutating in place.
     pub fn push_str(&mut self, s: &str) {
         if self.ptr.is_null() {
             let v = s.as_bytes().to_vec();
@@ -352,6 +384,13 @@ impl NrStr {
 }
 
 impl Clone for NrStr {
+    /// Deep-clones the underlying bytes into a fresh, leaked buffer.
+    ///
+    /// The clone owns a brand-new heap allocation (via `ManuallyDrop<Vec<u8>>`)
+    /// that is **independent** of the original — both the source and the
+    /// clone can be passed across the ABI without aliasing. Like
+    /// [`NrStr::push_str`], the resulting buffer is not tracked by Rust and
+    /// will leak unless reclaimed via an explicit allocator-matched free.
     fn clone(&self) -> Self {
         if self.ptr.is_null() {
             return Self::default();
@@ -411,32 +450,55 @@ impl Clone for NrMap {
 }
 
 impl Clone for NrAny {
+    /// Clone an `NrAny`.
+    ///
+    /// # Safety / ABI v1 limitation
+    ///
+    /// `NrAny` is type-erased and ABI v1 has no `clone_fn` in the struct.
+    /// Cloning a value that owns heap resources (i.e. has a `drop_fn`) by
+    /// memcpy would shallow-copy any inner pointers and cause a double-free
+    /// when both copies are dropped. Therefore:
+    ///
+    /// * Null payload  → returns `default()` (null).
+    /// * `drop_fn = None` (POD payload) → safe deep copy via byte memcpy.
+    /// * `drop_fn = Some(_)` → **panics**, because we cannot safely deep-copy
+    ///   without a type-aware `clone_fn`. Use `drop_fn = None` and a POD
+    ///   representation, or wait for ABI v2 which adds `clone_fn`.
     fn clone(&self) -> Self {
-        // Deep copy logic
         if self.data.is_null() {
             return Self::default();
         }
 
-        // We can only deep copy if we know how to copy the underlying type.
-        // But NrAny is type-erased.
-        // Ideally we should have a `clone_fn`.
-        // WITHOUT clone_fn, WE CANNOT SAFE CLONE GENERIC DATA!
-        // Fallback: Copy the bytes (memcpy) -> This is still risky but better than shared ptr double free if it's POD.
-        // BUT if T has a Drop, memcpy is BAD.
+        if self.drop_fn.is_some() {
+            panic!(
+                "NrAny::clone: cannot deep-clone a non-POD NrAny (drop_fn is set) \
+                 without a clone_fn. ABI v1 lacks clone_fn; either use a POD payload \
+                 (drop_fn = None) or avoid cloning."
+            );
+        }
 
-        // CRITICAL FIX: Since we lack clone_fn in ABI v1,
-        // we must panic or return empty for unknown types to be safe?
-        // OR we just perform new allocation and memcpy (Shallow copy of content, deep copy of container).
-
-        let layout = std::alloc::Layout::from_size_align(self.size as usize, 1).unwrap();
+        // Safe path: payload has no destructor → byte copy is sound.
+        let size = self.size as usize;
+        if size == 0 {
+            return Self {
+                data: std::ptr::null_mut(),
+                size: 0,
+                type_tag: self.type_tag,
+                drop_fn: None,
+            };
+        }
+        let layout = std::alloc::Layout::from_size_align(size, 1).unwrap();
         unsafe {
             let new_data = std::alloc::alloc(layout) as *mut c_void;
-            std::ptr::copy_nonoverlapping(self.data, new_data, self.size as usize);
+            if new_data.is_null() {
+                std::alloc::handle_alloc_error(layout);
+            }
+            std::ptr::copy_nonoverlapping(self.data, new_data, size);
             Self {
                 data: new_data,
                 size: self.size,
                 type_tag: self.type_tag,
-                drop_fn: self.drop_fn, // Reuse the same drop function
+                drop_fn: None,
             }
         }
     }

@@ -88,18 +88,77 @@ impl PluginHandle {
         rx.await.map_err(|_| NylonRingHostError::OneshotClosed)
     }
 
+    /// Like [`PluginHandle::call_response`] but bounded by a timeout.
+    ///
+    /// If the plugin does not deliver a response within `timeout`, the pending
+    /// entry is removed from the host's tracking map and `Err(Timeout)` is
+    /// returned. Use this for any production caller that cannot afford to
+    /// hang indefinitely on a misbehaving plugin.
+    pub async fn call_response_timeout(
+        &self,
+        entry: &str,
+        payload: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<(NrStatus, Vec<u8>)> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let sid = next_sid();
+
+        context::insert_pending(&self.plugin.host_ctx, sid, types::Pending::Unary(tx));
+
+        let payload_bytes = NrBytes::from_slice(payload);
+        let handle_raw_fn = match self.plugin.vtable.handle {
+            Some(f) => f,
+            None => {
+                context::remove_pending(&self.plugin.host_ctx, sid);
+                return Err(NylonRingHostError::MissingRequiredFunctions);
+            }
+        };
+
+        let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
+        if status != NrStatus::Ok {
+            context::remove_pending(&self.plugin.host_ctx, sid);
+            return Err(NylonRingHostError::PluginHandleFailed(status));
+        }
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(_)) => Err(NylonRingHostError::OneshotClosed),
+            Err(_) => {
+                // Drop the still-registered pending slot so a late callback
+                // does not write into a freed oneshot sender.
+                context::remove_pending(&self.plugin.host_ctx, sid);
+                Err(NylonRingHostError::Timeout)
+            }
+        }
+    }
+
     /// Ultra-fast unary call for synchronous plugins.
     pub async fn call_response_fast(
         &self,
         entry: &str,
         payload: &[u8],
     ) -> Result<(NrStatus, Vec<u8>)> {
-        // Use a "Fast SID" that bypasses the Map (High bit set)
-        let sid = next_sid();
+        // RAII guard: ensures the TLS slot pointer is cleared even if the
+        // plugin's `handle` callback panics across the FFI boundary. Without
+        // this, an unwind would leave a dangling pointer to a stack slot,
+        // and the next thread-local consumer could write into freed memory.
+        struct TlsSlotGuard;
+        impl Drop for TlsSlotGuard {
+            fn drop(&mut self) {
+                CURRENT_UNARY_RESULT.with(|cell| cell.set(std::ptr::null_mut()));
+            }
+        }
 
+        let handle_raw_fn = self
+            .plugin
+            .vtable
+            .handle
+            .ok_or(NylonRingHostError::MissingRequiredFunctions)?;
+
+        let sid = next_sid();
         let mut slot: types::UnaryResultSlot = None;
 
-        // bind TLS slot
+        // Bind TLS slot under the guard.
         CURRENT_UNARY_RESULT.with(|cell| {
             debug_assert!(
                 cell.get().is_null(),
@@ -107,22 +166,12 @@ impl PluginHandle {
             );
             cell.set(&mut slot as *mut _);
         });
+        let _guard = TlsSlotGuard;
 
         let payload_bytes = NrBytes::from_slice(payload);
-
-        let handle_raw_fn = match self.plugin.vtable.handle {
-            Some(f) => f,
-            None => {
-                CURRENT_UNARY_RESULT.with(|cell| cell.set(std::ptr::null_mut()));
-                return Err(NylonRingHostError::MissingRequiredFunctions);
-            }
-        };
-
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
-        // unbind TLS slot
-        CURRENT_UNARY_RESULT.with(|cell| cell.set(std::ptr::null_mut()));
-
+        // `_guard` clears the TLS slot here on drop, regardless of branch.
         if status != NrStatus::Ok {
             return Err(NylonRingHostError::PluginHandleFailed(status));
         }
@@ -258,6 +307,18 @@ impl NylonRingHost {
                 return Err(NylonRingHostError::IncompatibleAbiVersion {
                     expected: 1,
                     actual: info.abi_version,
+                });
+            }
+
+            // Validate the plugin's NrPluginInfo layout matches what the host
+            // was compiled against. A mismatch here means the plugin was built
+            // against a different version of the `nylon-ring` crate and any
+            // field access below would be undefined behaviour.
+            let expected_size = std::mem::size_of::<NrPluginInfo>() as u32;
+            if info.struct_size != expected_size {
+                return Err(NylonRingHostError::IncompatibleStructSize {
+                    expected: expected_size,
+                    actual: info.struct_size,
                 });
             }
 

@@ -2,18 +2,18 @@
 
 ## 🔴 Must-fix (UB / soundness)
 
-- [ ] **`NrAny::clone` memcpy ดิบ** (`crates/nylon-ring/src/lib.rs:412-441`) — ห้าม clone หรือเพิ่ม `clone_fn` ใน vtable (ABI v2). ปัจจุบันพังกับ type ที่มี heap (String/Vec).
-- [ ] **TLS slot aliasing ใน callback router** (`crates/nylon-ring-host/src/callbacks.rs:18-127`) — `CURRENT_UNARY_RESULT`/`CURRENT_UNARY_TX` เก็บ raw pointer ไป stack; ใส่ RAII drop guard เพื่อ clear slot บน unwind/early return.
-- [ ] **`NrVec::reserve` ใช้ global allocator** (`crates/nylon-ring/src/lib.rs:967-1033`) — เพิ่ม `owned` flag, ห้าม resize บน borrowed view, กัน free/realloc ข้าม allocator.
-- [ ] **`NrStr::push_str` / `Clone` ownership กำกวม** (`crates/nylon-ring/src/lib.rs:303-381`) — เขียน docstring ระบุชัดว่า pointer เก่าใช้ไม่ได้ + ใครเป็นเจ้าของบัฟเฟอร์ใหม่.
+- [x] **`NrAny::clone` memcpy ดิบ** (`crates/nylon-ring/src/lib.rs:412-441`) — panic ถ้ามี `drop_fn`, memcpy เฉพาะ POD; เพิ่ม `clone_fn` รอ ABI v2.
+- [x] **TLS slot aliasing ใน callback router** (`crates/nylon-ring-host/src/callbacks.rs:18-127`) — เพิ่ม RAII `TlsSlotGuard` ใน `call_response_fast` เคลียร์ slot บน unwind/early return.
+- [ ] **`NrVec::reserve` ใช้ global allocator** (`crates/nylon-ring/src/lib.rs:967-1033`) — เพิ่ม `owned` flag, ห้าม resize บน borrowed view, กัน free/realloc ข้าม allocator. *(ต้องตัดสินใจเรื่อง ABI bump)*
+- [x] **`NrStr::push_str` / `Clone` ownership กำกวม** (`crates/nylon-ring/src/lib.rs:303-381`) — เพิ่ม docstring ละเอียดเรื่อง ownership/leak/pointer invalidation.
 - [ ] **Plugin `unload()` / `reload()` ขณะมี in-flight call** (`crates/nylon-ring-host/src/lib.rs:297-324`) — เพิ่ม refcount + drain pending ก่อนปิด `.so`, ไม่งั้น UAF/null vtable.
 
 ## 🟠 Should-fix (concurrency / ABI)
 
 - [ ] **TOCTOU ระหว่าง `get_pending_stream` (read) → `remove_pending` (write)** (`crates/nylon-ring-host/src/context.rs:39-74`) — ใช้ DashMap `entry()` API หรือ re-check หลัง upgrade lock.
 - [ ] **Stream channel ไม่มี backpressure** (`crates/nylon-ring/src/lib.rs:157-184`) — เปลี่ยน `unbounded_channel` → `channel(N)` หรือ handle `TrySendError::Full`.
-- [ ] **ไม่มี timeout ใน `call_response` / `call_response_fast`** — oneshot อาจ hang ถาวรถ้า plugin หาย; เพิ่ม `call_response_timeout(dur)`.
-- [ ] **ไม่มีการตรวจ `struct_size` ของ `NrPluginInfo`** (`crates/nylon-ring/src/lib.rs:242-262`) — เช็คแค่ `compatible(1)`; เพิ่ม size check เพื่อกัน layout drift.
+- [x] **ไม่มี timeout ใน `call_response` / `call_response_fast`** — เพิ่ม `PluginHandle::call_response_timeout()` + `NylonRingHostError::Timeout`, drop pending slot บน timeout.
+- [x] **ไม่มีการตรวจ `struct_size` ของ `NrPluginInfo`** (`crates/nylon-ring-host/src/lib.rs`) — ตรวจ `info.struct_size == size_of::<NrPluginInfo>()` ใน `load()` + error variant `IncompatibleStructSize`.
 - [ ] **ล็อก `NrStatus` discriminant + เอกสาร padding ของ `NrStr`** (`crates/nylon-ring/src/lib.rs:14-21`) — กำหนด reserved range สำหรับ ABI v1 และระบุ 4B padding หลัง `len` ให้ภาษาอื่น.
 - [ ] **Stream re-insert race** (`crates/nylon-ring-host/src/callbacks.rs:115-122`) — ระบุ "single-writer per SID" หรือใช้ atomic state กัน double-close.
 

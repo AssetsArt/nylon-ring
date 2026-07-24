@@ -6,12 +6,83 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_DURATION_SECS: u64 = 10;
 const DEFAULT_BATCH_SIZE: usize = 100;
+const MAX_TRACKED_CPUS: usize = 64;
+const CPU_SAMPLE_BATCH_INTERVAL: u64 = 1_024;
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn pthread_cpu_number_np(cpu_number_out: *mut usize) -> std::ffi::c_int;
+}
+
+#[derive(Debug)]
+struct CpuSamples {
+    counts: [u64; MAX_TRACKED_CPUS],
+    untracked: u64,
+}
+
+impl Default for CpuSamples {
+    fn default() -> Self {
+        Self {
+            counts: [0; MAX_TRACKED_CPUS],
+            untracked: 0,
+        }
+    }
+}
+
+impl CpuSamples {
+    fn record_current(&mut self) {
+        let Some(cpu) = current_cpu() else {
+            self.untracked += 1;
+            return;
+        };
+        if let Some(count) = self.counts.get_mut(cpu) {
+            *count += 1;
+        } else {
+            self.untracked += 1;
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        for (count, other_count) in self.counts.iter_mut().zip(other.counts) {
+            *count += other_count;
+        }
+        self.untracked += other.untracked;
+    }
+
+    fn print(&self) {
+        let samples = self
+            .counts
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count != 0)
+            .map(|(cpu, count)| format!("CPU {cpu}: {count}"))
+            .collect::<Vec<_>>();
+        println!("  -> CPU placement samples: {}", samples.join(", "));
+        if self.untracked != 0 {
+            println!("  -> Untracked CPU samples: {}", self.untracked);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn current_cpu() -> Option<usize> {
+    let mut cpu = 0;
+    // SAFETY: `cpu` is a valid writable `usize` and the system function does
+    // not retain the pointer after returning.
+    (unsafe { pthread_cpu_number_np(&mut cpu) } == 0).then_some(cpu)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn current_cpu() -> Option<usize> {
+    None
+}
 
 #[derive(Debug, Copy, Clone)]
 pub struct BenchmarkConfig {
     pub workers: usize,
     duration_secs: u64,
     batch_size: usize,
+    sample_cpus: bool,
 }
 
 impl BenchmarkConfig {
@@ -24,7 +95,19 @@ impl BenchmarkConfig {
             workers: parse_positive_env("NYRING_BENCH_WORKERS", default_workers)?,
             duration_secs: parse_positive_env("NYRING_BENCH_SECONDS", DEFAULT_DURATION_SECS)?,
             batch_size: parse_positive_env("NYRING_BENCH_BATCH_SIZE", DEFAULT_BATCH_SIZE)?,
+            sample_cpus: parse_bool_env("NYRING_BENCH_CPU_SAMPLES")?,
         })
+    }
+}
+
+fn parse_bool_env(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(false);
+    };
+    match value.to_string_lossy().as_ref() {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => Err(format!("{name} must be one of: 0, 1, false, true").into()),
     }
 }
 
@@ -72,6 +155,8 @@ pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle, config: Benchma
             let start_time = Instant::now();
             let bench_duration = Duration::from_secs(config.duration_secs);
             let mut futures_batch = Vec::with_capacity(config.batch_size);
+            let mut cpu_samples = CpuSamples::default();
+            let mut completed_batches = 0;
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
@@ -83,7 +168,12 @@ pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle, config: Benchma
 
                 counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);
                 latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);
+                if config.sample_cpus && completed_batches % CPU_SAMPLE_BATCH_INTERVAL == 0 {
+                    cpu_samples.record_current();
+                }
+                completed_batches += 1;
             }
+            cpu_samples
         });
         handles.push(handle);
     }
@@ -94,8 +184,11 @@ pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle, config: Benchma
     let start_time = Instant::now();
     start_signal.notify_waiters();
 
+    let mut cpu_samples = CpuSamples::default();
     for h in handles {
-        let _ = h.await;
+        if let Ok(samples) = h.await {
+            cpu_samples.merge(samples);
+        }
     }
 
     let elapsed = start_time.elapsed();
@@ -108,6 +201,9 @@ pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle, config: Benchma
     println!("  -> Processed {} requests in {:.2?}", total, elapsed);
     println!("  -> RPS: {:.2}/sec", rps);
     println!("  -> Average latency: {:.2} ns/request", avg_latency_nanos);
+    if config.sample_cpus {
+        cpu_samples.print();
+    }
 }
 
 /// Run a request-response benchmark
@@ -139,6 +235,8 @@ pub async fn run_request_response_benchmark(plugin: PluginHandle, config: Benchm
             let start_time = Instant::now();
             let bench_duration = Duration::from_secs(config.duration_secs);
             let mut futures_batch = Vec::with_capacity(config.batch_size);
+            let mut cpu_samples = CpuSamples::default();
+            let mut completed_batches = 0;
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
@@ -150,7 +248,12 @@ pub async fn run_request_response_benchmark(plugin: PluginHandle, config: Benchm
 
                 counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);
                 latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);
+                if config.sample_cpus && completed_batches % CPU_SAMPLE_BATCH_INTERVAL == 0 {
+                    cpu_samples.record_current();
+                }
+                completed_batches += 1;
             }
+            cpu_samples
         });
         handles.push(handle);
     }
@@ -161,8 +264,11 @@ pub async fn run_request_response_benchmark(plugin: PluginHandle, config: Benchm
     let start_time = Instant::now();
     start_signal.notify_waiters();
 
+    let mut cpu_samples = CpuSamples::default();
     for h in handles {
-        let _ = h.await;
+        if let Ok(samples) = h.await {
+            cpu_samples.merge(samples);
+        }
     }
 
     let elapsed = start_time.elapsed();
@@ -175,6 +281,9 @@ pub async fn run_request_response_benchmark(plugin: PluginHandle, config: Benchm
     println!("  -> Processed {} requests in {:.2?}", total, elapsed);
     println!("  -> RPS: {:.2}/sec", rps);
     println!("  -> Average latency: {:.2} ns/request", avg_latency_nanos);
+    if config.sample_cpus {
+        cpu_samples.print();
+    }
 }
 
 /// Run a request-response fast benchmark
@@ -206,6 +315,8 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: B
             let start_time = Instant::now();
             let bench_duration = Duration::from_secs(config.duration_secs);
             let mut futures_batch = Vec::with_capacity(config.batch_size);
+            let mut cpu_samples = CpuSamples::default();
+            let mut completed_batches = 0;
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
@@ -217,7 +328,12 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: B
 
                 counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);
                 latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);
+                if config.sample_cpus && completed_batches % CPU_SAMPLE_BATCH_INTERVAL == 0 {
+                    cpu_samples.record_current();
+                }
+                completed_batches += 1;
             }
+            cpu_samples
         });
         handles.push(handle);
     }
@@ -228,8 +344,11 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: B
     let start_time = Instant::now();
     start_signal.notify_waiters();
 
+    let mut cpu_samples = CpuSamples::default();
     for h in handles {
-        let _ = h.await;
+        if let Ok(samples) = h.await {
+            cpu_samples.merge(samples);
+        }
     }
 
     let elapsed = start_time.elapsed();
@@ -242,4 +361,7 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: B
     println!("  -> Processed {} requests in {:.2?}", total, elapsed);
     println!("  -> RPS: {:.2}/sec", rps);
     println!("  -> Average latency: {:.2} ns/request", avg_latency_nanos);
+    if config.sample_cpus {
+        cpu_samples.print();
+    }
 }

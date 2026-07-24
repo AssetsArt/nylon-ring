@@ -8,7 +8,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -19,7 +19,7 @@ keywords = ["abi", "ffi", "plugin", "dynamic-loading", "hot-reload"]
 categories = ["api-bindings", "development-tools::ffi"]
 
 [workspace.dependencies]
-nylon-ring = { version = "0.1.1", path = "crates/nylon-ring" }
+nylon-ring = { version = "0.1.2", path = "crates/nylon-ring" }
 tokio = { version = "1.48", default-features = false, features = ["sync", "time"] }
 libloading = "0.9"
 thiserror = "2"

@@ -131,9 +131,6 @@ cargo build --release --package ex-nyring-host --package ex-nyring-plugin
 NYRING_BENCH_WORKERS=10 ./target/release/ex-nyring-host
 ```
 
-See the [performance investigation](docs/PERFORMANCE_INVESTIGATION.md) for the
-scaling curve, variance, profiler evidence, and ABI-v2 proposals.
-
 ---
 
 ## 🏗 System overview
@@ -171,8 +168,6 @@ new calls and waits for existing calls to drain.
   cross-allocator frees.
 - Plugins must stop worker threads and callbacks during shutdown.
 - Only load trusted native libraries; this is not a security sandbox.
-
-See the full [ABI evolution and compatibility policy](https://github.com/AssetsArt/nylon-ring/blob/main/docs/ABI_EVOLUTION.md).
 
 ---
 

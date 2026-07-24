@@ -4,31 +4,62 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-// Benchmark configuration
-const DURATION_SECS: u64 = 10;
-const BATCH_SIZE: usize = 100;
+const DEFAULT_DURATION_SECS: u64 = 10;
+const DEFAULT_BATCH_SIZE: usize = 100;
+
+#[derive(Debug, Copy, Clone)]
+pub struct BenchmarkConfig {
+    pub workers: usize,
+    duration_secs: u64,
+    batch_size: usize,
+}
+
+impl BenchmarkConfig {
+    pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
+        let default_workers = std::thread::available_parallelism()
+            .map(|workers| workers.get())
+            .unwrap_or(8);
+
+        Ok(Self {
+            workers: parse_positive_env("NYRING_BENCH_WORKERS", default_workers)?,
+            duration_secs: parse_positive_env("NYRING_BENCH_SECONDS", DEFAULT_DURATION_SECS)?,
+            batch_size: parse_positive_env("NYRING_BENCH_BATCH_SIZE", DEFAULT_BATCH_SIZE)?,
+        })
+    }
+}
+
+fn parse_positive_env<T>(name: &str, default: T) -> Result<T, Box<dyn std::error::Error>>
+where
+    T: std::str::FromStr + PartialEq + Default,
+    T::Err: std::error::Error + 'static,
+{
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(default);
+    };
+    let value = value.to_string_lossy().parse::<T>()?;
+    if value == T::default() {
+        return Err(format!("{name} must be greater than zero").into());
+    }
+    Ok(value)
+}
 
 /// Run a fire-and-forget benchmark (calls without waiting for response)
-pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle) {
+pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle, config: BenchmarkConfig) {
     println!("\n--- Benchmark: Fire-and-Forget ---");
 
-    let concurrency = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(8);
-
-    let mut handles = Vec::with_capacity(concurrency);
+    let mut handles = Vec::with_capacity(config.workers);
     let total_requests = Arc::new(AtomicU64::new(0));
     let total_latency_nanos = Arc::new(AtomicU64::new(0));
     let start_signal = Arc::new(tokio::sync::Notify::new());
 
-    println!("  -> Using {} threads", concurrency);
-    println!("  -> Using {} requests per batch", BATCH_SIZE);
-    println!("  -> Using {} seconds for benchmark", DURATION_SECS);
+    println!("  -> Using {} threads", config.workers);
+    println!("  -> Using {} requests per batch", config.batch_size);
+    println!("  -> Using {} seconds for benchmark", config.duration_secs);
 
     let payload: &'static [u8] = b"";
     println!("  -> Payload Size: {}", payload.len());
 
-    for _ in 0..concurrency {
+    for _ in 0..config.workers {
         let plugin = plugin.clone();
         let counter = total_requests.clone();
         let latency_counter = total_latency_nanos.clone();
@@ -39,18 +70,18 @@ pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle) {
             start_signal.notified().await;
 
             let start_time = Instant::now();
-            let bench_duration = Duration::from_secs(DURATION_SECS);
-            let mut futures_batch = Vec::with_capacity(BATCH_SIZE);
+            let bench_duration = Duration::from_secs(config.duration_secs);
+            let mut futures_batch = Vec::with_capacity(config.batch_size);
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
-                for _ in 0..BATCH_SIZE {
+                for _ in 0..config.batch_size {
                     futures_batch.push(plugin.call("benchmark_without_response", payload));
                 }
                 let _ = join_all(futures_batch.drain(..)).await;
                 let batch_elapsed = batch_start.elapsed();
 
-                counter.fetch_add(BATCH_SIZE as u64, Ordering::Relaxed);
+                counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);
                 latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);
             }
         });
@@ -80,26 +111,22 @@ pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle) {
 }
 
 /// Run a request-response benchmark
-pub async fn run_request_response_benchmark(plugin: PluginHandle) {
+pub async fn run_request_response_benchmark(plugin: PluginHandle, config: BenchmarkConfig) {
     println!("\n--- Benchmark: Request-Response ---");
 
-    let concurrency = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(8);
-
-    let mut handles = Vec::with_capacity(concurrency);
+    let mut handles = Vec::with_capacity(config.workers);
     let total_requests = Arc::new(AtomicU64::new(0));
     let total_latency_nanos = Arc::new(AtomicU64::new(0));
     let start_signal = Arc::new(tokio::sync::Notify::new());
 
-    println!("  -> Using {} threads", concurrency);
-    println!("  -> Using {} requests per batch", BATCH_SIZE);
-    println!("  -> Using {} seconds for benchmark", DURATION_SECS);
+    println!("  -> Using {} threads", config.workers);
+    println!("  -> Using {} requests per batch", config.batch_size);
+    println!("  -> Using {} seconds for benchmark", config.duration_secs);
 
     let payload: &'static [u8] = b"";
     println!("  -> Payload Size: {}", payload.len());
 
-    for _ in 0..concurrency {
+    for _ in 0..config.workers {
         let plugin = plugin.clone();
         let counter = total_requests.clone();
         let latency_counter = total_latency_nanos.clone();
@@ -110,18 +137,18 @@ pub async fn run_request_response_benchmark(plugin: PluginHandle) {
             start_signal.notified().await;
 
             let start_time = Instant::now();
-            let bench_duration = Duration::from_secs(DURATION_SECS);
-            let mut futures_batch = Vec::with_capacity(BATCH_SIZE);
+            let bench_duration = Duration::from_secs(config.duration_secs);
+            let mut futures_batch = Vec::with_capacity(config.batch_size);
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
-                for _ in 0..BATCH_SIZE {
+                for _ in 0..config.batch_size {
                     futures_batch.push(plugin.call_response("benchmark", payload));
                 }
                 let _ = join_all(futures_batch.drain(..)).await;
                 let batch_elapsed = batch_start.elapsed();
 
-                counter.fetch_add(BATCH_SIZE as u64, Ordering::Relaxed);
+                counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);
                 latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);
             }
         });
@@ -151,26 +178,22 @@ pub async fn run_request_response_benchmark(plugin: PluginHandle) {
 }
 
 /// Run a request-response fast benchmark
-pub async fn run_request_response_fast_benchmark(plugin: PluginHandle) {
+pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: BenchmarkConfig) {
     println!("\n--- Benchmark: Request-Response Fast ---");
 
-    let concurrency = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(8);
-
-    let mut handles = Vec::with_capacity(concurrency);
+    let mut handles = Vec::with_capacity(config.workers);
     let total_requests = Arc::new(AtomicU64::new(0));
     let total_latency_nanos = Arc::new(AtomicU64::new(0));
     let start_signal = Arc::new(tokio::sync::Notify::new());
 
-    println!("  -> Using {} threads", concurrency);
-    println!("  -> Using {} requests per batch", BATCH_SIZE);
-    println!("  -> Using {} seconds for benchmark", DURATION_SECS);
+    println!("  -> Using {} threads", config.workers);
+    println!("  -> Using {} requests per batch", config.batch_size);
+    println!("  -> Using {} seconds for benchmark", config.duration_secs);
 
     let payload: &'static [u8] = b"";
     println!("  -> Payload Size: {}", payload.len());
 
-    for _ in 0..concurrency {
+    for _ in 0..config.workers {
         let plugin = plugin.clone();
         let counter = total_requests.clone();
         let latency_counter = total_latency_nanos.clone();
@@ -181,18 +204,18 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle) {
             start_signal.notified().await;
 
             let start_time = Instant::now();
-            let bench_duration = Duration::from_secs(DURATION_SECS);
-            let mut futures_batch = Vec::with_capacity(BATCH_SIZE);
+            let bench_duration = Duration::from_secs(config.duration_secs);
+            let mut futures_batch = Vec::with_capacity(config.batch_size);
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
-                for _ in 0..BATCH_SIZE {
+                for _ in 0..config.batch_size {
                     futures_batch.push(plugin.call_response_fast("benchmark", payload));
                 }
                 let _ = join_all(futures_batch.drain(..)).await;
                 let batch_elapsed = batch_start.elapsed();
 
-                counter.fetch_add(BATCH_SIZE as u64, Ordering::Relaxed);
+                counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);
                 latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);
             }
         });

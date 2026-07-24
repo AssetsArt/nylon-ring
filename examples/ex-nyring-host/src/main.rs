@@ -2,8 +2,18 @@ mod benchmark;
 
 use nylon_ring_host::NylonRingHost;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let benchmark_config = benchmark::BenchmarkConfig::from_env()?;
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(benchmark_config.workers)
+        .enable_all()
+        .build()?
+        .block_on(run(benchmark_config))
+}
+
+async fn run(
+    benchmark_config: benchmark::BenchmarkConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Nylon Ring Demo ===\n");
 
     // Build the plugin first
@@ -142,13 +152,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  10 calls completed in {:?}\n", now.elapsed());
 
     // Fire-and-Forget Benchmark
-    benchmark::run_fire_and_forget_benchmark(plugin.clone()).await;
+    benchmark::run_fire_and_forget_benchmark(plugin.clone(), benchmark_config).await;
 
     // Request-Response Fast Benchmark
-    benchmark::run_request_response_fast_benchmark(plugin.clone()).await;
+    benchmark::run_request_response_fast_benchmark(plugin.clone(), benchmark_config).await;
 
     // Request-Response Benchmark
-    benchmark::run_request_response_benchmark(plugin.clone()).await;
+    benchmark::run_request_response_benchmark(plugin.clone(), benchmark_config).await;
 
     println!("\n=== Demo Complete ===");
     println!("\nExecution Path Summary:");

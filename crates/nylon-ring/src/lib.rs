@@ -342,18 +342,19 @@ macro_rules! define_plugin {
             payload: $crate::NrBytes,
         ) -> $crate::NrStatus {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let entry_str = match unsafe { entry.as_str() } {
+                // Entry names are matched byte-wise: a non-UTF-8 entry cannot
+                // equal any literal, so it still falls through to Invalid
+                // without paying for per-call UTF-8 validation.
+                let entry_bytes = match unsafe { entry.as_bytes() } {
                     Ok(entry) => entry,
                     Err(_) => return $crate::NrStatus::Invalid,
                 };
-                match entry_str {
-                    $(
-                        $entry_name => unsafe {
-                            $handler_fn(sid, payload)
-                        }
-                    )*
-                    _ => $crate::NrStatus::Invalid,
-                }
+                $(
+                    if entry_bytes == $entry_name.as_bytes() {
+                        return unsafe { $handler_fn(sid, payload) };
+                    }
+                )*
+                $crate::NrStatus::Invalid
             }))
             .unwrap_or($crate::NrStatus::Panic)
         }
@@ -440,6 +441,17 @@ impl NrStr {
     pub unsafe fn as_str<'a>(&self) -> Result<&'a str, NrViewError> {
         let bytes = unsafe { view_bytes(self.ptr, u64::from(self.len))? };
         std::str::from_utf8(bytes).map_err(NrViewError::InvalidUtf8)
+    }
+
+    /// Reads this ABI view's raw bytes without validating UTF-8.
+    ///
+    /// # Safety
+    ///
+    /// For a non-empty view, `ptr` must be valid for reads of `len` bytes for
+    /// the lifetime of the returned reference. The pointed-to memory must not
+    /// be mutated while that reference exists.
+    pub unsafe fn as_bytes<'a>(&self) -> Result<&'a [u8], NrViewError> {
+        unsafe { view_bytes(self.ptr, u64::from(self.len)) }
     }
 
     /// Returns whether this view contains no bytes.

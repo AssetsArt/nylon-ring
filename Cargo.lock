@@ -382,7 +382,6 @@ dependencies = [
 name = "nylon-ring-host"
 version = "0.1.2"
 dependencies = [
- "criterion",
  "dashmap",
  "libloading",
  "loom",

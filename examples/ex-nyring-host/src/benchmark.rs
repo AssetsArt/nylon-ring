@@ -82,6 +82,7 @@ pub struct BenchmarkConfig {
     duration_secs: u64,
     batch_size: usize,
     sample_cpus: bool,
+    payload_bytes: usize,
     operation: BenchmarkOperation,
 }
 
@@ -91,6 +92,7 @@ enum BenchmarkOperation {
     FireAndForget,
     Fast,
     Unary,
+    Stream,
 }
 
 impl BenchmarkConfig {
@@ -104,8 +106,13 @@ impl BenchmarkConfig {
             duration_secs: parse_positive_env("NYRING_BENCH_SECONDS", DEFAULT_DURATION_SECS)?,
             batch_size: parse_positive_env("NYRING_BENCH_BATCH_SIZE", DEFAULT_BATCH_SIZE)?,
             sample_cpus: parse_bool_env("NYRING_BENCH_CPU_SAMPLES")?,
+            payload_bytes: parse_payload_env()?,
             operation: parse_operation_env()?,
         })
+    }
+
+    fn payload(self) -> Vec<u8> {
+        vec![42u8; self.payload_bytes]
     }
 
     pub fn runs_fire_and_forget(self) -> bool {
@@ -128,6 +135,13 @@ impl BenchmarkConfig {
             BenchmarkOperation::All | BenchmarkOperation::Unary
         )
     }
+
+    pub fn runs_stream(self) -> bool {
+        matches!(
+            self.operation,
+            BenchmarkOperation::All | BenchmarkOperation::Stream
+        )
+    }
 }
 
 fn parse_operation_env() -> Result<BenchmarkOperation, Box<dyn std::error::Error>> {
@@ -139,8 +153,17 @@ fn parse_operation_env() -> Result<BenchmarkOperation, Box<dyn std::error::Error
         "fire" => Ok(BenchmarkOperation::FireAndForget),
         "fast" => Ok(BenchmarkOperation::Fast),
         "unary" => Ok(BenchmarkOperation::Unary),
-        _ => Err("NYRING_BENCH_OPERATION must be one of: all, fire, fast, unary".into()),
+        "stream" => Ok(BenchmarkOperation::Stream),
+        _ => Err("NYRING_BENCH_OPERATION must be one of: all, fire, fast, unary, stream".into()),
     }
+}
+
+/// Payload size in bytes; zero is a valid (and the default) size.
+fn parse_payload_env() -> Result<usize, Box<dyn std::error::Error>> {
+    let Some(value) = std::env::var_os("NYRING_BENCH_PAYLOAD_BYTES") else {
+        return Ok(0);
+    };
+    Ok(value.to_string_lossy().parse::<usize>()?)
 }
 
 fn parse_bool_env(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
@@ -182,11 +205,12 @@ pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle, config: Benchma
     println!("  -> Using {} requests per batch", config.batch_size);
     println!("  -> Using {} seconds for benchmark", config.duration_secs);
 
-    let payload: &'static [u8] = b"";
+    let payload = config.payload();
     println!("  -> Payload Size: {}", payload.len());
 
     for _ in 0..config.workers {
         let plugin = plugin.clone();
+        let payload = payload.clone();
         let counter = total_requests.clone();
         let latency_counter = total_latency_nanos.clone();
         let start_signal = start_signal.clone();
@@ -209,7 +233,7 @@ pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle, config: Benchma
                 // to exactly one, and every counted call must have succeeded.
                 for _ in 0..config.batch_size {
                     let status = plugin
-                        .call("benchmark_without_response", payload)
+                        .call("benchmark_without_response", &payload)
                         .await
                         .expect("benchmarked call failed");
                     assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
@@ -269,11 +293,12 @@ pub async fn run_request_response_benchmark(plugin: PluginHandle, config: Benchm
     println!("  -> Using {} requests per batch", config.batch_size);
     println!("  -> Using {} seconds for benchmark", config.duration_secs);
 
-    let payload: &'static [u8] = b"";
+    let payload = config.payload();
     println!("  -> Payload Size: {}", payload.len());
 
     for _ in 0..config.workers {
         let plugin = plugin.clone();
+        let payload = payload.clone();
         let counter = total_requests.clone();
         let latency_counter = total_latency_nanos.clone();
         let start_signal = start_signal.clone();
@@ -292,7 +317,7 @@ pub async fn run_request_response_benchmark(plugin: PluginHandle, config: Benchm
                 // Await each call directly; see run_fire_and_forget_benchmark.
                 for _ in 0..config.batch_size {
                     let (status, _data) = plugin
-                        .call_response("benchmark", payload)
+                        .call_response("benchmark", &payload)
                         .await
                         .expect("benchmarked call failed");
                     assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
@@ -352,11 +377,12 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: B
     println!("  -> Using {} requests per batch", config.batch_size);
     println!("  -> Using {} seconds for benchmark", config.duration_secs);
 
-    let payload: &'static [u8] = b"";
+    let payload = config.payload();
     println!("  -> Payload Size: {}", payload.len());
 
     for _ in 0..config.workers {
         let plugin = plugin.clone();
+        let payload = payload.clone();
         let counter = total_requests.clone();
         let latency_counter = total_latency_nanos.clone();
         let start_signal = start_signal.clone();
@@ -375,7 +401,7 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: B
                 // Await each call directly; see run_fire_and_forget_benchmark.
                 for _ in 0..config.batch_size {
                     let (status, _data) = plugin
-                        .call_response_fast("benchmark", payload)
+                        .call_response_fast("benchmark", &payload)
                         .await
                         .expect("benchmarked call failed");
                     assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
@@ -417,6 +443,105 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: B
     println!("  -> Processed {} requests in {:.2?}", total, elapsed);
     println!("  -> RPS: {:.2}/sec", rps);
     println!("  -> Average latency: {:.2} ns/request", avg_latency_nanos);
+    if config.sample_cpus {
+        cpu_samples.print();
+    }
+}
+
+/// Run a streaming benchmark: each iteration is one full stream round trip
+/// of 8 empty data frames plus StreamEnd from the `benchmark_stream` entry.
+/// Throughput is reported in frames per second (9 frames per stream).
+pub async fn run_stream_benchmark(plugin: PluginHandle, config: BenchmarkConfig) {
+    const FRAMES_PER_STREAM: u64 = 9;
+
+    println!("\n--- Benchmark: Streaming ---");
+
+    let mut handles = Vec::with_capacity(config.workers);
+    let total_frames = Arc::new(AtomicU64::new(0));
+    let total_latency_nanos = Arc::new(AtomicU64::new(0));
+    let start_signal = Arc::new(tokio::sync::Notify::new());
+
+    println!("  -> Using {} threads", config.workers);
+    println!("  -> Using {} streams per batch", config.batch_size);
+    println!("  -> Using {} seconds for benchmark", config.duration_secs);
+    println!("  -> Frames per stream: {}", FRAMES_PER_STREAM);
+
+    let payload = config.payload();
+    println!("  -> Payload Size: {}", payload.len());
+
+    for _ in 0..config.workers {
+        let plugin = plugin.clone();
+        let payload = payload.clone();
+        let counter = total_frames.clone();
+        let latency_counter = total_latency_nanos.clone();
+        let start_signal = start_signal.clone();
+
+        let handle = tokio::spawn(async move {
+            // Wait for signal
+            start_signal.notified().await;
+
+            let start_time = Instant::now();
+            let bench_duration = Duration::from_secs(config.duration_secs);
+            let mut cpu_samples = CpuSamples::default();
+            let mut completed_batches = 0;
+
+            while start_time.elapsed() < bench_duration {
+                let batch_start = Instant::now();
+                for _ in 0..config.batch_size {
+                    let (_sid, mut receiver) = plugin
+                        .call_stream("benchmark_stream", &payload)
+                        .await
+                        .expect("benchmarked stream failed to start");
+                    let mut frames = 0u64;
+                    while let Some(frame) = receiver.recv().await {
+                        assert!(
+                            frame.status == NrStatus::Ok || frame.status == NrStatus::StreamEnd,
+                            "benchmarked stream frame was not Ok/StreamEnd"
+                        );
+                        frames += 1;
+                    }
+                    assert_eq!(frames, FRAMES_PER_STREAM, "stream frame count mismatch");
+                }
+                let batch_elapsed = batch_start.elapsed();
+
+                counter.fetch_add(
+                    config.batch_size as u64 * FRAMES_PER_STREAM,
+                    Ordering::Relaxed,
+                );
+                latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);
+                if config.sample_cpus && completed_batches % CPU_SAMPLE_BATCH_INTERVAL == 0 {
+                    cpu_samples.record_current();
+                }
+                completed_batches += 1;
+            }
+            cpu_samples
+        });
+        handles.push(handle);
+    }
+
+    // Warmup / Sync time
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let start_time = Instant::now();
+    start_signal.notify_waiters();
+
+    let mut cpu_samples = CpuSamples::default();
+    for h in handles {
+        if let Ok(samples) = h.await {
+            cpu_samples.merge(samples);
+        }
+    }
+
+    let elapsed = start_time.elapsed();
+    let total = total_frames.load(Ordering::Relaxed);
+    let total_lat_nanos = total_latency_nanos.load(Ordering::Relaxed);
+
+    let fps = total as f64 / elapsed.as_secs_f64();
+    let avg_latency_nanos = total_lat_nanos.checked_div(total).unwrap_or(0);
+
+    println!("  -> Processed {} frames in {:.2?}", total, elapsed);
+    println!("  -> Frames/s: {:.2}/sec", fps);
+    println!("  -> Average latency: {:.2} ns/frame", avg_latency_nanos);
     if config.sample_cpus {
         cpu_samples.print();
     }

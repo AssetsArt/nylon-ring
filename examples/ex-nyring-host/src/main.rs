@@ -166,6 +166,11 @@ async fn run(
         benchmark::run_request_response_benchmark(plugin.clone(), benchmark_config).await;
     }
 
+    // Streaming Benchmark
+    if benchmark_config.runs_stream() {
+        benchmark::run_stream_benchmark(plugin.clone(), benchmark_config).await;
+    }
+
     println!("\n=== Demo Complete ===");
     println!("\nExecution Path Summary:");
     println!("  1. call_response_fast() → ULTRA-FAST DIRECT SLOT (TLS)");

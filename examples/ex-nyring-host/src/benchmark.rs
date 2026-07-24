@@ -452,7 +452,14 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: B
 /// of 8 empty data frames plus StreamEnd from the `benchmark_stream` entry.
 /// Throughput is reported in frames per second (9 frames per stream).
 pub async fn run_stream_benchmark(plugin: PluginHandle, config: BenchmarkConfig) {
-    const FRAMES_PER_STREAM: u64 = 9;
+    // Data frames per stream come from NYRING_BENCH_STREAM_FRAMES (default 8,
+    // must stay below the stream capacity of 64); the example plugin reads
+    // the same variable, so the expected count stays in sync. +1 for the
+    // terminal StreamEnd frame.
+    let frames_per_stream: u64 = 1 + std::env::var("NYRING_BENCH_STREAM_FRAMES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(8);
 
     println!("\n--- Benchmark: Streaming ---");
 
@@ -464,7 +471,7 @@ pub async fn run_stream_benchmark(plugin: PluginHandle, config: BenchmarkConfig)
     println!("  -> Using {} threads", config.workers);
     println!("  -> Using {} streams per batch", config.batch_size);
     println!("  -> Using {} seconds for benchmark", config.duration_secs);
-    println!("  -> Frames per stream: {}", FRAMES_PER_STREAM);
+    println!("  -> Frames per stream: {}", frames_per_stream);
 
     let payload = config.payload();
     println!("  -> Payload Size: {}", payload.len());
@@ -500,12 +507,12 @@ pub async fn run_stream_benchmark(plugin: PluginHandle, config: BenchmarkConfig)
                         );
                         frames += 1;
                     }
-                    assert_eq!(frames, FRAMES_PER_STREAM, "stream frame count mismatch");
+                    assert_eq!(frames, frames_per_stream, "stream frame count mismatch");
                 }
                 let batch_elapsed = batch_start.elapsed();
 
                 counter.fetch_add(
-                    config.batch_size as u64 * FRAMES_PER_STREAM,
+                    config.batch_size as u64 * frames_per_stream,
                     Ordering::Relaxed,
                 );
                 latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);

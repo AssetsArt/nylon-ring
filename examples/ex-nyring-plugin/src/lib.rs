@@ -113,8 +113,20 @@ unsafe fn handle_benchmark_without_response(_sid: u64, _payload: NrBytes) -> NrS
 }
 
 // Silent stream handler for benchmarks: 8 empty data frames + StreamEnd.
+/// Data frames per benchmark stream; the host-side harness reads the same
+/// environment variable so its frame-count assertion stays in sync.
+fn benchmark_stream_data_frames() -> u32 {
+    static FRAMES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *FRAMES.get_or_init(|| {
+        std::env::var("NYRING_BENCH_STREAM_FRAMES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(8)
+    })
+}
+
 unsafe fn handle_benchmark_stream(sid: u64, _payload: NrBytes) -> NrStatus {
-    for _ in 0..8 {
+    for _ in 0..benchmark_stream_data_frames() {
         let status = send_result(sid, NrStatus::Ok, NrVec::from_vec(Vec::new()));
         if status != NrStatus::Ok {
             return status;

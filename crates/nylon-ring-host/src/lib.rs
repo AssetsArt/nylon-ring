@@ -108,6 +108,54 @@ pub struct LoadedPlugin {
     call_tracker: CallTracker,
 }
 
+/// Plugins removed from a host while calls may still be in flight.
+///
+/// Owned call guards do not clone `Arc<LoadedPlugin>` (a per-stream RMW on
+/// one shared cache line capped multi-core streaming); they hold a raw
+/// pointer plus a tracker slot instead. That is sound only if the plugin
+/// allocation outlives every tracker slot, so an Arc leaving a host's map
+/// is never dropped directly: [`retire_plugin`] parks it here and the last
+/// `finish` observing the stopped tracker sweeps it out.
+static RETIRED_PLUGINS: std::sync::Mutex<Vec<Arc<LoadedPlugin>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Stop a plugin removed from a host's map and keep it alive until every
+/// tracked call has finished. Every code path where a host-map
+/// `Arc<LoadedPlugin>` leaves the map must go through here (a plain drop
+/// could free the plugin while a call guard still points at it).
+fn retire_plugin(plugin: Arc<LoadedPlugin>) {
+    plugin.stop_accepting_calls();
+    RETIRED_PLUGINS.lock().unwrap().push(plugin);
+    // The plugin may already be idle; free it now instead of waiting for
+    // an unrelated future sweep.
+    sweep_retired_plugins();
+}
+
+/// Drop every retired plugin whose tracked calls have drained.
+///
+/// Memory-ordering argument for "the last finisher always frees": `finish`
+/// is an AcqRel RMW and `stop` is an AcqRel RMW on the same shard counters,
+/// so for each shard either the finish precedes the stop (the stop/retire
+/// thread's sweep then reads the drained value) or it follows it (the
+/// finisher sees CLOSED and sweeps itself, happening-after all finishes the
+/// stop observed). Two concurrent last finishers on different shards are the
+/// store-buffering case; the SeqCst fence below pairs across sweeps so at
+/// least one of them observes every shard drained.
+fn sweep_retired_plugins() {
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    let drained: Vec<Arc<LoadedPlugin>> = {
+        let mut retired = RETIRED_PLUGINS.lock().unwrap();
+        let (drained, live) = std::mem::take(&mut *retired)
+            .into_iter()
+            .partition(|plugin| plugin.call_tracker.active_calls() == 0);
+        *retired = live;
+        drained
+    };
+    // Dropping may run the plugin's shutdown callback and unload the
+    // library; keep that outside the registry lock.
+    drop(drained);
+}
+
 impl LoadedPlugin {
     fn begin_call(&self) -> Result<BorrowedPluginCallGuard<'_>> {
         let shard = self
@@ -126,7 +174,7 @@ impl LoadedPlugin {
             .try_begin()
             .ok_or(NylonRingHostError::PluginUnloaded)?;
         Ok(PluginCallGuard {
-            plugin: self.clone(),
+            plugin: Arc::as_ptr(self),
             shard,
         })
     }
@@ -143,18 +191,47 @@ struct BorrowedPluginCallGuard<'a> {
 
 impl Drop for BorrowedPluginCallGuard<'_> {
     fn drop(&mut self) {
-        self.tracker.finish(self.shard);
+        if self.tracker.finish(self.shard) {
+            sweep_retired_plugins();
+        }
     }
 }
 
+/// Owned in-flight-call token, held by values that outlive their call
+/// (currently [`StreamReceiver`] via `call_stream`).
+///
+/// Holds a raw plugin pointer instead of an `Arc` clone: every stream
+/// cloning the same Arc made its refcount line the multi-core streaming
+/// bottleneck. Validity: the tracker slot held below is released only in
+/// this guard's `Drop`, and a `LoadedPlugin` is freed only when its host-map
+/// Arc has been retired through [`retire_plugin`] *and* its tracker has
+/// drained — so the pointee outlives the guard.
 pub(crate) struct PluginCallGuard {
-    plugin: Arc<LoadedPlugin>,
+    plugin: *const LoadedPlugin,
     shard: usize,
+}
+
+// SAFETY: the guard behaves like a `&LoadedPlugin` with liveness (see the
+// type docs); `LoadedPlugin` is Send + Sync (it is shared via Arc across
+// threads today).
+unsafe impl Send for PluginCallGuard {}
+unsafe impl Sync for PluginCallGuard {}
+
+impl PluginCallGuard {
+    pub(crate) fn plugin(&self) -> &LoadedPlugin {
+        // SAFETY: see the type documentation — the held tracker slot keeps
+        // the plugin allocation alive for the guard's lifetime.
+        unsafe { &*self.plugin }
+    }
 }
 
 impl Drop for PluginCallGuard {
     fn drop(&mut self) {
-        self.plugin.call_tracker.finish(self.shard);
+        // After this `finish` the plugin pointer must not be dereferenced:
+        // releasing the slot may allow a concurrent sweep to free it.
+        if self.plugin().call_tracker.finish(self.shard) {
+            sweep_retired_plugins();
+        }
     }
 }
 
@@ -384,6 +461,17 @@ impl Default for NylonRingHost {
     }
 }
 
+impl Drop for NylonRingHost {
+    fn drop(&mut self) {
+        // Call guards hold raw plugin pointers, so the map's Arcs must be
+        // retired — never dropped directly — even when the host itself goes
+        // away while streams are still in flight.
+        for (_, plugin) in self.plugins.drain() {
+            retire_plugin(plugin);
+        }
+    }
+}
+
 impl NylonRingHost {
     /// Create a new empty host.
     pub fn new() -> Self {
@@ -478,7 +566,7 @@ impl NylonRingHost {
             };
 
             if let Some(previous) = self.plugins.insert(name.to_string(), Arc::new(loaded)) {
-                previous.stop_accepting_calls();
+                retire_plugin(previous);
             }
             Ok(())
         }
@@ -490,7 +578,7 @@ impl NylonRingHost {
             .plugins
             .remove(name)
             .ok_or_else(|| NylonRingHostError::PluginNotFound(name.to_owned()))?;
-        plugin.stop_accepting_calls();
+        retire_plugin(plugin);
         Ok(())
     }
 
@@ -500,7 +588,9 @@ impl NylonRingHost {
             .plugins
             .remove(name)
             .ok_or_else(|| NylonRingHostError::PluginNotFound(name.to_owned()))?;
-        plugin.stop_accepting_calls();
+        // Retire before draining so the plugin stays registered for the
+        // final sweep even if the drain times out.
+        retire_plugin(plugin.clone());
         Self::wait_for_drain(&plugin, grace).await
     }
 
@@ -534,7 +624,7 @@ impl NylonRingHost {
             .plugins
             .drain()
             .map(|(name, plugin)| {
-                plugin.stop_accepting_calls();
+                retire_plugin(plugin.clone());
                 (name, plugin)
             })
             .collect();
@@ -672,6 +762,16 @@ mod tests {
         });
         let raw = std::task::RawWaker::new(Arc::into_raw(state).cast(), &REENTRANT_WAKER_VTABLE);
         unsafe { std::task::Waker::from_raw(raw) }
+    }
+
+    /// Tests that load a real plugin library share one dlopen'd image (and
+    /// therefore its process-global init state) — a concurrent test dropping
+    /// its `LoadedPlugin` runs `shutdown` under everyone else's feet. Any
+    /// test that loads a plugin must hold this lock. This was also the root
+    /// cause of the historical `unload_defers_...` flake.
+    fn plugin_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn example_plugin_path() -> Option<std::path::PathBuf> {
@@ -989,6 +1089,7 @@ mod tests {
 
     #[test]
     fn unload_defers_library_drop_and_rejects_new_calls_on_existing_handle() {
+        let _plugin_lock = plugin_test_lock();
         let Some(path) = example_plugin_path() else {
             return;
         };
@@ -1019,7 +1120,65 @@ mod tests {
     }
 
     #[test]
+    fn stream_receiver_outlives_unload_and_drains_frames() {
+        let _plugin_lock = plugin_test_lock();
+        let Some(path) = example_plugin_path() else {
+            return;
+        };
+        let mut host = NylonRingHost::new();
+        host.load("example", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("example").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let (_sid, mut receiver) = runtime
+            .block_on(handle.call_stream("benchmark_stream", b""))
+            .unwrap();
+        host.unload("example").unwrap();
+        drop(handle);
+
+        // The receiver's call guard must keep the retired plugin alive:
+        // draining all buffered frames exercises the guarded context path.
+        let frames = runtime.block_on(async {
+            let mut frames = 0u32;
+            while receiver.recv().await.is_some() {
+                frames += 1;
+            }
+            frames
+        });
+        assert_eq!(frames, 9);
+        drop(receiver);
+    }
+
+    #[test]
+    fn stream_receiver_outlives_host_drop() {
+        let _plugin_lock = plugin_test_lock();
+        let Some(path) = example_plugin_path() else {
+            return;
+        };
+        let mut host = NylonRingHost::new();
+        host.load("example", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("example").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let (_sid, mut receiver) = runtime
+            .block_on(handle.call_stream("benchmark_stream", b""))
+            .unwrap();
+        drop(host);
+        drop(handle);
+
+        let frames = runtime.block_on(async {
+            let mut frames = 0u32;
+            while receiver.recv().await.is_some() {
+                frames += 1;
+            }
+            frames
+        });
+        assert_eq!(frames, 9);
+    }
+
+    #[test]
     fn example_plugin_fire_and_forget_entry_returns_ok() {
+        let _plugin_lock = plugin_test_lock();
         let Some(path) = example_plugin_path() else {
             return;
         };
@@ -1036,6 +1195,7 @@ mod tests {
 
     #[test]
     fn c_plugin_layout_round_trips_through_host() {
+        let _plugin_lock = plugin_test_lock();
         let Some(path) = c_plugin_path() else {
             return;
         };

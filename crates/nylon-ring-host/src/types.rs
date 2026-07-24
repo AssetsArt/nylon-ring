@@ -74,7 +74,7 @@ impl StreamReceiver {
 
     fn host_ctx(&self) -> &HostContext {
         match (&self.call_guard, &self.host_ctx) {
-            (Some(guard), _) => &guard.plugin.host_ctx,
+            (Some(guard), _) => &guard.plugin().host_ctx,
             (None, Some(host_ctx)) => host_ctx,
             (None, None) => unreachable!("checked at construction"),
         }

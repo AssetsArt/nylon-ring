@@ -41,8 +41,19 @@ impl CallTracker {
             .map(|_| shard)
     }
 
-    pub(crate) fn finish(&self, shard: usize) {
-        self.counters[shard].0.fetch_sub(1, Ordering::Release);
+    /// Release a call slot. Returns `true` when the tracker had already been
+    /// stopped: the caller may have been the last in-flight call of a retired
+    /// plugin and must trigger a graveyard sweep. Release suffices (no
+    /// Acquire) because every sweep reads the shard counts inside the
+    /// graveyard mutex: each finisher's decrement is sequenced before its own
+    /// sweep's lock, so the mutex hand-off publishes it to every later
+    /// sweeper, and `stop`'s AcqRel RMW on the same counter covers the
+    /// decrement-before-stop case by coherence. Modeled in
+    /// `loom_retired_plugin_frees_exactly_once_across_finish_stop_races`.
+    #[must_use]
+    pub(crate) fn finish(&self, shard: usize) -> bool {
+        let previous = self.counters[shard].0.fetch_sub(1, Ordering::Release);
+        previous & CLOSED != 0
     }
 
     pub(crate) fn stop(&self) {
@@ -70,8 +81,8 @@ mod tests {
         let second = tracker.try_begin().unwrap();
         assert_eq!(tracker.active_calls(), 2);
 
-        tracker.finish(first);
-        tracker.finish(second);
+        assert!(!tracker.finish(first));
+        assert!(!tracker.finish(second));
         assert_eq!(tracker.active_calls(), 0);
 
         tracker.stop();

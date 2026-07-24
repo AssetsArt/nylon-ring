@@ -46,11 +46,11 @@ MSRV: Rust 1.88.
 ```toml
 # Plugin
 [dependencies]
-nylon-ring = "0.1.0"
+nylon-ring = "0.1.1"
 
 # Host
 [dependencies]
-nylon-ring-host = "0.1.0"
+nylon-ring-host = "0.1.1"
 ```
 
 Plugin crates must also build as a dynamic library:
@@ -149,7 +149,7 @@ cargo bench --package nylon-ring-host
 |   ├─ LoadedPlugin + in-flight call gate              |
 |   └─ HostContext                                     |
 |       ├─ thread-local synchronous slot               |
-|       ├─ sharded async request router                |
+|       ├─ sharded unary router + inline completion   |
 |       └─ bounded stream queues                       |
 +-------------------------+----------------------------+
                           | C ABI v1

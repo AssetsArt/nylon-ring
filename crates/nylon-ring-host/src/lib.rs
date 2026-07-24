@@ -798,6 +798,22 @@ mod tests {
     }
 
     #[test]
+    fn example_plugin_fire_and_forget_entry_returns_ok() {
+        let Some(path) = example_plugin_path() else {
+            return;
+        };
+        let mut host = NylonRingHost::new();
+        host.load("example", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("example").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        assert!(matches!(
+            runtime.block_on(handle.call("notify", b"fire and forget")),
+            Ok(NrStatus::Ok)
+        ));
+    }
+
+    #[test]
     fn c_plugin_layout_round_trips_through_host() {
         let Some(path) = c_plugin_path() else {
             return;

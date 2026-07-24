@@ -94,6 +94,19 @@ unsafe fn handle_benchmark(sid: u64, payload: NrBytes) -> NrStatus {
     send_result(sid, NrStatus::Ok, response)
 }
 
+// Fire-and-forget handler: consumes the payload without sending a response.
+unsafe fn handle_notify(_sid: u64, payload: NrBytes) -> NrStatus {
+    let data = match unsafe { payload.as_slice() } {
+        Ok(data) => data,
+        Err(_) => return NrStatus::Invalid,
+    };
+    println!(
+        "[Plugin] Notification received: {}",
+        String::from_utf8_lossy(data)
+    );
+    NrStatus::Ok
+}
+
 // benchmark - without response
 unsafe fn handle_benchmark_without_response(_sid: u64, _payload: NrBytes) -> NrStatus {
     NrStatus::Ok
@@ -107,6 +120,7 @@ define_plugin! {
         "echo" => handle_echo,
         "uppercase" => handle_uppercase,
         "stream" => handle_stream,
+        "notify" => handle_notify,
         "benchmark" => handle_benchmark,
         "benchmark_without_response" => handle_benchmark_without_response,
     }

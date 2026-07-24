@@ -85,19 +85,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Demo 3: call() ---");
     println!("  Path: FIRE-AND-FORGET (no response expected)");
     println!("  → Does not wait for plugin response");
-    println!("  → No pending request tracking (Zero Map overhead)");
+    println!("  → Does not insert into the pending-request map");
     let message = b"Fire and forget!";
     println!("  Sending: {}", String::from_utf8_lossy(message));
     let now = std::time::Instant::now();
-    let status = plugin.call("echo", message).await?;
+    let status = plugin.call("notify", message).await?;
     println!("  Call time: {:?}", now.elapsed());
     println!("  Status: {:?}\n", status);
 
     // Demo 4: call_stream() - Streaming responses
     println!("--- Demo 4: call_stream() ---");
-    println!("  Path: STREAMING with unbounded channel");
+    println!("  Path: STREAMING with bounded channel");
     println!("  → Uses Sharded DashMap to register stream channel");
-    println!("  → Multiple responses per request via mpsc::UnboundedSender");
+    println!("  → Reports NrStatus::Backpressure when the channel is full");
     let message = b"start";
     println!("  Sending: {}", String::from_utf8_lossy(message));
     let now = std::time::Instant::now();
@@ -154,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nExecution Path Summary:");
     println!("  1. call_response_fast() → ULTRA-FAST DIRECT SLOT (TLS)");
     println!("  2. call_response()      → STANDARD ASYNC (DashMap + Oneshot)");
-    println!("  3. call()               → FIRE-AND-FORGET (No Map)");
-    println!("  4. call_stream()        → STREAMING (mpsc + Map)");
+    println!("  3. call()               → FIRE-AND-FORGET (No pending entry)");
+    println!("  4. call_stream()        → STREAMING (bounded mpsc + Map)");
     Ok(())
 }

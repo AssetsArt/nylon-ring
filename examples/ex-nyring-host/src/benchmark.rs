@@ -1,4 +1,4 @@
-use nylon_ring_host::PluginHandle;
+use nylon_ring_host::{NrStatus, PluginHandle};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -205,8 +205,14 @@ pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle, config: Benchma
                 // Await each call directly: these plugin ops complete
                 // synchronously, so batching futures through join_all only
                 // added a large per-batch allocation to the measurement.
+                // Sequential awaits also pin the in-flight depth per worker
+                // to exactly one, and every counted call must have succeeded.
                 for _ in 0..config.batch_size {
-                    let _ = plugin.call("benchmark_without_response", payload).await;
+                    let status = plugin
+                        .call("benchmark_without_response", payload)
+                        .await
+                        .expect("benchmarked call failed");
+                    assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
                 }
                 let batch_elapsed = batch_start.elapsed();
 
@@ -285,7 +291,11 @@ pub async fn run_request_response_benchmark(plugin: PluginHandle, config: Benchm
                 let batch_start = Instant::now();
                 // Await each call directly; see run_fire_and_forget_benchmark.
                 for _ in 0..config.batch_size {
-                    let _ = plugin.call_response("benchmark", payload).await;
+                    let (status, _data) = plugin
+                        .call_response("benchmark", payload)
+                        .await
+                        .expect("benchmarked call failed");
+                    assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
                 }
                 let batch_elapsed = batch_start.elapsed();
 
@@ -364,7 +374,11 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: B
                 let batch_start = Instant::now();
                 // Await each call directly; see run_fire_and_forget_benchmark.
                 for _ in 0..config.batch_size {
-                    let _ = plugin.call_response_fast("benchmark", payload).await;
+                    let (status, _data) = plugin
+                        .call_response_fast("benchmark", payload)
+                        .await
+                        .expect("benchmarked call failed");
+                    assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
                 }
                 let batch_elapsed = batch_start.elapsed();
 

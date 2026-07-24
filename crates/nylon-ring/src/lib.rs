@@ -11,6 +11,10 @@ use std::fmt;
 /// ABI version implemented by this crate.
 pub const ABI_VERSION: u32 = 1;
 
+/// Second-generation ABI version, exported alongside v1 through the
+/// `nylon_ring_get_plugin_v2` symbol. See `docs/ABI_EVOLUTION.md`.
+pub const ABI_VERSION_V2: u32 = 2;
+
 /// Status code passed across the Nylon Ring ABI.
 ///
 /// This is a transparent integer wrapper rather than a Rust enum so an
@@ -241,6 +245,112 @@ pub struct NrHostVTable {
     ) -> NrStatus,
 }
 
+/// A callee-owned byte buffer handed across the v2 ABI without a copy.
+///
+/// Contract: the consumer calls `release` exactly once when it is done with
+/// the bytes (possibly from a different thread than the producer), and the
+/// producer keeps `ptr..ptr+len` valid and immutable until then. A `None`
+/// release means there is nothing to free (static or arena-backed data).
+#[repr(C)]
+#[derive(Debug)]
+pub struct NrOwnedBytesV2 {
+    pub ptr: *const u8,
+    pub len: u64,
+    pub owner_ctx: *mut c_void,
+    pub release: Option<unsafe extern "C" fn(owner_ctx: *mut c_void, ptr: *const u8, len: u64)>,
+}
+
+impl NrOwnedBytesV2 {
+    /// An empty payload with nothing to release.
+    pub const fn empty() -> Self {
+        Self {
+            ptr: std::ptr::null(),
+            len: 0,
+            owner_ctx: std::ptr::null_mut(),
+            release: None,
+        }
+    }
+
+    /// Borrows static data; no release callback is needed.
+    pub const fn from_static(bytes: &'static [u8]) -> Self {
+        Self {
+            ptr: bytes.as_ptr(),
+            len: bytes.len() as u64,
+            owner_ctx: std::ptr::null_mut(),
+            release: None,
+        }
+    }
+
+    /// Transfers ownership of a `Vec` allocation; the consumer's release
+    /// call frees it in the producer's allocator (capacity rides along in
+    /// `owner_ctx`, so this needs no extra allocation).
+    pub fn from_vec(vec: Vec<u8>) -> Self {
+        unsafe extern "C" fn release_vec(owner_ctx: *mut c_void, ptr: *const u8, len: u64) {
+            if !ptr.is_null() {
+                // SAFETY: reconstructs exactly the parts taken in from_vec.
+                drop(unsafe {
+                    Vec::from_raw_parts(ptr.cast_mut(), len as usize, owner_ctx as usize)
+                });
+            }
+        }
+        let mut vec = std::mem::ManuallyDrop::new(vec);
+        Self {
+            ptr: vec.as_mut_ptr(),
+            len: vec.len() as u64,
+            owner_ctx: vec.capacity() as *mut c_void,
+            release: Some(release_vec),
+        }
+    }
+}
+
+/// v2 host callback table. The v1 table is embedded first, so v2-aware
+/// plugin code can hand `&table.v1` to v1-style helpers unchanged.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct NrHostVTableV2 {
+    pub v1: NrHostVTable,
+    /// Delivers a response without a host-side copy; the host takes
+    /// ownership of the payload and calls its release exactly once.
+    pub send_result_owned: unsafe extern "C" fn(
+        host_ctx: *mut c_void,
+        sid: u64,
+        status: NrStatus,
+        payload: NrOwnedBytesV2,
+    ) -> NrStatus,
+}
+
+/// v2 plugin function table: identical to [`NrPluginVTable`] except `init`
+/// receives the v2 host vtable.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct NrPluginVTableV2 {
+    pub init: Option<
+        unsafe extern "C" fn(host_ctx: *mut c_void, host_vtable: *const NrHostVTableV2) -> NrStatus,
+    >,
+
+    pub handle: Option<unsafe extern "C" fn(entry: NrStr, sid: u64, payload: NrBytes) -> NrStatus>,
+
+    pub shutdown: Option<unsafe extern "C" fn()>,
+
+    pub stream_data: Option<unsafe extern "C" fn(sid: u64, data: NrBytes) -> NrStatus>,
+
+    pub stream_close: Option<unsafe extern "C" fn(sid: u64) -> NrStatus>,
+}
+
+/// Metadata exported by the plugin through `nylon_ring_get_plugin_v2`.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct NrPluginInfoV2 {
+    pub abi_version: u32,
+    pub struct_size: u32,
+
+    pub name: NrStr,
+    pub version: NrStr,
+
+    pub plugin_ctx: *mut c_void,
+    pub vtable: *const NrPluginVTableV2,
+}
+
 /// Host extension table for state management.
 /// This is an optional extension that does not modify the core ABI.
 #[repr(C)]
@@ -285,6 +395,7 @@ pub struct NrPluginVTable {
 macro_rules! define_plugin {
     (
         init: $init_fn:path,
+        $(init_v2: $init_v2_fn:path,)?
         shutdown: $shutdown_fn:path,
         entries: {
             $($entry_name:literal => $handler_fn:path),* $(,)?
@@ -317,6 +428,46 @@ macro_rules! define_plugin {
         #[unsafe(no_mangle)]
         pub extern "C" fn nylon_ring_get_plugin_v1() -> *const $crate::NrPluginInfo {
             &PLUGIN_INFO
+        }
+
+        // v2: same dispatch surface, but init receives the v2 host vtable
+        // (owned zero-copy responses). One binary serves both host versions.
+        static PLUGIN_VTABLE_V2: $crate::NrPluginVTableV2 = $crate::NrPluginVTableV2 {
+            init: Some(plugin_init_v2_wrapper),
+            handle: Some(plugin_handle_wrapper),
+            shutdown: Some(plugin_shutdown_wrapper),
+            stream_data: Some(plugin_stream_data_wrapper),
+            stream_close: Some(plugin_stream_close_wrapper),
+        };
+
+        static PLUGIN_INFO_V2: $crate::NrPluginInfoV2 = $crate::NrPluginInfoV2 {
+            abi_version: $crate::ABI_VERSION_V2,
+            struct_size: std::mem::size_of::<$crate::NrPluginInfoV2>() as u32,
+            name: $crate::NrStr::from_static(env!("CARGO_PKG_NAME")),
+            version: $crate::NrStr::from_static(env!("CARGO_PKG_VERSION")),
+            plugin_ctx: std::ptr::null_mut(),
+            vtable: &PLUGIN_VTABLE_V2,
+        };
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn nylon_ring_get_plugin_v2() -> *const $crate::NrPluginInfoV2 {
+            &PLUGIN_INFO_V2
+        }
+
+        unsafe extern "C" fn plugin_init_v2_wrapper(
+            host_ctx: *mut std::ffi::c_void,
+            host_vtable: *const $crate::NrHostVTableV2,
+        ) -> $crate::NrStatus {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                $(
+                    return $init_v2_fn(host_ctx, host_vtable);
+                )?
+                // Without a dedicated v2 init, reuse the v1 init with the
+                // embedded prefix-compatible v1 table.
+                #[allow(unreachable_code)]
+                $init_fn(host_ctx, std::ptr::addr_of!((*host_vtable).v1))
+            }))
+            .unwrap_or($crate::NrStatus::Panic)
         }
 
         // Wrappers
@@ -1286,6 +1437,15 @@ unsafe impl Sync for NrPluginVTable {}
 
 unsafe impl Send for NrPluginInfo {}
 unsafe impl Sync for NrPluginInfo {}
+
+unsafe impl Send for NrHostVTableV2 {}
+unsafe impl Sync for NrHostVTableV2 {}
+
+unsafe impl Send for NrPluginVTableV2 {}
+unsafe impl Sync for NrPluginVTableV2 {}
+
+unsafe impl Send for NrPluginInfoV2 {}
+unsafe impl Sync for NrPluginInfoV2 {}
 
 unsafe impl<T: Send> Send for NrVec<T> {}
 unsafe impl<T: Sync> Sync for NrVec<T> {}

@@ -1,5 +1,6 @@
 use crate::types::{
-    FastPendingMap, FastStateMap, Pending, StreamFrame, UnaryPending, UnaryResultSlot,
+    FastPendingMap, FastStateMap, Pending, ResponsePayload, StreamFrame, UnaryPending,
+    UnaryResultSlot,
 };
 use dashmap::mapref::entry::Entry as DashEntry;
 use nylon_ring::{NrHostExt, NrStatus};
@@ -117,7 +118,10 @@ pub(crate) fn remove_pending(ctx: &HostContext, sid: u64) -> Option<Pending> {
 /// polled, so it neither allocates a channel nor clones a waker. For a delayed
 /// response, the callback takes and wakes the latest registered waker after
 /// releasing the shard lock.
-pub(crate) async fn wait_for_unary(ctx: &HostContext, sid: u64) -> Option<(NrStatus, Vec<u8>)> {
+pub(crate) async fn wait_for_unary(
+    ctx: &HostContext,
+    sid: u64,
+) -> Option<(NrStatus, ResponsePayload)> {
     poll_fn(|cx| {
         let mut replacement = None;
         loop {
@@ -174,16 +178,35 @@ pub(crate) fn cleanup_sid(ctx: &HostContext, sid: u64) {
 
 /// Deliver a result while holding one shard entry lock for the whole state
 /// transition. This prevents remove/reinsert and terminal-frame races.
-pub(crate) fn dispatch_pending(ctx: &HostContext, sid: u64, frame: StreamFrame) -> NrStatus {
-    match get_shard(ctx, sid).entry(sid) {
-        DashEntry::Vacant(_) => NrStatus::Invalid,
+///
+/// A foreign (plugin-owned) payload is stored as-is for unary requests; for
+/// streams it is copied into the frame and its release runs after the shard
+/// lock is dropped (release is plugin code and must not run under a lock).
+pub(crate) fn dispatch_pending(
+    ctx: &HostContext,
+    sid: u64,
+    status: NrStatus,
+    payload: ResponsePayload,
+) -> NrStatus {
+    // Holds a foreign payload consumed by the stream arm so its release
+    // callback runs after the entry lock below is released.
+    let mut deferred_release = None;
+    let dispatch_status = match get_shard(ctx, sid).entry(sid) {
+        DashEntry::Vacant(_) => {
+            deferred_release = Some(payload);
+            NrStatus::Invalid
+        }
         DashEntry::Occupied(mut entry) => {
             if let Pending::Unary(pending) = entry.get_mut() {
                 let waker = match pending {
                     UnaryPending::Waiting(waker) => waker.take(),
-                    UnaryPending::Ready(_, _) => return NrStatus::Invalid,
+                    UnaryPending::Ready(_, _) => {
+                        drop(entry);
+                        drop(payload);
+                        return NrStatus::Invalid;
+                    }
                 };
-                *pending = UnaryPending::Ready(frame.status, frame.data);
+                *pending = UnaryPending::Ready(status, payload);
                 drop(entry);
                 ctx.remove_state(sid);
                 if let Some(waker) = waker {
@@ -192,7 +215,18 @@ pub(crate) fn dispatch_pending(ctx: &HostContext, sid: u64, frame: StreamFrame) 
                 return NrStatus::Ok;
             }
 
-            let terminal = frame.status.is_terminal();
+            let terminal = status.is_terminal();
+            let frame = StreamFrame {
+                status,
+                data: match payload {
+                    ResponsePayload::Owned(data) => data,
+                    ResponsePayload::Foreign(foreign) => {
+                        let data = foreign.as_slice().to_vec();
+                        deferred_release = Some(ResponsePayload::Foreign(foreign));
+                        data
+                    }
+                },
+            };
             // try_send borrows the sender in place; the borrow ends before
             // entry.remove(), so no per-frame Sender clone is needed. A live
             // pending entry implies a live receiver (its Drop removes the
@@ -212,7 +246,9 @@ pub(crate) fn dispatch_pending(ctx: &HostContext, sid: u64, frame: StreamFrame) 
                 Err(_rejected_frame) => NrStatus::Backpressure,
             }
         }
-    }
+    };
+    drop(deferred_release);
+    dispatch_status
 }
 
 // --- Thread Local Optimization for Unary Results ---

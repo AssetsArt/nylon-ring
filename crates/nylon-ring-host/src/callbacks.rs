@@ -1,8 +1,8 @@
 //! FFI callback handlers for the plugin interface.
 
 use crate::context::{CURRENT_UNARY_RESULT, HostContext};
-use crate::types::{StreamFrame, UnaryResultSlot};
-use nylon_ring::{NrBytes, NrStatus, NrStr, NrVec};
+use crate::types::{ForeignBytes, ResponsePayload, UnaryResultSlot};
+use nylon_ring::{NrBytes, NrOwnedBytesV2, NrStatus, NrStr, NrVec};
 use std::ffi::c_void;
 
 /// Callback invoked by the plugin to send results back to the host.
@@ -51,7 +51,56 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
     }
 
     let data = data_vec.take().expect("fast path did not consume payload");
-    crate::context::dispatch_pending(ctx, sid, StreamFrame { status, data })
+    crate::context::dispatch_pending(ctx, sid, status, ResponsePayload::Owned(data))
+}
+
+/// v2 callback: delivers a plugin-owned response without a host-side copy.
+///
+/// The host takes ownership of `payload` and calls its release exactly once
+/// (on delivery-path drop, or when the eventual consumer drops the response
+/// view). The fast-path slot and stream frames still copy, because their
+/// results are host-owned `Vec`s; standard unary requests store the foreign
+/// buffer as-is.
+///
+/// # Safety
+///
+/// Must be called with a valid `host_ctx` pointer created by this host.
+pub(crate) unsafe extern "C" fn send_result_owned_callback(
+    host_ctx: *mut c_void,
+    sid: u64,
+    status: NrStatus,
+    payload: NrOwnedBytesV2,
+) -> NrStatus {
+    let foreign = ForeignBytes::from_abi(payload);
+    if host_ctx.is_null() {
+        return NrStatus::Invalid;
+    }
+    let ctx = unsafe { &*host_ctx.cast::<HostContext>() };
+
+    let mut payload = Some(ResponsePayload::Foreign(foreign));
+    let mut handled_fast = false;
+    CURRENT_UNARY_RESULT.with(|cell| {
+        let ptr = cell.get();
+        if !ptr.is_null() {
+            let slot: &mut UnaryResultSlot = unsafe { &mut *ptr };
+            if slot.sid == sid
+                && let Some(payload) = payload.take()
+            {
+                // The fast-path slot hands out a Vec; copying here is safe
+                // because this callback runs inside the plugin's handle call.
+                slot.result = Some((status, payload.into_vec()));
+                handled_fast = true;
+            }
+        }
+    });
+
+    if handled_fast {
+        ctx.remove_state(sid);
+        return NrStatus::Ok;
+    }
+
+    let payload = payload.take().expect("fast path did not consume payload");
+    crate::context::dispatch_pending(ctx, sid, status, payload)
 }
 
 /// Callback for setting per-SID state in the host.

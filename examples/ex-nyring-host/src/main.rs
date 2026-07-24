@@ -166,6 +166,11 @@ async fn run(
         benchmark::run_request_response_benchmark(plugin.clone(), benchmark_config).await;
     }
 
+    // Owned-Response Benchmark (ABI v2 zero-copy)
+    if benchmark_config.runs_owned() {
+        benchmark::run_owned_response_benchmark(plugin.clone(), benchmark_config).await;
+    }
+
     // Streaming Benchmark
     if benchmark_config.runs_stream() {
         benchmark::run_stream_benchmark(plugin.clone(), benchmark_config).await;

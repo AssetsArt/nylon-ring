@@ -17,11 +17,14 @@ mod stream_channel;
 mod types;
 
 use call_tracker::CallTracker;
-use callbacks::{get_state_callback, send_result_vec_callback, set_state_callback};
+use callbacks::{
+    get_state_callback, send_result_owned_callback, send_result_vec_callback, set_state_callback,
+};
 use context::{CURRENT_UNARY_RESULT, HostContext};
 use libloading::{Library, Symbol};
 use nylon_ring::{
-    ABI_VERSION, NrBytes, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrStr,
+    ABI_VERSION, ABI_VERSION_V2, NrBytes, NrHostExt, NrHostVTable, NrHostVTableV2, NrPluginInfo,
+    NrPluginInfoV2, NrPluginVTable, NrPluginVTableV2, NrStr,
 };
 use sid::next_sid;
 use std::collections::HashMap;
@@ -32,7 +35,7 @@ use std::time::Duration;
 pub use error::NylonRingHostError;
 pub use extensions::Extensions;
 pub use nylon_ring::NrStatus;
-pub use types::{Result, StreamFrame, StreamReceiver};
+pub use types::{ResponseBytes, Result, StreamFrame, StreamReceiver};
 
 /// Default number of frames buffered for each response stream.
 pub const DEFAULT_STREAM_CAPACITY: usize = 64;
@@ -99,10 +102,40 @@ impl Drop for FastSlotBinding {
     }
 }
 
+/// Version-independent plugin dispatch surface: v1 and v2 vtables share
+/// every function signature except `init`, which is only used during load.
+#[derive(Copy, Clone)]
+struct PluginDispatch {
+    handle: Option<unsafe extern "C" fn(NrStr, u64, NrBytes) -> NrStatus>,
+    shutdown: Option<unsafe extern "C" fn()>,
+    stream_data: Option<unsafe extern "C" fn(u64, NrBytes) -> NrStatus>,
+    stream_close: Option<unsafe extern "C" fn(u64) -> NrStatus>,
+}
+
+impl PluginDispatch {
+    fn from_v1(vtable: &NrPluginVTable) -> Self {
+        Self {
+            handle: vtable.handle,
+            shutdown: vtable.shutdown,
+            stream_data: vtable.stream_data,
+            stream_close: vtable.stream_close,
+        }
+    }
+
+    fn from_v2(vtable: &NrPluginVTableV2) -> Self {
+        Self {
+            handle: vtable.handle,
+            shutdown: vtable.shutdown,
+            stream_data: vtable.stream_data,
+            stream_close: vtable.stream_close,
+        }
+    }
+}
+
 /// A loaded plugin instance.
 pub struct LoadedPlugin {
     _lib: Library,
-    vtable: &'static NrPluginVTable,
+    dispatch: PluginDispatch,
     host_ctx: Arc<HostContext>,
     path: String,
     call_tracker: CallTracker,
@@ -237,7 +270,7 @@ impl Drop for PluginCallGuard {
 
 impl Drop for LoadedPlugin {
     fn drop(&mut self) {
-        if let Some(shutdown_fn) = self.vtable.shutdown {
+        if let Some(shutdown_fn) = self.dispatch.shutdown {
             unsafe {
                 shutdown_fn();
             }
@@ -273,7 +306,7 @@ impl PluginHandle {
         let mut pending_guard = PendingGuard::new(&self.plugin.host_ctx, sid);
 
         let payload_bytes = NrBytes::from_slice(payload);
-        let handle_raw_fn = match self.plugin.vtable.handle {
+        let handle_raw_fn = match self.plugin.dispatch.handle {
             Some(f) => f,
             None => return Err(NylonRingHostError::MissingRequiredFunctions),
         };
@@ -284,13 +317,62 @@ impl PluginHandle {
             return Err(Self::status_error(status));
         }
 
-        let result = context::wait_for_unary(&self.plugin.host_ctx, sid)
-            .await
-            .ok_or(NylonRingHostError::PluginUnloaded);
-        if result.is_ok() {
-            pending_guard.disarm();
+        match context::wait_for_unary(&self.plugin.host_ctx, sid).await {
+            Some((status, payload)) => {
+                pending_guard.disarm();
+                // Conversion happens while the call guard is still held, so
+                // a foreign payload's release cannot outlive the library.
+                Ok((status, payload.into_vec()))
+            }
+            None => Err(NylonRingHostError::PluginUnloaded),
         }
-        result
+    }
+
+    /// Like [`PluginHandle::call_response`], but returns the response as a
+    /// [`ResponseBytes`] view instead of a `Vec<u8>`.
+    ///
+    /// For an ABI v2 plugin that responds with plugin-owned bytes this is
+    /// zero-copy: the buffer is only released back to the plugin when the
+    /// view drops, and the view holds an in-flight call guard so the plugin
+    /// cannot be unloaded from under it.
+    pub async fn call_response_bytes(
+        &self,
+        entry: &str,
+        payload: &[u8],
+    ) -> Result<(NrStatus, ResponseBytes)> {
+        let call_guard = self.plugin.begin_owned_call()?;
+        let sid = next_sid();
+
+        context::insert_pending(
+            &self.plugin.host_ctx,
+            sid,
+            types::Pending::Unary(types::UnaryPending::waiting()),
+        );
+        let mut pending_guard = PendingGuard::new(&self.plugin.host_ctx, sid);
+
+        let payload_bytes = NrBytes::from_slice(payload);
+        let handle_raw_fn = match self.plugin.dispatch.handle {
+            Some(f) => f,
+            None => return Err(NylonRingHostError::MissingRequiredFunctions),
+        };
+
+        let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
+
+        if status != NrStatus::Ok {
+            return Err(Self::status_error(status));
+        }
+
+        match context::wait_for_unary(&self.plugin.host_ctx, sid).await {
+            Some((status, payload)) => {
+                pending_guard.disarm();
+                // Host-owned payloads need no guard; foreign ones keep the
+                // plugin loaded until the view is dropped.
+                let guard =
+                    matches!(payload, types::ResponsePayload::Foreign(_)).then_some(call_guard);
+                Ok((status, ResponseBytes::new(payload, guard)))
+            }
+            None => Err(NylonRingHostError::PluginUnloaded),
+        }
     }
 
     /// Like [`PluginHandle::call_response`] but bounded by a timeout.
@@ -316,7 +398,7 @@ impl PluginHandle {
         let mut pending_guard = PendingGuard::new(&self.plugin.host_ctx, sid);
 
         let payload_bytes = NrBytes::from_slice(payload);
-        let handle_raw_fn = match self.plugin.vtable.handle {
+        let handle_raw_fn = match self.plugin.dispatch.handle {
             Some(f) => f,
             None => return Err(NylonRingHostError::MissingRequiredFunctions),
         };
@@ -329,9 +411,9 @@ impl PluginHandle {
         match tokio::time::timeout(timeout, context::wait_for_unary(&self.plugin.host_ctx, sid))
             .await
         {
-            Ok(Some(v)) => {
+            Ok(Some((status, payload))) => {
                 pending_guard.disarm();
-                Ok(v)
+                Ok((status, payload.into_vec()))
             }
             Ok(None) => Err(NylonRingHostError::PluginUnloaded),
             Err(_) => Err(NylonRingHostError::Timeout),
@@ -352,7 +434,7 @@ impl PluginHandle {
 
         let payload_bytes = NrBytes::from_slice(payload);
 
-        let handle_raw_fn = match self.plugin.vtable.handle {
+        let handle_raw_fn = match self.plugin.dispatch.handle {
             Some(f) => f,
             None => return Err(NylonRingHostError::MissingRequiredFunctions),
         };
@@ -379,7 +461,7 @@ impl PluginHandle {
         let sid = next_sid();
 
         let payload_bytes = NrBytes::from_slice(payload);
-        let handle_raw_fn = match self.plugin.vtable.handle {
+        let handle_raw_fn = match self.plugin.dispatch.handle {
             Some(f) => f,
             None => {
                 return Err(NylonRingHostError::MissingRequiredFunctions);
@@ -410,7 +492,7 @@ impl PluginHandle {
 
         let payload_bytes = NrBytes::from_slice(payload);
 
-        let handle_raw_fn = match self.plugin.vtable.handle {
+        let handle_raw_fn = match self.plugin.dispatch.handle {
             Some(f) => f,
             None => {
                 context::cleanup_sid(&self.plugin.host_ctx, sid);
@@ -430,7 +512,7 @@ impl PluginHandle {
 
     /// Send data to an active stream.
     pub fn send_stream_data(&self, sid: u64, data: &[u8]) -> Result<NrStatus> {
-        let stream_data_fn = match self.plugin.vtable.stream_data {
+        let stream_data_fn = match self.plugin.dispatch.stream_data {
             Some(f) => f,
             None => return Err(NylonRingHostError::MissingRequiredFunctions),
         };
@@ -440,7 +522,7 @@ impl PluginHandle {
 
     /// Close an active stream from the host side.
     pub fn close_stream(&self, sid: u64) -> Result<NrStatus> {
-        let stream_close_fn = match self.plugin.vtable.stream_close {
+        let stream_close_fn = match self.plugin.dispatch.stream_close {
             Some(f) => f,
             None => return Err(NylonRingHostError::MissingRequiredFunctions),
         };
@@ -453,6 +535,7 @@ pub struct NylonRingHost {
     plugins: HashMap<String, Arc<LoadedPlugin>>,
     host_ctx: Arc<HostContext>,
     host_vtable: Box<NrHostVTable>,
+    host_vtable_v2: Box<NrHostVTableV2>,
 }
 
 impl Default for NylonRingHost {
@@ -495,71 +578,81 @@ impl NylonRingHost {
         let host_vtable = Box::new(NrHostVTable {
             send_result: send_result_vec_callback,
         });
+        let host_vtable_v2 = Box::new(NrHostVTableV2 {
+            v1: *host_vtable,
+            send_result_owned: send_result_owned_callback,
+        });
 
         Self {
             plugins: HashMap::new(),
             host_ctx,
             host_vtable,
+            host_vtable_v2,
         }
     }
 
     /// Load a plugin from the specified path with a given name.
+    ///
+    /// Probes the v2 entry point (`nylon_ring_get_plugin_v2`, zero-copy
+    /// owned responses) first and falls back to v1.
     pub fn load(&mut self, name: &str, path: &str) -> Result<()> {
         unsafe {
             let lib = Library::new(path).map_err(NylonRingHostError::FailedToLoadLibrary)?;
 
-            let get_plugin: Symbol<extern "C" fn() -> *const NrPluginInfo> =
-                lib.get(b"nylon_ring_get_plugin_v1\0").map_err(|_| {
-                    NylonRingHostError::MissingSymbol("nylon_ring_get_plugin_v1".to_string())
-                })?;
-
-            let info_ptr = get_plugin();
-            if info_ptr.is_null() {
-                return Err(NylonRingHostError::NullPluginInfo);
-            }
-            let abi_version = std::ptr::read_unaligned(info_ptr.cast::<u32>());
-            let struct_size = std::ptr::read_unaligned(info_ptr.cast::<u32>().add(1));
-
-            if abi_version != ABI_VERSION {
-                return Err(NylonRingHostError::IncompatibleAbiVersion {
-                    expected: ABI_VERSION,
-                    actual: abi_version,
-                });
-            }
-
-            let expected_size = std::mem::size_of::<NrPluginInfo>() as u32;
-            if struct_size < expected_size {
-                return Err(NylonRingHostError::IncompatiblePluginInfoSize {
-                    expected: expected_size,
-                    actual: struct_size,
-                });
-            }
-
-            let info = &*info_ptr;
-
-            if info.vtable.is_null() {
-                return Err(NylonRingHostError::NullPluginVTable);
-            }
-            let plugin_vtable = &*info.vtable;
-
-            if plugin_vtable.init.is_none() || plugin_vtable.handle.is_none() {
-                return Err(NylonRingHostError::MissingRequiredFunctions);
-            }
-
-            // Initialize plugin
-            if let Some(init_fn) = plugin_vtable.init {
-                let status = init_fn(
-                    Arc::as_ptr(&self.host_ctx) as *mut c_void,
-                    &*self.host_vtable,
-                );
-                if status != NrStatus::Ok {
-                    return Err(NylonRingHostError::PluginInitFailed(status));
+            let dispatch = if let Ok(get_plugin_v2) =
+                lib.get::<Symbol<extern "C" fn() -> *const NrPluginInfoV2>>(
+                    b"nylon_ring_get_plugin_v2\0",
+                ) {
+                let info_ptr = get_plugin_v2();
+                Self::validate_plugin_info::<NrPluginInfoV2>(info_ptr.cast(), ABI_VERSION_V2)?;
+                let info = &*info_ptr;
+                if info.vtable.is_null() {
+                    return Err(NylonRingHostError::NullPluginVTable);
                 }
-            }
+                let plugin_vtable = &*info.vtable;
+                if plugin_vtable.init.is_none() || plugin_vtable.handle.is_none() {
+                    return Err(NylonRingHostError::MissingRequiredFunctions);
+                }
+                if let Some(init_fn) = plugin_vtable.init {
+                    let status = init_fn(
+                        Arc::as_ptr(&self.host_ctx) as *mut c_void,
+                        &*self.host_vtable_v2,
+                    );
+                    if status != NrStatus::Ok {
+                        return Err(NylonRingHostError::PluginInitFailed(status));
+                    }
+                }
+                PluginDispatch::from_v2(plugin_vtable)
+            } else {
+                let get_plugin: Symbol<extern "C" fn() -> *const NrPluginInfo> =
+                    lib.get(b"nylon_ring_get_plugin_v1\0").map_err(|_| {
+                        NylonRingHostError::MissingSymbol("nylon_ring_get_plugin_v1".to_string())
+                    })?;
+                let info_ptr = get_plugin();
+                Self::validate_plugin_info::<NrPluginInfo>(info_ptr.cast(), ABI_VERSION)?;
+                let info = &*info_ptr;
+                if info.vtable.is_null() {
+                    return Err(NylonRingHostError::NullPluginVTable);
+                }
+                let plugin_vtable = &*info.vtable;
+                if plugin_vtable.init.is_none() || plugin_vtable.handle.is_none() {
+                    return Err(NylonRingHostError::MissingRequiredFunctions);
+                }
+                if let Some(init_fn) = plugin_vtable.init {
+                    let status = init_fn(
+                        Arc::as_ptr(&self.host_ctx) as *mut c_void,
+                        &*self.host_vtable,
+                    );
+                    if status != NrStatus::Ok {
+                        return Err(NylonRingHostError::PluginInitFailed(status));
+                    }
+                }
+                PluginDispatch::from_v1(plugin_vtable)
+            };
 
             let loaded = LoadedPlugin {
                 _lib: lib,
-                vtable: plugin_vtable,
+                dispatch,
                 host_ctx: self.host_ctx.clone(),
                 path: path.to_string(),
                 call_tracker: CallTracker::new(),
@@ -570,6 +663,35 @@ impl NylonRingHost {
             }
             Ok(())
         }
+    }
+
+    /// Validates the version-independent `abi_version`/`struct_size` header
+    /// shared by every plugin-info generation.
+    ///
+    /// # Safety
+    ///
+    /// `info_ptr` must be null or point to a struct starting with two `u32`
+    /// fields (`abi_version`, `struct_size`).
+    unsafe fn validate_plugin_info<T>(info_ptr: *const u32, expected_version: u32) -> Result<()> {
+        if info_ptr.is_null() {
+            return Err(NylonRingHostError::NullPluginInfo);
+        }
+        let abi_version = unsafe { std::ptr::read_unaligned(info_ptr) };
+        let struct_size = unsafe { std::ptr::read_unaligned(info_ptr.add(1)) };
+        if abi_version != expected_version {
+            return Err(NylonRingHostError::IncompatibleAbiVersion {
+                expected: expected_version,
+                actual: abi_version,
+            });
+        }
+        let expected_size = std::mem::size_of::<T>() as u32;
+        if struct_size < expected_size {
+            return Err(NylonRingHostError::IncompatiblePluginInfoSize {
+                expected: expected_size,
+                actual: struct_size,
+            });
+        }
+        Ok(())
     }
 
     /// Unload a plugin by name.
@@ -880,10 +1002,8 @@ mod tests {
             context::dispatch_pending(
                 &host_ctx,
                 sid,
-                StreamFrame {
-                    status: NrStatus::Ok,
-                    data: vec![7],
-                },
+                NrStatus::Ok,
+                types::ResponsePayload::Owned(vec![7]),
             )
         })
         .join()
@@ -898,10 +1018,8 @@ mod tests {
             context::dispatch_pending(
                 &host.host_ctx,
                 sid,
-                StreamFrame {
-                    status: NrStatus::Ok,
-                    data: vec![8],
-                },
+                NrStatus::Ok,
+                types::ResponsePayload::Owned(vec![8]),
             ),
             NrStatus::Invalid
         );
@@ -909,7 +1027,7 @@ mod tests {
         match std::future::Future::poll(future.as_mut(), &mut second_context) {
             std::task::Poll::Ready(Some((status, data))) => {
                 assert_eq!(status, NrStatus::Ok);
-                assert_eq!(data, vec![7]);
+                assert_eq!(data.as_slice(), [7]);
             }
             result => panic!("unexpected unary completion result: {result:?}"),
         }
@@ -1001,10 +1119,8 @@ mod tests {
             context::dispatch_pending(
                 &host.host_ctx,
                 sid,
-                StreamFrame {
-                    status: NrStatus::Ok,
-                    data: vec![1],
-                },
+                NrStatus::Ok,
+                types::ResponsePayload::Owned(vec![1]),
             ),
             NrStatus::Ok
         );
@@ -1012,10 +1128,8 @@ mod tests {
             context::dispatch_pending(
                 &host.host_ctx,
                 sid,
-                StreamFrame {
-                    status: NrStatus::Ok,
-                    data: vec![2],
-                },
+                NrStatus::Ok,
+                types::ResponsePayload::Owned(vec![2]),
             ),
             NrStatus::Backpressure
         );
@@ -1024,10 +1138,8 @@ mod tests {
             context::dispatch_pending(
                 &host.host_ctx,
                 sid,
-                StreamFrame {
-                    status: NrStatus::StreamEnd,
-                    data: vec![],
-                },
+                NrStatus::StreamEnd,
+                types::ResponsePayload::Owned(vec![]),
             ),
             NrStatus::Ok
         );
@@ -1053,10 +1165,8 @@ mod tests {
                         context::dispatch_pending(
                             &ctx,
                             sid,
-                            StreamFrame {
-                                status: NrStatus::StreamEnd,
-                                data: vec![value],
-                            },
+                            NrStatus::StreamEnd,
+                            types::ResponsePayload::Owned(vec![value]),
                         )
                     })
                 })
@@ -1174,6 +1284,100 @@ mod tests {
             frames
         });
         assert_eq!(frames, 9);
+    }
+
+    #[test]
+    fn v2_owned_response_round_trips_and_releases_exactly_once() {
+        let _plugin_lock = plugin_test_lock();
+        let Some(path) = example_plugin_path() else {
+            return;
+        };
+        let mut host = NylonRingHost::new();
+        host.load("example", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("example").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        async fn release_count(handle: &PluginHandle) -> u64 {
+            let (status, data) = handle
+                .call_response("owned_release_count", b"")
+                .await
+                .unwrap();
+            assert_eq!(status, NrStatus::Ok);
+            u64::from_le_bytes(data.try_into().unwrap())
+        }
+
+        runtime.block_on(async {
+            // Zero-copy static response: correct bytes, nothing to release.
+            let (status, data) = handle
+                .call_response_bytes("benchmark_owned", &[0u8; 128])
+                .await
+                .unwrap();
+            assert_eq!(status, NrStatus::Ok);
+            assert_eq!(data.len(), 128);
+            assert!(data.iter().all(|&byte| byte == 42));
+
+            let before = release_count(&handle).await;
+
+            // Held view: released only when dropped, not on receipt.
+            let (status, held) = handle
+                .call_response_bytes("echo_owned", b"held")
+                .await
+                .unwrap();
+            assert_eq!(status, NrStatus::Ok);
+            assert_eq!(&*held, b"held");
+            assert_eq!(release_count(&handle).await, before);
+            drop(held);
+            assert_eq!(release_count(&handle).await, before + 1);
+
+            // Vec conversion path copies and releases immediately.
+            let (status, data) = handle.call_response("echo_owned", b"copied").await.unwrap();
+            assert_eq!(status, NrStatus::Ok);
+            assert_eq!(data, b"copied");
+            assert_eq!(release_count(&handle).await, before + 2);
+
+            // into_vec on the view also releases exactly once.
+            let (_, view) = handle
+                .call_response_bytes("echo_owned", b"vec")
+                .await
+                .unwrap();
+            assert_eq!(view.into_vec(), b"vec");
+            assert_eq!(release_count(&handle).await, before + 3);
+
+            // Fast path consumes owned responses through the slot copy.
+            let (status, data) = handle
+                .call_response_fast("echo_owned", b"fast")
+                .await
+                .unwrap();
+            assert_eq!(status, NrStatus::Ok);
+            assert_eq!(data, b"fast");
+            assert_eq!(release_count(&handle).await, before + 4);
+        });
+    }
+
+    #[test]
+    fn v2_owned_response_keeps_plugin_alive_after_unload() {
+        let _plugin_lock = plugin_test_lock();
+        let Some(path) = example_plugin_path() else {
+            return;
+        };
+        let mut host = NylonRingHost::new();
+        host.load("example", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("example").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let (status, response) = runtime
+            .block_on(handle.call_response_bytes("benchmark_owned", &[0u8; 64]))
+            .unwrap();
+        assert_eq!(status, NrStatus::Ok);
+
+        // The response borrows memory inside the plugin image; its guard
+        // must defer the library unload until the view drops.
+        host.unload("example").unwrap();
+        drop(handle);
+        drop(host);
+        assert_eq!(response.len(), 64);
+        assert!(response.iter().all(|&byte| byte == 42));
+        drop(response);
     }
 
     #[test]

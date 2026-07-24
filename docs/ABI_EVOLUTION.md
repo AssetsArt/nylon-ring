@@ -109,6 +109,19 @@ images. A one-copy probe measured end-to-end savings of ~23 ns at 128 B up to
 
 ### P1: `NrOwnedBytesV2` — callee-owned response without a host copy
 
+**Status: implemented** (host probes `nylon_ring_get_plugin_v2` and falls
+back to v1; `define_plugin!` exports both symbols from one binary; the host
+API is `PluginHandle::call_response_bytes` returning a `ResponseBytes` view).
+Contract as shipped: the consumer calls `release` exactly once, possibly
+from a different thread than the producer; the producer keeps the bytes
+valid and immutable until then; a null `release` means nothing to free.
+The host holds an in-flight call guard for the view's lifetime, so
+`unload()` defers the library drop until the last response view is gone.
+Reference numbers (M1 Pro, 1 worker, avg-latency harness): v1 echo
+53/89/149/224 ns at 0/128/1024/4096 B versus a flat ~55 ns for a v2
+slab-backed owned response at every size; at 10 workers and 4 KiB,
+18.3M -> 116.0M calls/s.
+
 ```c
 typedef struct NrOwnedBytesV2 {
     const uint8_t *ptr;
@@ -157,3 +170,12 @@ Ship v2 as a *second* export, `nylon_ring_get_plugin_v2`, so one plugin binary
 can serve both hosts during migration. A v2 host probes v2 first, then falls
 back to the v1 symbol; strict `abi_version` equality per symbol stays. The v1
 symbol is never removed while v1 hosts exist.
+
+Implemented layout (additive):
+
+- `NrPluginInfoV2` / `NrPluginVTableV2`: identical shape to v1; only `init`
+  differs, receiving `NrHostVTableV2`.
+- `NrHostVTableV2` embeds the v1 table as its first field, so v2-aware
+  plugin code can hand `&table.v1` to v1-style helpers unchanged.
+- `define_plugin!` accepts an optional `init_v2:` handler; without one, the
+  v2 export reuses the v1 init through the embedded table.

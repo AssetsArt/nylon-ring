@@ -24,7 +24,140 @@ pub(crate) enum Pending {
 #[derive(Debug)]
 pub(crate) enum UnaryPending {
     Waiting(Option<Waker>),
-    Ready(NrStatus, Vec<u8>),
+    Ready(NrStatus, ResponsePayload),
+}
+
+/// A plugin-owned buffer received over ABI v2; releases it on drop.
+///
+/// v2 contract (`NrOwnedBytesV2`): the bytes stay valid and immutable until
+/// the consumer calls `release` exactly once, from any thread — which is
+/// what makes this Send + Sync. Dropping it runs plugin code, so the holder
+/// must guarantee the plugin library is still loaded (via a call guard or by
+/// being inside a plugin callback).
+#[derive(Debug)]
+pub(crate) struct ForeignBytes {
+    ptr: *const u8,
+    len: usize,
+    owner_ctx: *mut std::ffi::c_void,
+    release: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, u64)>,
+}
+
+// SAFETY: see the type documentation — immutability until release plus a
+// thread-agnostic release callback are part of the v2 ABI contract.
+unsafe impl Send for ForeignBytes {}
+unsafe impl Sync for ForeignBytes {}
+
+impl ForeignBytes {
+    /// Takes ownership of a payload received from a plugin.
+    pub(crate) fn from_abi(payload: nylon_ring::NrOwnedBytesV2) -> Self {
+        Self {
+            ptr: payload.ptr,
+            len: payload.len as usize,
+            owner_ctx: payload.owner_ctx,
+            release: payload.release,
+        }
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        if self.ptr.is_null() || self.len == 0 {
+            return &[];
+        }
+        // SAFETY: the producer guarantees ptr..ptr+len stays valid and
+        // immutable until release (v2 ABI contract).
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl Drop for ForeignBytes {
+    fn drop(&mut self) {
+        if let Some(release) = self.release {
+            // SAFETY: called exactly once with the values the producer
+            // handed over; Drop runs at most once.
+            unsafe { release(self.owner_ctx, self.ptr, self.len as u64) };
+        }
+    }
+}
+
+/// A response payload that is either host-owned or plugin-owned.
+#[derive(Debug)]
+pub(crate) enum ResponsePayload {
+    Owned(Vec<u8>),
+    Foreign(ForeignBytes),
+}
+
+impl ResponsePayload {
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(data) => data,
+            Self::Foreign(foreign) => foreign.as_slice(),
+        }
+    }
+
+    /// Converts into a host-owned `Vec`, copying (and releasing) a foreign
+    /// payload. Callers must hold the plugin alive across this call.
+    pub(crate) fn into_vec(self) -> Vec<u8> {
+        match self {
+            Self::Owned(data) => data,
+            Self::Foreign(foreign) => foreign.as_slice().to_vec(),
+        }
+    }
+}
+
+/// A unary response as returned by [`crate::PluginHandle::call_response_bytes`].
+///
+/// For a v2 plugin that responded with plugin-owned bytes this is a
+/// zero-copy view: the buffer is released back to the plugin when the value
+/// drops, and an in-flight call guard held inside keeps the plugin library
+/// loaded until then.
+pub struct ResponseBytes {
+    payload: ResponsePayload,
+    /// Keeps the plugin loaded while a foreign payload is alive; dropped
+    /// after `payload` would be a bug, so field order matters (payload
+    /// first).
+    _guard: Option<PluginCallGuard>,
+}
+
+impl ResponseBytes {
+    pub(crate) fn new(payload: ResponsePayload, guard: Option<PluginCallGuard>) -> Self {
+        Self {
+            payload,
+            _guard: guard,
+        }
+    }
+
+    /// Converts into a host-owned `Vec<u8>` (copies only if the payload is
+    /// still plugin-owned).
+    pub fn into_vec(self) -> Vec<u8> {
+        // Field-by-field move keeps the guard alive until after the copy.
+        let Self { payload, _guard } = self;
+        payload.into_vec()
+    }
+}
+
+impl std::ops::Deref for ResponseBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.payload.as_slice()
+    }
+}
+
+impl AsRef<[u8]> for ResponseBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.payload.as_slice()
+    }
+}
+
+impl std::fmt::Debug for ResponseBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResponseBytes")
+            .field("len", &self.payload.as_slice().len())
+            .field(
+                "foreign",
+                &matches!(self.payload, ResponsePayload::Foreign(_)),
+            )
+            .finish()
+    }
 }
 
 impl UnaryPending {

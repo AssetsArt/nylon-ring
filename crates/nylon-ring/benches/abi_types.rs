@@ -15,13 +15,14 @@ fn bench_nr_str(c: &mut Criterion) {
     let nr_str = NrStr::new(s);
     c.bench_function("NrStr::as_str", |b| {
         b.iter(|| {
-            black_box(unsafe { nr_str.as_str() }.unwrap());
+            let input = black_box(nr_str);
+            black_box(unsafe { input.as_str() }.unwrap());
         })
     });
 }
 
 fn bench_nr_bytes(c: &mut Criterion) {
-    let bytes = b"Hello, World!";
+    let bytes: &[u8] = b"Hello, World!";
 
     c.bench_function("NrBytes::from_slice", |b| {
         b.iter(|| {
@@ -32,7 +33,8 @@ fn bench_nr_bytes(c: &mut Criterion) {
     let nr_bytes = NrBytes::from_slice(bytes);
     c.bench_function("NrBytes::as_slice", |b| {
         b.iter(|| {
-            black_box(unsafe { nr_bytes.as_slice() }.unwrap());
+            let input = black_box(nr_bytes);
+            black_box(unsafe { input.as_slice() }.unwrap());
         })
     });
 }
@@ -47,10 +49,11 @@ fn bench_nr_kv(c: &mut Criterion) {
 
 fn bench_nr_vec(c: &mut Criterion) {
     c.bench_function("NrVec::from_vec", |b| {
-        b.iter(|| {
-            let v = vec![1u8, 2, 3, 4, 5];
-            black_box(NrVec::from_vec(black_box(v)));
-        })
+        b.iter_batched(
+            || vec![1u8, 2, 3, 4, 5],
+            |v| black_box(NrVec::from_vec(black_box(v))),
+            criterion::BatchSize::SmallInput,
+        )
     });
 
     c.bench_function("NrVec::into_vec", |b| {
@@ -59,9 +62,7 @@ fn bench_nr_vec(c: &mut Criterion) {
                 let v = vec![1u8, 2, 3, 4, 5];
                 NrVec::from_vec(v)
             },
-            |nr_vec| {
-                black_box(nr_vec.into_vec());
-            },
+            |nr_vec| black_box(black_box(nr_vec).into_vec()),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -70,7 +71,7 @@ fn bench_nr_vec(c: &mut Criterion) {
         let nr_vec = NrVec::from_vec((0..100_u32).collect());
 
         b.iter(|| {
-            black_box(nr_vec.as_slice());
+            black_box(black_box(&nr_vec).as_slice());
         })
     });
 }

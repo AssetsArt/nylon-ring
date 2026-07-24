@@ -94,7 +94,11 @@ impl HostContext {
 
 #[inline(always)]
 fn get_shard(ctx: &HostContext, sid: u64) -> &FastPendingMap {
-    &ctx.pending_shards()[(sid as usize) & SHARD_MASK]
+    // Shard by the SID's thread-local allocation block (blocks are 2^20 wide)
+    // instead of the low bits. Consecutive SIDs from one thread then stay in
+    // one shard, so a thread's insert/complete/remove traffic does not migrate
+    // the same map cache lines across every core.
+    &ctx.pending_shards()[((sid >> 20) as usize) & SHARD_MASK]
 }
 
 /// Insert a pending request.

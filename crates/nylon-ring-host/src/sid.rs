@@ -7,10 +7,10 @@
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Number of SIDs allocated per block. Keep this odd so it remains coprime
-/// with the power-of-two routing shard count and different thread-local blocks
-/// do not advance through the same shard in lockstep.
-const SID_BLOCK_SIZE: u64 = 1_000_003;
+/// Number of SIDs allocated per block. The pending-request router shards by
+/// `sid >> 20`, so a 2^20-sized block keeps every SID a thread allocates in
+/// one routing shard while consecutive blocks rotate through the shards.
+const SID_BLOCK_SIZE: u64 = 1 << 20;
 
 /// Global counter for allocating SID blocks.
 static GLOBAL_SID: AtomicU64 = AtomicU64::new(1);

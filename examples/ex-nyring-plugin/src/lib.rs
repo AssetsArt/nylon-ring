@@ -112,6 +112,17 @@ unsafe fn handle_benchmark_without_response(_sid: u64, _payload: NrBytes) -> NrS
     NrStatus::Ok
 }
 
+// Silent stream handler for benchmarks: 8 empty data frames + StreamEnd.
+unsafe fn handle_benchmark_stream(sid: u64, _payload: NrBytes) -> NrStatus {
+    for _ in 0..8 {
+        let status = send_result(sid, NrStatus::Ok, NrVec::from_vec(Vec::new()));
+        if status != NrStatus::Ok {
+            return status;
+        }
+    }
+    send_result(sid, NrStatus::StreamEnd, NrVec::from_vec(Vec::new()))
+}
+
 // Define the plugin with its entry points
 define_plugin! {
     init: init,
@@ -123,5 +134,6 @@ define_plugin! {
         "notify" => handle_notify,
         "benchmark" => handle_benchmark,
         "benchmark_without_response" => handle_benchmark_without_response,
+        "benchmark_stream" => handle_benchmark_stream,
     }
 }

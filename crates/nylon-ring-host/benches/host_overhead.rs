@@ -145,11 +145,42 @@ fn bench_call_without_response(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_call_stream(c: &mut Criterion) {
+    let Some((_host, plugin)) = setup_host() else {
+        return;
+    };
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    let mut group = c.benchmark_group("call_stream");
+    // One iteration = one full stream: 8 empty data frames + StreamEnd.
+    group.throughput(criterion::Throughput::Elements(9));
+
+    group.bench_function("call_stream_9_frames", |b| {
+        b.iter(|| {
+            runtime.block_on(async {
+                let (_sid, mut receiver) = plugin
+                    .call_stream("benchmark_stream", black_box(&[][..]))
+                    .await
+                    .unwrap();
+                let mut frames = 0;
+                while let Some(frame) = receiver.recv().await {
+                    black_box(&frame);
+                    frames += 1;
+                }
+                assert_eq!(frames, 9);
+            })
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_call_response,
     bench_call_response_with_payload,
     bench_call_response_fast,
-    bench_call_without_response
+    bench_call_without_response,
+    bench_call_stream
 );
 criterion_main!(benches);

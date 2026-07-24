@@ -106,37 +106,33 @@ Release-build snapshot on an Apple M1 Pro.
 
 | Host operation | Time | Throughput |
 |---|---:|---:|
-| Fire-and-forget | 40.798 ns | 24.511M calls/s |
-| Synchronous fast path | 58.917 ns | 16.973M calls/s |
-| Standard unary | 116.99 ns | 8.548M calls/s |
-| Unary + 128-byte payload | 126.03 ns | 7.934M calls/s |
-| Unary + 1 KiB payload | 184.96 ns | 5.407M calls/s |
-| Unary + 4 KiB payload | 259.62 ns | 3.852M calls/s |
+| Fire-and-forget | 40.610 ns | 24.625M calls/s |
+| Synchronous fast path | 59.121 ns | 16.914M calls/s |
+| Standard unary | 95.797 ns | 10.439M calls/s |
+| Unary + 128-byte payload | 110.07 ns | 9.085M calls/s |
+| Unary + 1 KiB payload | 172.30 ns | 5.804M calls/s |
+| Unary + 4 KiB payload | 232.85 ns | 4.295M calls/s |
 
 ### Multi-core (10 workers)
 
 | Host operation | Throughput |
 |---|---:|
-| Fire-and-forget | 125.12M calls/s |
-| Synchronous fast path | 88.67M calls/s |
-| Standard unary | 19.72M calls/s |
+| Fire-and-forget | 126.01M calls/s |
+| Synchronous fast path | 99.18M calls/s |
+| Standard unary | 25.34M calls/s |
 
-### ABI primitives (Criterion)
-
-| ABI operation | Time |
-|---|---:|
-| `NrStr::new` | 0.735 ns |
-| `NrBytes::as_slice` | 0.311 ns |
-| `NrVec::from_vec` | 15.318 ns |
-| `NrVec::into_vec` | 24.544 ns |
-
-These are reference measurements, not cross-platform guarantees. Reproduce them
-with:
+These are reference measurements, not cross-platform guarantees. Single-stream
+uses Criterion estimates; multi-core is a direct-terminal run with 100 requests
+per batch for 10 seconds. Reproduce them with:
 
 ```bash
-cargo bench --package nylon-ring
 cargo bench --package nylon-ring-host
+cargo build --release --package ex-nyring-host --package ex-nyring-plugin
+NYRING_BENCH_WORKERS=10 ./target/release/ex-nyring-host
 ```
+
+See the [performance investigation](docs/PERFORMANCE_INVESTIGATION.md) for the
+scaling curve, variance, profiler evidence, and ABI-v2 proposals.
 
 ---
 
@@ -149,7 +145,7 @@ cargo bench --package nylon-ring-host
 |   ├─ LoadedPlugin + in-flight call gate              |
 |   └─ HostContext                                     |
 |       ├─ thread-local synchronous slot               |
-|       ├─ sharded unary router + inline completion   |
+|       ├─ sharded unary router + inline completion    |
 |       └─ bounded stream queues                       |
 +-------------------------+----------------------------+
                           | C ABI v1

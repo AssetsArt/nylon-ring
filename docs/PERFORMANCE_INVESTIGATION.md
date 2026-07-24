@@ -20,8 +20,10 @@ entry as `Waiting(Option<Waker>)` or `Ready(status, data)`.
 The absolute multi-core result is sensitive to concurrent system load. Repeated
 direct-terminal runs were materially faster than runs launched while Codex was
 compiling and profiling. The README therefore uses the direct-terminal snapshot
-(105.62M fire-and-forget, 80.17M fast, and 22.23M unary calls/s), while the
+(126.01M fire-and-forget, 99.18M fast, and 25.34M unary calls/s), while the
 controlled before/after curve below uses one consistent managed-session method.
+The final direct-terminal Criterion estimates were 40.610 ns for
+fire-and-forget, 59.121 ns for fast unary, and 95.797 ns for standard unary.
 
 ## Measurement controls
 

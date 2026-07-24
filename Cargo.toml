@@ -20,7 +20,7 @@ categories = ["api-bindings", "development-tools::ffi"]
 
 [workspace.dependencies]
 nylon-ring = { version = "0.1.0", path = "crates/nylon-ring" }
-tokio = { version = "1.48", default-features = false, features = ["sync"] }
+tokio = { version = "1.48", default-features = false, features = ["sync", "time"] }
 libloading = "0.9"
 thiserror = "2"
 dashmap = "6.1"

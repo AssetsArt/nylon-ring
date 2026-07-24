@@ -8,6 +8,18 @@ permissions:
   contents: read
 
 jobs:
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Prepare Miri
+        run: cargo miri setup
+      - name: Check core unsafe code with Miri
+        run: cargo miri test --package nylon-ring --lib
+
   msrv:
     runs-on: ubuntu-latest
     steps:
@@ -38,4 +50,6 @@ jobs:
       - name: Package core crate
         run: cargo package --package nylon-ring
       - name: Package host crate
-        run: cargo package --package nylon-ring-host --no-verify
+        run: cargo package --package nylon-ring-host --config 'patch.crates-io.nylon-ring.path="crates/nylon-ring"'
+      - name: Validate C ABI example
+        run: cc -std=c11 -Wall -Wextra -Werror -shared -fPIC examples/c-plugin/plugin.c -o /tmp/libnylon_ring_c_example.so

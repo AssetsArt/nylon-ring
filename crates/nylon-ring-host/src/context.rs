@@ -1,43 +1,58 @@
-use crate::types::{FastPendingMap, FastStateMap, Pending, UnaryResultSlot};
-use nylon_ring::NrHostExt;
+use crate::types::{FastPendingMap, FastStateMap, Pending, StreamFrame, UnaryResultSlot};
+use dashmap::mapref::entry::Entry;
+use nylon_ring::{NrHostExt, NrStatus};
 use rustc_hash::FxBuildHasher;
 use std::cell::Cell;
+use std::sync::OnceLock;
 
 /// Number of shards for the pending requests.
 const SHARD_COUNT: usize = 64;
 const SHARD_MASK: usize = SHARD_COUNT - 1;
 
 /// Host context shared with the plugin.
-#[repr(C)]
 pub(crate) struct HostContext {
-    /// Sharded Pending Map Storage
-    pub(crate) pending_shards: Box<[FastPendingMap]>,
+    /// Sharded pending storage is allocated only when a tracked call is made.
+    pending_shards: OnceLock<Box<[FastPendingMap]>>,
 
     pub(crate) state_per_sid: FastStateMap,
     pub(crate) host_ext: NrHostExt,
+    stream_capacity: usize,
 }
 
 impl HostContext {
-    pub(crate) fn new(host_ext: NrHostExt) -> Self {
-        let mut shards = Vec::with_capacity(SHARD_COUNT);
-        for _ in 0..SHARD_COUNT {
-            shards.push(FastPendingMap::with_hasher(FxBuildHasher));
-        }
-
+    pub(crate) fn new(host_ext: NrHostExt, stream_capacity: usize) -> Self {
         Self {
-            pending_shards: shards.into_boxed_slice(),
+            pending_shards: OnceLock::new(),
             state_per_sid: FastStateMap::with_hasher(FxBuildHasher),
             host_ext,
+            stream_capacity,
         }
+    }
+
+    fn pending_shards(&self) -> &[FastPendingMap] {
+        self.pending_shards.get_or_init(|| {
+            let mut shards = Vec::with_capacity(SHARD_COUNT);
+            for _ in 0..SHARD_COUNT {
+                shards.push(FastPendingMap::with_hasher(FxBuildHasher));
+            }
+            shards.into_boxed_slice()
+        })
+    }
+
+    pub(crate) fn pending_count(&self) -> usize {
+        self.pending_shards
+            .get()
+            .map_or(0, |shards| shards.iter().map(FastPendingMap::len).sum())
+    }
+
+    pub(crate) fn stream_capacity(&self) -> usize {
+        self.stream_capacity
     }
 }
 
 #[inline(always)]
 fn get_shard(ctx: &HostContext, sid: u64) -> &FastPendingMap {
-    unsafe {
-        ctx.pending_shards
-            .get_unchecked((sid as usize) & SHARD_MASK)
-    }
+    &ctx.pending_shards()[(sid as usize) & SHARD_MASK]
 }
 
 /// Insert a pending request.
@@ -56,23 +71,46 @@ pub(crate) fn cleanup_sid(ctx: &HostContext, sid: u64) {
     ctx.state_per_sid.remove(&sid);
 }
 
-/// Reinsert a pending request (used for streaming continuations).
-pub(crate) fn reinsert_pending(ctx: &HostContext, sid: u64, pending: Pending) {
-    // Always insert into Global Shard for continuations to support cross-thread access
-    get_shard(ctx, sid).insert(sid, pending);
-}
+/// Deliver a result while holding one shard entry lock for the whole state
+/// transition. This prevents remove/reinsert and terminal-frame races.
+pub(crate) fn dispatch_pending(ctx: &HostContext, sid: u64, frame: StreamFrame) -> NrStatus {
+    match get_shard(ctx, sid).entry(sid) {
+        Entry::Vacant(_) => NrStatus::Invalid,
+        Entry::Occupied(entry) => {
+            if matches!(entry.get(), Pending::Unary(_)) {
+                let Pending::Unary(tx) = entry.remove() else {
+                    unreachable!();
+                };
+                ctx.state_per_sid.remove(&sid);
+                return if tx.send((frame.status, frame.data)).is_ok() {
+                    NrStatus::Ok
+                } else {
+                    NrStatus::Invalid
+                };
+            }
 
-/// Get a pending stream sender without removing it (Read Lock).
-pub(crate) fn get_pending_stream(
-    ctx: &HostContext,
-    sid: u64,
-) -> Option<tokio::sync::mpsc::UnboundedSender<crate::types::StreamFrame>> {
-    if let Some(entry) = get_shard(ctx, sid).get(&sid)
-        && let crate::types::Pending::Stream(tx) = entry.value()
-    {
-        return Some(tx.clone());
+            let terminal = frame.status.is_terminal();
+            let tx = match entry.get() {
+                Pending::Stream(tx) => tx.clone(),
+                Pending::Unary(_) => unreachable!(),
+            };
+            match tx.try_send(frame) {
+                Ok(()) => {
+                    if terminal {
+                        entry.remove();
+                        ctx.state_per_sid.remove(&sid);
+                    }
+                    NrStatus::Ok
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => NrStatus::Backpressure,
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    entry.remove();
+                    ctx.state_per_sid.remove(&sid);
+                    NrStatus::Invalid
+                }
+            }
+        }
     }
-    None
 }
 
 // --- Thread Local Optimization for Unary Results ---

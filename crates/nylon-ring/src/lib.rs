@@ -11,25 +11,74 @@ use std::fmt;
 /// ABI version implemented by this crate.
 pub const ABI_VERSION: u32 = 1;
 
-/// Status codes for the Nylon Ring ABI.
-#[repr(u32)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum NrStatus {
-    Ok = 0,
-    Err = 1,
-    Invalid = 2,
-    Unsupported = 3,
+/// Status code passed across the Nylon Ring ABI.
+///
+/// This is a transparent integer wrapper rather than a Rust enum so an
+/// unknown value from a newer plugin remains well-defined. Values `7..=u32::MAX`
+/// are reserved for future ABI versions.
+#[repr(transparent)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub struct NrStatus(u32);
+
+#[allow(non_upper_case_globals)]
+impl NrStatus {
+    pub const Ok: Self = Self(0);
+    pub const Err: Self = Self(1);
+    pub const Invalid: Self = Self(2);
+    pub const Unsupported: Self = Self(3);
     /// Streaming completed normally.
-    StreamEnd = 4,
+    pub const StreamEnd: Self = Self(4);
+    /// A plugin panic was contained at the FFI boundary.
+    pub const Panic: Self = Self(5);
+    /// A bounded stream queue cannot currently accept another frame.
+    pub const Backpressure: Self = Self(6);
+
+    /// Creates a status from its stable wire value.
+    pub const fn from_raw(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Returns the stable wire value.
+    pub const fn as_raw(self) -> u32 {
+        self.0
+    }
+
+    /// Returns whether this status terminates a response stream.
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Err | Self::Invalid | Self::Unsupported | Self::StreamEnd | Self::Panic
+        )
+    }
+}
+
+impl fmt::Debug for NrStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match *self {
+            Self::Ok => "Ok",
+            Self::Err => "Err",
+            Self::Invalid => "Invalid",
+            Self::Unsupported => "Unsupported",
+            Self::StreamEnd => "StreamEnd",
+            Self::Panic => "Panic",
+            Self::Backpressure => "Backpressure",
+            Self(value) => return f.debug_tuple("Unknown").field(&value).finish(),
+        };
+        f.write_str(name)
+    }
 }
 
 /// A UTF-8 string slice with a pointer and length.
 /// This struct is `#[repr(C)]` and ABI-stable.
+///
+/// On 64-bit targets `_reserved` occupies the four bytes after `len` that
+/// would otherwise be implicit padding. Producers must set it to zero.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Default)]
 pub struct NrStr {
     pub ptr: *const u8,
     pub len: u32,
+    pub _reserved: u32,
 }
 
 /// A byte slice with a pointer and length.
@@ -131,14 +180,19 @@ pub struct NrAny {
 /// A vector with a pointer, length, and capacity.
 /// This struct is `#[repr(C)]` and ABI-stable.
 ///
-/// Ownership may cross a module boundary only when producer and consumer use
-/// compatible global allocators. Prefer [`NrBytes`] for borrowed input.
+/// Owned values carry a producer-side drop callback so the receiving module
+/// never deallocates them with the wrong allocator. Borrowed foreign values
+/// use `owned = 0` and are never freed by this type. Prefer [`NrBytes`] for
+/// ordinary borrowed input.
 #[repr(C)]
 #[derive(Debug)]
 pub struct NrVec<T> {
     ptr: *mut T,
     len: usize,
     cap: usize,
+    owned: u8,
+    _reserved: [u8; 7],
+    drop_fn: Option<unsafe extern "C" fn(*mut T, usize, usize)>,
 }
 
 impl<T> Default for NrVec<T> {
@@ -147,6 +201,9 @@ impl<T> Default for NrVec<T> {
             ptr: std::ptr::null_mut(),
             len: 0,
             cap: 0,
+            owned: 0,
+            _reserved: [0; 7],
+            drop_fn: None,
         }
     }
 }
@@ -176,8 +233,12 @@ pub struct NrTuple<A, B> {
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct NrHostVTable {
-    pub send_result:
-        unsafe extern "C" fn(host_ctx: *mut c_void, sid: u64, status: NrStatus, payload: NrVec<u8>),
+    pub send_result: unsafe extern "C" fn(
+        host_ctx: *mut c_void,
+        sid: u64,
+        status: NrStatus,
+        payload: NrVec<u8>,
+    ) -> NrStatus,
 }
 
 /// Host extension table for state management.
@@ -266,7 +327,7 @@ macro_rules! define_plugin {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
                 $init_fn(host_ctx, host_vtable)
             }))
-            .unwrap_or($crate::NrStatus::Err)
+            .unwrap_or($crate::NrStatus::Panic)
         }
 
         unsafe extern "C" fn plugin_shutdown_wrapper() {
@@ -294,7 +355,7 @@ macro_rules! define_plugin {
                     _ => $crate::NrStatus::Invalid,
                 }
             }))
-            .unwrap_or($crate::NrStatus::Err)
+            .unwrap_or($crate::NrStatus::Panic)
         }
 
         unsafe extern "C" fn plugin_stream_data_wrapper(
@@ -309,7 +370,7 @@ macro_rules! define_plugin {
                 #[allow(unreachable_code)]
                 $crate::NrStatus::Unsupported
             }))
-            .unwrap_or($crate::NrStatus::Err)
+            .unwrap_or($crate::NrStatus::Panic)
         }
 
         unsafe extern "C" fn plugin_stream_close_wrapper(
@@ -323,7 +384,7 @@ macro_rules! define_plugin {
                 #[allow(unreachable_code)]
                 $crate::NrStatus::Unsupported
             }))
-            .unwrap_or($crate::NrStatus::Err)
+            .unwrap_or($crate::NrStatus::Panic)
         }
     };
 }
@@ -352,6 +413,7 @@ impl NrStr {
         Self {
             ptr: s.as_ptr(),
             len,
+            _reserved: 0,
         }
     }
 
@@ -364,6 +426,7 @@ impl NrStr {
         Self {
             ptr: s.as_ptr(),
             len: s.len() as u32,
+            _reserved: 0,
         }
     }
 
@@ -398,6 +461,7 @@ impl NrStr {
     pub fn clear(&mut self) {
         self.ptr = std::ptr::null();
         self.len = 0;
+        self._reserved = 0;
     }
 }
 
@@ -992,20 +1056,33 @@ impl<T> NrVec<T> {
         let ptr = v.as_mut_ptr();
         let len = v.len();
         let cap = v.capacity();
-        Self { ptr, len, cap }
-    }
-
-    /// Converts this ABI vector back into a Rust vector without copying.
-    pub fn into_vec(self) -> Vec<T> {
-        let this = std::mem::ManuallyDrop::new(self);
-        if this.cap == 0 {
-            debug_assert_eq!(this.len, 0);
-            return Vec::new();
+        Self {
+            ptr,
+            len,
+            cap,
+            owned: 1,
+            _reserved: [0; 7],
+            drop_fn: Some(drop_vec::<T>),
         }
-        unsafe { Vec::from_raw_parts(this.ptr, this.len, this.cap) }
     }
 
-    pub fn push(&mut self, value: T) {
+    /// Copies the elements into a vector owned by the current module.
+    ///
+    /// The source allocation is released by the allocator-specific callback
+    /// supplied by the module that created this `NrVec`.
+    pub fn into_vec(self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.as_slice().to_vec()
+    }
+
+    fn push(&mut self, value: T) {
+        if self.owned == 0 && self.ptr.is_null() && self.len == 0 && self.cap == 0 {
+            self.owned = 1;
+            self.drop_fn = Some(drop_vec::<T>);
+        }
+        assert_eq!(self.owned, 1, "cannot mutate a borrowed NrVec");
         if self.len == self.cap {
             self.reserve(1);
         }
@@ -1015,7 +1092,8 @@ impl<T> NrVec<T> {
         self.len += 1;
     }
 
-    pub fn clear(&mut self) {
+    fn clear(&mut self) {
+        assert_eq!(self.owned, 1, "cannot mutate a borrowed NrVec");
         while self.len > 0 {
             self.len -= 1;
             unsafe {
@@ -1024,7 +1102,8 @@ impl<T> NrVec<T> {
         }
     }
 
-    pub fn reserve(&mut self, additional: usize) {
+    fn reserve(&mut self, additional: usize) {
+        assert_eq!(self.owned, 1, "cannot resize a borrowed NrVec");
         if std::mem::size_of::<T>() == 0 {
             assert!(
                 self.len.checked_add(additional).is_some(),
@@ -1103,20 +1182,24 @@ impl<T> NrVec<T> {
 
 impl<T> Drop for NrVec<T> {
     fn drop(&mut self) {
-        if self.len != 0 {
+        if self.owned == 1
+            && let Some(drop_fn) = self.drop_fn
+        {
             unsafe {
-                let s = std::slice::from_raw_parts_mut(self.ptr, self.len);
-                std::ptr::drop_in_place(s);
-            }
-        }
-        if self.cap != 0 && std::mem::size_of::<T>() != 0 {
-            unsafe {
-                let layout = std::alloc::Layout::array::<T>(self.cap)
-                    .expect("valid NrVec capacity must have a valid layout");
-                std::alloc::dealloc(self.ptr.cast::<u8>(), layout);
+                drop_fn(self.ptr, self.len, self.cap);
             }
         }
     }
+}
+
+unsafe extern "C" fn drop_vec<T>(ptr: *mut T, len: usize, cap: usize) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if cap != 0 {
+            unsafe {
+                drop(Vec::from_raw_parts(ptr, len, cap));
+            }
+        }
+    }));
 }
 
 impl<T> NrVec<T> {
@@ -1124,7 +1207,7 @@ impl<T> NrVec<T> {
         self.as_slice().iter()
     }
 
-    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+    fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
         self.as_mut_slice().iter_mut()
     }
 
@@ -1136,7 +1219,7 @@ impl<T> NrVec<T> {
         }
     }
 
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
+    fn as_mut_slice(&mut self) -> &mut [T] {
         if self.len == 0 {
             &mut []
         } else {
@@ -1154,84 +1237,12 @@ impl<'a, T> IntoIterator for &'a NrVec<T> {
     }
 }
 
-impl<'a, T> IntoIterator for &'a mut NrVec<T> {
-    type Item = &'a mut T;
-    type IntoIter = std::slice::IterMut<'a, T>;
+impl<T: Clone> IntoIterator for NrVec<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.iter_mut()
-    }
-}
-
-/// An iterator that moves out of an NrVec.
-pub struct IntoIter<T> {
-    buf: *mut T,
-    cap: usize,
-    index: usize,
-    len: usize,
-}
-
-impl<T> Iterator for IntoIter<T> {
-    type Item = T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index == self.len {
-            None
-        } else {
-            let value = unsafe { std::ptr::read(self.buf.add(self.index)) };
-            self.index += 1;
-            Some(value)
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = self.len - self.index;
-        (len, Some(len))
-    }
-}
-
-impl<T> ExactSizeIterator for IntoIter<T> {}
-impl<T> std::iter::FusedIterator for IntoIter<T> {}
-
-impl<T> Drop for IntoIter<T> {
-    fn drop(&mut self) {
-        // Drop remaining elements
-        if self.index != self.len {
-            unsafe {
-                let ptr = self.buf.add(self.index);
-                let s = std::slice::from_raw_parts_mut(ptr, self.len - self.index);
-                std::ptr::drop_in_place(s);
-            }
-        }
-        // Deallocate buffer
-        if self.cap != 0 && std::mem::size_of::<T>() != 0 {
-            unsafe {
-                let layout = std::alloc::Layout::array::<T>(self.cap)
-                    .expect("valid NrVec capacity must have a valid layout");
-                std::alloc::dealloc(self.buf.cast::<u8>(), layout);
-            }
-        }
-    }
-}
-
-impl<T> IntoIterator for NrVec<T> {
-    type Item = T;
-    type IntoIter = IntoIter<T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        // Prevent NrVec drop from deallocating
-        let this = std::mem::ManuallyDrop::new(self);
-
-        let ptr = this.ptr;
-        let cap = this.cap;
-        let len = this.len;
-
-        IntoIter {
-            buf: ptr,
-            cap,
-            index: 0,
-            len,
-        }
+        self.into_vec().into_iter()
     }
 }
 
@@ -1305,9 +1316,8 @@ mod tests {
         assert_eq!(size_of::<NrBytes>(), 16);
         assert_eq!(align_of::<NrBytes>(), 8);
 
-        // Verify NrVec layout (ptr + u64 + u64)
-        // On 64-bit: 8 bytes ptr + 8 bytes len + 8 bytes cap = 24 bytes
-        assert_eq!(size_of::<NrVec<u8>>(), 24);
+        // ptr + len + cap + ownership/reserved + allocator-specific drop fn
+        assert_eq!(size_of::<NrVec<u8>>(), 40);
         assert_eq!(align_of::<NrVec<u8>>(), 8);
 
         // Verify NrTuple layout (A + B)
@@ -1543,6 +1553,7 @@ mod tests {
         let invalid = NrStr {
             ptr: invalid_utf8.as_ptr(),
             len: 1,
+            _reserved: 0,
         };
         assert!(matches!(
             unsafe { invalid.as_str() },
@@ -1564,13 +1575,14 @@ mod tests {
         let panic_entry = NrStr::new("panic");
         assert_eq!(
             unsafe { plugin_handle_wrapper(panic_entry, 1, NrBytes::default()) },
-            NrStatus::Err
+            NrStatus::Panic
         );
 
         let invalid_utf8 = [0xff];
         let invalid_entry = NrStr {
             ptr: invalid_utf8.as_ptr(),
             len: 1,
+            _reserved: 0,
         };
         assert_eq!(
             unsafe { plugin_handle_wrapper(invalid_entry, 2, NrBytes::default()) },

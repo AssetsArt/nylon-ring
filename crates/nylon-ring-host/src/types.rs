@@ -1,7 +1,7 @@
 //! Type definitions and aliases for the nylon-ring-host crate.
 
 use crate::error::NylonRingHostError;
-use crate::{context, context::HostContext};
+use crate::{PluginCallGuard, context, context::HostContext};
 use dashmap::DashMap;
 use nylon_ring::NrStatus;
 use rustc_hash::FxBuildHasher;
@@ -15,9 +15,8 @@ pub type Result<T> = std::result::Result<T, NylonRingHostError>;
 /// Pending request state.
 #[derive(Debug)]
 pub(crate) enum Pending {
-    #[allow(dead_code)]
     Unary(oneshot::Sender<(NrStatus, Vec<u8>)>),
-    Stream(mpsc::UnboundedSender<StreamFrame>),
+    Stream(mpsc::Sender<StreamFrame>),
 }
 
 /// A frame in a streaming response.
@@ -31,21 +30,24 @@ pub struct StreamFrame {
 ///
 /// Dropping the receiver unregisters its pending stream from the host.
 pub struct StreamReceiver {
-    inner: mpsc::UnboundedReceiver<StreamFrame>,
+    inner: mpsc::Receiver<StreamFrame>,
     host_ctx: Arc<HostContext>,
     sid: u64,
+    _call_guard: Option<PluginCallGuard>,
 }
 
 impl StreamReceiver {
     pub(crate) fn new(
-        inner: mpsc::UnboundedReceiver<StreamFrame>,
+        inner: mpsc::Receiver<StreamFrame>,
         host_ctx: Arc<HostContext>,
         sid: u64,
+        call_guard: Option<PluginCallGuard>,
     ) -> Self {
         Self {
             inner,
             host_ctx,
             sid,
+            _call_guard: call_guard,
         }
     }
 

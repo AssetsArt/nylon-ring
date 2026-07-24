@@ -66,24 +66,8 @@ fn bench_nr_vec(c: &mut Criterion) {
         )
     });
 
-    c.bench_function("NrVec::push", |b| {
-        b.iter_batched(
-            NrVec::<u32>::default,
-            |mut nr_vec| {
-                for i in 0..100 {
-                    nr_vec.push(black_box(i));
-                }
-                black_box(nr_vec);
-            },
-            criterion::BatchSize::SmallInput,
-        )
-    });
-
     c.bench_function("NrVec::as_slice", |b| {
-        let mut nr_vec = NrVec::<u32>::default();
-        for i in 0..100 {
-            nr_vec.push(i);
-        }
+        let nr_vec = NrVec::from_vec((0..100_u32).collect());
 
         b.iter(|| {
             black_box(nr_vec.as_slice());

@@ -6,13 +6,13 @@ static HOST_CTX: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static HOST_VTABLE: AtomicPtr<NrHostVTable> = AtomicPtr::new(std::ptr::null_mut());
 
 #[inline(always)]
-pub fn send_result(sid: u64, status: NrStatus, data: nylon_ring::NrVec<u8>) {
+pub fn send_result(sid: u64, status: NrStatus, data: nylon_ring::NrVec<u8>) -> NrStatus {
     let host_ctx = HOST_CTX.load(Ordering::Acquire);
     let host_vtable = HOST_VTABLE.load(Ordering::Acquire);
     assert!(!host_ctx.is_null(), "plugin is not initialized");
     assert!(!host_vtable.is_null(), "plugin is not initialized");
     let send_result = unsafe { (*host_vtable).send_result };
-    unsafe { send_result(host_ctx, sid, status, data) };
+    unsafe { send_result(host_ctx, sid, status, data) }
 }
 
 // Initialize the plugin
@@ -48,9 +48,7 @@ unsafe fn handle_echo(sid: u64, payload: NrBytes) -> NrStatus {
     let nr_vec = NrVec::from_vec(vec_bytes);
 
     // Send response back to host (transfer ownership)
-    send_result(sid, NrStatus::Ok, nr_vec);
-
-    NrStatus::Ok
+    send_result(sid, NrStatus::Ok, nr_vec)
 }
 
 // Uppercase handler - converts input to uppercase
@@ -64,9 +62,7 @@ unsafe fn handle_uppercase(sid: u64, payload: NrBytes) -> NrStatus {
 
     // Send response back to host
     let nr_vec = NrVec::from_string(text);
-    send_result(sid, NrStatus::Ok, nr_vec);
-
-    NrStatus::Ok
+    send_result(sid, NrStatus::Ok, nr_vec)
 }
 
 // Stream handler - sends multiple responses
@@ -77,15 +73,16 @@ unsafe fn handle_stream(sid: u64, _payload: NrBytes) -> NrStatus {
     for i in 1..=5 {
         let message = format!("Frame {}/5", i);
         let nr_vec = NrVec::from_string(message);
-        send_result(sid, NrStatus::Ok, nr_vec);
+        let status = send_result(sid, NrStatus::Ok, nr_vec);
+        if status != NrStatus::Ok {
+            return status;
+        }
     }
 
     // Send final frame with StreamEnd status
     let final_message = "Stream complete";
     let nr_vec = NrVec::from_string(final_message.to_string());
-    send_result(sid, NrStatus::StreamEnd, nr_vec);
-
-    NrStatus::Ok
+    send_result(sid, NrStatus::StreamEnd, nr_vec)
 }
 
 // Minimal synchronous handler used by both response benchmarks.
@@ -94,8 +91,7 @@ unsafe fn handle_benchmark(sid: u64, payload: NrBytes) -> NrStatus {
         Ok(response) => response,
         Err(_) => return NrStatus::Invalid,
     };
-    send_result(sid, NrStatus::Ok, response);
-    NrStatus::Ok
+    send_result(sid, NrStatus::Ok, response)
 }
 
 // benchmark - without response

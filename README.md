@@ -14,12 +14,17 @@ around an explicit C-compatible ABI. It provides:
 
 ## Status
 
-Version `0.1.0` implements ABI version 1. The API is suitable for native Rust
-hosts and plugins that are built for the same target and use compatible global
-allocators. See [Safety and compatibility](#safety-and-compatibility) before
-using it in a production plugin system.
+Version `0.1.0` implements ABI version 1. The API is suitable for trusted
+native hosts and plugins built for the same target. Owned ABI vectors carry a
+producer-side drop callback, so the receiving module does not free memory with
+the wrong allocator. See [Safety and compatibility](#safety-and-compatibility)
+before using it in a production plugin system.
 
 The minimum supported Rust version is 1.88.
+
+See the [ABI evolution policy](https://github.com/AssetsArt/nylon-ring/blob/main/docs/ABI_EVOLUTION.md)
+and the [reference C plugin](https://github.com/AssetsArt/nylon-ring/tree/main/examples/c-plugin)
+for wire-layout details.
 
 ## Installation
 
@@ -83,8 +88,7 @@ unsafe fn echo(sid: u64, payload: NrBytes) -> NrStatus {
 
     let response = NrVec::from_vec(bytes.to_vec());
     let send_result = unsafe { (*vtable).send_result };
-    unsafe { send_result(ctx, sid, NrStatus::Ok, response) };
-    NrStatus::Ok
+    unsafe { send_result(ctx, sid, NrStatus::Ok, response) }
 }
 
 fn shutdown() {
@@ -131,13 +135,17 @@ Choose the dynamic-library suffix for the target platform:
 `PluginHandle` also provides:
 
 - `call` for fire-and-forget requests.
+- `call_response_timeout` for bounded response waits.
 - `call_response_fast` for handlers that respond synchronously on the calling
   thread.
 - `call_stream`, `send_stream_data`, and `close_stream` for bidirectional
   streams.
 
+Streams use a bounded queue and return `NrStatus::Backpressure` to the plugin
+when full. Configure the queue with `NylonRingHost::with_stream_capacity`.
 Dropping an in-progress response future or `StreamReceiver` unregisters its
-pending request from the host.
+pending request from the host. `reload_with_grace`, `unload_with_grace`, and
+`metrics` provide production lifecycle and monitoring hooks.
 
 ## Running the workspace example
 
@@ -158,9 +166,10 @@ arbitrary dynamic libraries safe. Plugin authors must uphold these rules:
 - `NrStr` and `NrBytes` are borrowed views. A plugin must copy their contents
   before retaining them after a callback returns. Their accessors are unsafe
   because lifetimes cannot be represented in the C ABI.
-- `NrVec<T>` transfers a Rust allocation between modules. Both modules must use
-  compatible global allocators, and `T` must have a compatible layout. Do not
-  construct an `NrVec` from memory allocated by an unrelated C allocator.
+- `NrVec<T>` carries explicit ownership and a producer-side drop callback. The
+  receiver copies elements into its own allocator before invoking that callback.
+  A borrowed foreign buffer must use `owned = 0`; an owned buffer must provide
+  a matching `drop_fn`. `T` must have a compatible C layout.
 - Plugin `shutdown` must stop worker threads and callbacks before the dynamic
   library is unloaded.
 - Panic containment requires unwinding panics. A crate built with

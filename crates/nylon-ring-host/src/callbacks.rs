@@ -19,9 +19,9 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
     sid: u64,
     status: NrStatus,
     payload: nylon_ring::NrVec<u8>,
-) {
+) -> NrStatus {
     if host_ctx.is_null() {
-        return;
+        return NrStatus::Invalid;
     }
     let ctx = unsafe { &*host_ctx.cast::<HostContext>() };
 
@@ -47,65 +47,11 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
 
     if handled_fast {
         ctx.state_per_sid.remove(&sid);
-        return;
+        return NrStatus::Ok;
     }
 
-    // ── SHARDED MAP / CHANNEL PATH ──
-    let data_vec = match data_vec.take() {
-        Some(v) => v,
-        None => return, // Already consumed
-    };
-
-    // Optimization: Try to get stream sender with Read Lock first (99% case for streams)
-    if let Some(tx) = crate::context::get_pending_stream(ctx, sid) {
-        let _ = tx.send(StreamFrame {
-            status,
-            data: data_vec,
-        });
-
-        let is_finished = matches!(
-            status,
-            NrStatus::Err | NrStatus::Invalid | NrStatus::Unsupported | NrStatus::StreamEnd
-        );
-
-        if is_finished {
-            // Only remove if finished (Upgrade to Write Lock)
-            crate::context::cleanup_sid(ctx, sid);
-        }
-        return;
-    }
-
-    // Fallback: Try normal lookup/removal from Sharded Map (Write Lock)
-    // This handles Unary requests (which are always removed)
-    if let Some(entry) = crate::context::remove_pending(ctx, sid) {
-        match entry {
-            crate::types::Pending::Unary(tx) => {
-                // Oneshot: just send result
-                let _ = tx.send((status, data_vec));
-                ctx.state_per_sid.remove(&sid);
-            }
-            crate::types::Pending::Stream(tx) => {
-                // Should technically be caught by optimization above, but handle race conditions or edge cases
-                // Stream: send frame
-                let _ = tx.send(StreamFrame {
-                    status,
-                    data: data_vec,
-                });
-
-                // If stream is NOT finished, we must PUT IT BACK so next callback finds it.
-                let is_finished = matches!(
-                    status,
-                    NrStatus::Err | NrStatus::Invalid | NrStatus::Unsupported | NrStatus::StreamEnd
-                );
-
-                if !is_finished {
-                    crate::context::reinsert_pending(ctx, sid, crate::types::Pending::Stream(tx));
-                } else {
-                    ctx.state_per_sid.remove(&sid);
-                }
-            }
-        }
-    }
+    let data = data_vec.take().expect("fast path did not consume payload");
+    crate::context::dispatch_pending(ctx, sid, StreamFrame { status, data })
 }
 
 /// Callback for setting per-SID state in the host.

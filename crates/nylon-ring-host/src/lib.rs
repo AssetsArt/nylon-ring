@@ -9,6 +9,8 @@ mod callbacks;
 mod context;
 mod error;
 mod extensions;
+#[cfg(test)]
+mod loom_tests;
 mod sid;
 mod types;
 
@@ -22,11 +24,25 @@ use sid::next_sid;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 pub use error::NylonRingHostError;
 pub use extensions::Extensions;
 pub use nylon_ring::NrStatus;
 pub use types::{Result, StreamFrame, StreamReceiver};
+
+/// Default number of frames buffered for each response stream.
+pub const DEFAULT_STREAM_CAPACITY: usize = 64;
+
+/// Point-in-time host metrics suitable for application monitoring hooks.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct HostMetrics {
+    pub loaded_plugins: usize,
+    pub pending_requests: usize,
+    pub state_sessions: usize,
+    pub in_flight_calls: usize,
+}
 
 struct PendingGuard {
     host_ctx: Arc<HostContext>,
@@ -76,6 +92,38 @@ pub struct LoadedPlugin {
     vtable: &'static NrPluginVTable,
     host_ctx: Arc<HostContext>,
     path: String,
+    accepting_calls: AtomicBool,
+    in_flight_calls: AtomicUsize,
+}
+
+impl LoadedPlugin {
+    fn begin_call(self: &Arc<Self>) -> Result<PluginCallGuard> {
+        if !self.accepting_calls.load(Ordering::Acquire) {
+            return Err(NylonRingHostError::PluginUnloaded);
+        }
+        self.in_flight_calls.fetch_add(1, Ordering::AcqRel);
+        if !self.accepting_calls.load(Ordering::Acquire) {
+            self.in_flight_calls.fetch_sub(1, Ordering::AcqRel);
+            return Err(NylonRingHostError::PluginUnloaded);
+        }
+        Ok(PluginCallGuard {
+            plugin: self.clone(),
+        })
+    }
+
+    fn stop_accepting_calls(&self) {
+        self.accepting_calls.store(false, Ordering::Release);
+    }
+}
+
+pub(crate) struct PluginCallGuard {
+    plugin: Arc<LoadedPlugin>,
+}
+
+impl Drop for PluginCallGuard {
+    fn drop(&mut self) {
+        self.plugin.in_flight_calls.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl Drop for LoadedPlugin {
@@ -95,8 +143,17 @@ pub struct PluginHandle {
 }
 
 impl PluginHandle {
+    fn status_error(status: NrStatus) -> NylonRingHostError {
+        if status == NrStatus::Panic {
+            NylonRingHostError::PluginPanicked
+        } else {
+            NylonRingHostError::PluginHandleFailed(status)
+        }
+    }
+
     /// Call a plugin entry point with a request-response pattern.
     pub async fn call_response(&self, entry: &str, payload: &[u8]) -> Result<(NrStatus, Vec<u8>)> {
+        let _call_guard = self.plugin.begin_call()?;
         // Create Oneshot Channel
         let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -116,11 +173,11 @@ impl PluginHandle {
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
         if status != NrStatus::Ok {
-            return Err(NylonRingHostError::PluginHandleFailed(status));
+            return Err(Self::status_error(status));
         }
 
         // Wait for response (Allocation here for oneshot state)
-        rx.await.map_err(|_| NylonRingHostError::OneshotClosed)
+        rx.await.map_err(|_| NylonRingHostError::PluginUnloaded)
     }
 
     /// Like [`PluginHandle::call_response`] but bounded by a timeout.
@@ -135,35 +192,28 @@ impl PluginHandle {
         payload: &[u8],
         timeout: std::time::Duration,
     ) -> Result<(NrStatus, Vec<u8>)> {
+        let _call_guard = self.plugin.begin_call()?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         let sid = next_sid();
 
         context::insert_pending(&self.plugin.host_ctx, sid, types::Pending::Unary(tx));
+        let _pending_guard = PendingGuard::new(self.plugin.host_ctx.clone(), sid);
 
         let payload_bytes = NrBytes::from_slice(payload);
         let handle_raw_fn = match self.plugin.vtable.handle {
             Some(f) => f,
-            None => {
-                context::remove_pending(&self.plugin.host_ctx, sid);
-                return Err(NylonRingHostError::MissingRequiredFunctions);
-            }
+            None => return Err(NylonRingHostError::MissingRequiredFunctions),
         };
 
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
         if status != NrStatus::Ok {
-            context::remove_pending(&self.plugin.host_ctx, sid);
-            return Err(NylonRingHostError::PluginHandleFailed(status));
+            return Err(Self::status_error(status));
         }
 
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(v)) => Ok(v),
-            Ok(Err(_)) => Err(NylonRingHostError::OneshotClosed),
-            Err(_) => {
-                // Drop the still-registered pending slot so a late callback
-                // does not write into a freed oneshot sender.
-                context::remove_pending(&self.plugin.host_ctx, sid);
-                Err(NylonRingHostError::Timeout)
-            }
+            Ok(Err(_)) => Err(NylonRingHostError::PluginUnloaded),
+            Err(_) => Err(NylonRingHostError::Timeout),
         }
     }
 
@@ -173,17 +223,8 @@ impl PluginHandle {
         entry: &str,
         payload: &[u8],
     ) -> Result<(NrStatus, Vec<u8>)> {
-        // RAII guard: ensures the TLS slot pointer is cleared even if the
-        // plugin's `handle` callback panics across the FFI boundary. Without
-        // this, an unwind would leave a dangling pointer to a stack slot,
-        // and the next thread-local consumer could write into freed memory.
-        struct TlsSlotGuard;
-        impl Drop for TlsSlotGuard {
-            fn drop(&mut self) {
-                CURRENT_UNARY_RESULT.with(|cell| cell.set(std::ptr::null_mut()));
-            }
-        }
-
+        let _call_guard = self.plugin.begin_call()?;
+        let sid = next_sid();
         let mut slot = types::UnaryResultSlot { sid, result: None };
 
         let binding = FastSlotBinding::bind(&mut slot)?;
@@ -201,17 +242,18 @@ impl PluginHandle {
         self.plugin.host_ctx.state_per_sid.remove(&sid);
 
         if status != NrStatus::Ok {
-            return Err(NylonRingHostError::PluginHandleFailed(status));
+            return Err(Self::status_error(status));
         }
 
         match slot.result {
             Some((st, data)) => Ok((st, data)),
-            None => Err(NylonRingHostError::OneshotClosed),
+            None => Err(NylonRingHostError::MissingSynchronousResponse),
         }
     }
 
     /// Fire-and-forget call to a plugin entry point.
     pub async fn call(&self, entry: &str, payload: &[u8]) -> Result<NrStatus> {
+        let _call_guard = self.plugin.begin_call()?;
         // Use Fast SID
         let sid = next_sid();
 
@@ -230,16 +272,18 @@ impl PluginHandle {
         self.plugin.host_ctx.state_per_sid.remove(&sid);
 
         if status != NrStatus::Ok {
-            return Err(NylonRingHostError::PluginHandleFailed(status));
+            return Err(Self::status_error(status));
         }
         Ok(status)
     }
 
     /// Call a plugin entry point with a streaming response pattern.
     pub async fn call_stream(&self, entry: &str, payload: &[u8]) -> Result<(u64, StreamReceiver)> {
+        let call_guard = self.plugin.begin_call()?;
         let sid = next_sid();
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<StreamFrame>();
+        let (tx, rx) =
+            tokio::sync::mpsc::channel::<StreamFrame>(self.plugin.host_ctx.stream_capacity());
 
         // Register the stream channel (Map)
         context::insert_pending(&self.plugin.host_ctx, sid, types::Pending::Stream(tx));
@@ -258,12 +302,12 @@ impl PluginHandle {
 
         if status != NrStatus::Ok {
             context::cleanup_sid(&self.plugin.host_ctx, sid);
-            return Err(NylonRingHostError::PluginHandleFailed(status));
+            return Err(Self::status_error(status));
         }
 
         Ok((
             sid,
-            StreamReceiver::new(rx, self.plugin.host_ctx.clone(), sid),
+            StreamReceiver::new(rx, self.plugin.host_ctx.clone(), sid, Some(call_guard)),
         ))
     }
 
@@ -303,10 +347,22 @@ impl Default for NylonRingHost {
 impl NylonRingHost {
     /// Create a new empty host.
     pub fn new() -> Self {
-        let host_ctx = Arc::new(HostContext::new(NrHostExt {
-            set_state: set_state_callback,
-            get_state: get_state_callback,
-        }));
+        Self::with_stream_capacity(DEFAULT_STREAM_CAPACITY)
+    }
+
+    /// Create a host with a bounded per-stream frame capacity.
+    pub fn with_stream_capacity(stream_capacity: usize) -> Self {
+        assert!(
+            stream_capacity > 0,
+            "stream capacity must be greater than zero"
+        );
+        let host_ctx = Arc::new(HostContext::new(
+            NrHostExt {
+                set_state: set_state_callback,
+                get_state: get_state_callback,
+            },
+            stream_capacity,
+        ));
 
         let host_vtable = Box::new(NrHostVTable {
             send_result: send_result_vec_callback,
@@ -378,21 +434,47 @@ impl NylonRingHost {
                 vtable: plugin_vtable,
                 host_ctx: self.host_ctx.clone(),
                 path: path.to_string(),
+                accepting_calls: AtomicBool::new(true),
+                in_flight_calls: AtomicUsize::new(0),
             };
 
-            self.plugins.insert(name.to_string(), Arc::new(loaded));
+            if let Some(previous) = self.plugins.insert(name.to_string(), Arc::new(loaded)) {
+                previous.stop_accepting_calls();
+            }
             Ok(())
         }
     }
 
     /// Unload a plugin by name.
     pub fn unload(&mut self, name: &str) -> Result<()> {
-        self.plugins.remove(name);
+        let plugin = self
+            .plugins
+            .remove(name)
+            .ok_or_else(|| NylonRingHostError::PluginNotFound(name.to_owned()))?;
+        plugin.stop_accepting_calls();
         Ok(())
+    }
+
+    /// Stop accepting new calls, then wait for tracked calls to drain.
+    pub async fn unload_with_grace(&mut self, name: &str, grace: Duration) -> Result<()> {
+        let plugin = self
+            .plugins
+            .remove(name)
+            .ok_or_else(|| NylonRingHostError::PluginNotFound(name.to_owned()))?;
+        plugin.stop_accepting_calls();
+        Self::wait_for_drain(&plugin, grace).await
     }
 
     /// Reload all plugins.
     pub fn reload(&mut self) -> Result<()> {
+        let active_calls: usize = self
+            .plugins
+            .values()
+            .map(|plugin| plugin.in_flight_calls.load(Ordering::Acquire))
+            .sum();
+        if active_calls != 0 {
+            return Err(NylonRingHostError::PluginBusy { active_calls });
+        }
         let mut plugins_to_reload = Vec::new();
         for (name, plugin) in &self.plugins {
             plugins_to_reload.push((name.clone(), plugin.path.clone()));
@@ -407,11 +489,62 @@ impl NylonRingHost {
         Ok(())
     }
 
+    /// Reload all plugins and wait for calls on replaced instances to drain.
+    pub async fn reload_with_grace(&mut self, grace: Duration) -> Result<()> {
+        let old_plugins: Vec<_> = self
+            .plugins
+            .drain()
+            .map(|(name, plugin)| {
+                plugin.stop_accepting_calls();
+                (name, plugin)
+            })
+            .collect();
+        for (_, plugin) in &old_plugins {
+            Self::wait_for_drain(plugin, grace).await?;
+        }
+        let plugins_to_reload: Vec<_> = old_plugins
+            .iter()
+            .map(|(name, plugin)| (name.clone(), plugin.path.clone()))
+            .collect();
+        drop(old_plugins);
+        for (name, path) in plugins_to_reload {
+            self.load(&name, &path)?;
+        }
+        Ok(())
+    }
+
+    async fn wait_for_drain(plugin: &LoadedPlugin, grace: Duration) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + grace;
+        while plugin.in_flight_calls.load(Ordering::Acquire) != 0 {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(NylonRingHostError::DrainTimeout {
+                    remaining: plugin.in_flight_calls.load(Ordering::Acquire),
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        Ok(())
+    }
+
     /// Get a handle to a loaded plugin by name.
     pub fn plugin(&self, name: &str) -> Option<PluginHandle> {
         self.plugins
             .get(name)
             .map(|p| PluginHandle { plugin: p.clone() })
+    }
+
+    /// Capture lightweight host metrics without allocating the shard map.
+    pub fn metrics(&self) -> HostMetrics {
+        HostMetrics {
+            loaded_plugins: self.plugins.len(),
+            pending_requests: self.host_ctx.pending_count(),
+            state_sessions: self.host_ctx.state_per_sid.len(),
+            in_flight_calls: self
+                .plugins
+                .values()
+                .map(|plugin| plugin.in_flight_calls.load(Ordering::Relaxed))
+                .sum(),
+        }
     }
 
     /// Get host extension pointer from host_ctx.
@@ -433,6 +566,62 @@ impl NylonRingHost {
 mod tests {
     use super::*;
 
+    fn example_plugin_path() -> Option<std::path::PathBuf> {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()?
+            .parent()?;
+        let manifest = workspace_root.join("examples/ex-nyring-plugin/Cargo.toml");
+        if !manifest.is_file() {
+            return None;
+        }
+        let status = std::process::Command::new("cargo")
+            .args(["build", "--release", "--manifest-path"])
+            .arg(&manifest)
+            .status()
+            .ok()?;
+        if !status.success() {
+            return None;
+        }
+        let filename = if cfg!(target_os = "macos") {
+            "libex_nyring_plugin.dylib"
+        } else if cfg!(target_os = "windows") {
+            "ex_nyring_plugin.dll"
+        } else {
+            "libex_nyring_plugin.so"
+        };
+        Some(workspace_root.join("target/release").join(filename))
+    }
+
+    fn c_plugin_path() -> Option<std::path::PathBuf> {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()?
+            .parent()?;
+        let source = workspace_root.join("examples/c-plugin/plugin.c");
+        if !source.is_file() {
+            return None;
+        }
+        let extension = if cfg!(target_os = "macos") {
+            "dylib"
+        } else if cfg!(target_os = "windows") {
+            "dll"
+        } else {
+            "so"
+        };
+        let output = workspace_root
+            .join("target/c-example")
+            .join(format!("libnylon_ring_c_example.{extension}"));
+        std::fs::create_dir_all(output.parent()?).ok()?;
+        let status = std::process::Command::new("cc")
+            .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-shared"])
+            .args((!cfg!(target_os = "windows")).then_some("-fPIC"))
+            .arg(&source)
+            .arg("-o")
+            .arg(&output)
+            .status()
+            .ok()?;
+        status.success().then_some(output)
+    }
+
     #[test]
     fn dropping_pending_guard_unregisters_unary_request() {
         let host = NylonRingHost::new();
@@ -451,13 +640,176 @@ mod tests {
     fn dropping_stream_receiver_unregisters_stream() {
         let host = NylonRingHost::new();
         let sid = 43;
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
         context::insert_pending(&host.host_ctx, sid, types::Pending::Stream(tx));
         host.host_ctx.state_per_sid.insert(sid, HashMap::new());
 
-        drop(StreamReceiver::new(rx, host.host_ctx.clone(), sid));
+        drop(StreamReceiver::new(rx, host.host_ctx.clone(), sid, None));
 
         assert!(context::remove_pending(&host.host_ctx, sid).is_none());
         assert!(!host.host_ctx.state_per_sid.contains_key(&sid));
+    }
+
+    #[test]
+    fn fast_slot_reentry_is_rejected_and_binding_is_cleared() {
+        let mut first = types::UnaryResultSlot {
+            sid: 1,
+            result: None,
+        };
+        let mut second = types::UnaryResultSlot {
+            sid: 2,
+            result: None,
+        };
+        let binding = FastSlotBinding::bind(&mut first).unwrap();
+        assert!(matches!(
+            FastSlotBinding::bind(&mut second),
+            Err(NylonRingHostError::FastPathReentrant)
+        ));
+        drop(binding);
+        assert!(FastSlotBinding::bind(&mut second).is_ok());
+    }
+
+    #[test]
+    fn bounded_stream_reports_backpressure_and_removes_terminal_once() {
+        let host = NylonRingHost::with_stream_capacity(1);
+        let sid = 44;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        context::insert_pending(&host.host_ctx, sid, types::Pending::Stream(tx));
+
+        assert_eq!(
+            context::dispatch_pending(
+                &host.host_ctx,
+                sid,
+                StreamFrame {
+                    status: NrStatus::Ok,
+                    data: vec![1],
+                },
+            ),
+            NrStatus::Ok
+        );
+        assert_eq!(
+            context::dispatch_pending(
+                &host.host_ctx,
+                sid,
+                StreamFrame {
+                    status: NrStatus::Ok,
+                    data: vec![2],
+                },
+            ),
+            NrStatus::Backpressure
+        );
+        assert_eq!(rx.try_recv().unwrap().data, vec![1]);
+        assert_eq!(
+            context::dispatch_pending(
+                &host.host_ctx,
+                sid,
+                StreamFrame {
+                    status: NrStatus::StreamEnd,
+                    data: vec![],
+                },
+            ),
+            NrStatus::Ok
+        );
+        assert_eq!(host.metrics().pending_requests, 0);
+        assert_eq!(rx.try_recv().unwrap().status, NrStatus::StreamEnd);
+    }
+
+    #[test]
+    fn concurrent_terminal_frames_complete_stream_once() {
+        let host = NylonRingHost::with_stream_capacity(2);
+        let sid = 45;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        context::insert_pending(&host.host_ctx, sid, types::Pending::Stream(tx));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let results: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|value| {
+                    let ctx = host.host_ctx.clone();
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        context::dispatch_pending(
+                            &ctx,
+                            sid,
+                            StreamFrame {
+                                status: NrStatus::StreamEnd,
+                                data: vec![value],
+                            },
+                        )
+                    })
+                })
+                .collect();
+            barrier.wait();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        });
+
+        assert_eq!(
+            results
+                .iter()
+                .filter(|&&status| status == NrStatus::Ok)
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|&&status| status == NrStatus::Invalid)
+                .count(),
+            1
+        );
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
+        assert_eq!(host.metrics().pending_requests, 0);
+    }
+
+    #[test]
+    fn unload_defers_library_drop_and_rejects_new_calls_on_existing_handle() {
+        let Some(path) = example_plugin_path() else {
+            return;
+        };
+        let mut host = NylonRingHost::new();
+        host.load("example", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("example").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert!(matches!(
+            runtime.block_on(handle.call_response_timeout(
+                "benchmark_without_response",
+                b"",
+                Duration::from_millis(1),
+            )),
+            Err(NylonRingHostError::Timeout)
+        ));
+        assert_eq!(host.metrics().pending_requests, 0);
+
+        let guard = handle.plugin.begin_call().unwrap();
+        assert_eq!(host.metrics().in_flight_calls, 1);
+
+        host.unload("example").unwrap();
+        assert!(matches!(
+            runtime.block_on(handle.call("benchmark_without_response", b"")),
+            Err(NylonRingHostError::PluginUnloaded)
+        ));
+        drop(guard);
+        drop(handle);
+    }
+
+    #[test]
+    fn c_plugin_layout_round_trips_through_host() {
+        let Some(path) = c_plugin_path() else {
+            return;
+        };
+        let mut host = NylonRingHost::new();
+        host.load("c-example", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("c-example").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (status, response) = runtime
+            .block_on(handle.call_response("echo", b"from-c"))
+            .unwrap();
+        assert_eq!(status, NrStatus::Ok);
+        assert_eq!(response, b"from-c");
     }
 }

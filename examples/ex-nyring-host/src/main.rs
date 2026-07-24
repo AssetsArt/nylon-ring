@@ -76,9 +76,9 @@ async fn run(
 
     // Demo 2: call_response (Standard Async Path)
     println!("--- Demo 2: call_response() ---");
-    println!("  Path: STANDARD ASYNC PATH (DashMap + Oneshot)");
+    println!("  Path: STANDARD ASYNC PATH (DashMap + inline completion)");
     println!("  → Uses Sharded DashMap for pending request tracking");
-    println!("  → Uses Tokio Oneshot channel for awaiting response");
+    println!("  → Stores the completion state and Waker in the pending entry");
     println!("  → Safe for cross-thread (Plugin can reply from any thread)");
     let message = b"Hello via standard path!";
     println!("  Sending: {}", String::from_utf8_lossy(message));
@@ -169,7 +169,7 @@ async fn run(
     println!("\n=== Demo Complete ===");
     println!("\nExecution Path Summary:");
     println!("  1. call_response_fast() → ULTRA-FAST DIRECT SLOT (TLS)");
-    println!("  2. call_response()      → STANDARD ASYNC (DashMap + Oneshot)");
+    println!("  2. call_response()      → STANDARD ASYNC (DashMap + inline completion)");
     println!("  3. call()               → FIRE-AND-FORGET (No pending entry)");
     println!("  4. call_stream()        → STREAMING (bounded mpsc + Map)");
     Ok(())

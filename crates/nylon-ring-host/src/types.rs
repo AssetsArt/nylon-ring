@@ -7,7 +7,8 @@ use nylon_ring::NrStatus;
 use rustc_hash::FxBuildHasher;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use std::task::Waker;
+use tokio::sync::mpsc;
 
 /// Result type alias for this crate.
 pub type Result<T> = std::result::Result<T, NylonRingHostError>;
@@ -15,8 +16,21 @@ pub type Result<T> = std::result::Result<T, NylonRingHostError>;
 /// Pending request state.
 #[derive(Debug)]
 pub(crate) enum Pending {
-    Unary(oneshot::Sender<(NrStatus, Vec<u8>)>),
+    Unary(UnaryPending),
     Stream(mpsc::Sender<StreamFrame>),
+}
+
+/// Completion state stored inline in the pending-request map.
+#[derive(Debug)]
+pub(crate) enum UnaryPending {
+    Waiting(Option<Waker>),
+    Ready(NrStatus, Vec<u8>),
+}
+
+impl UnaryPending {
+    pub(crate) const fn waiting() -> Self {
+        Self::Waiting(None)
+    }
 }
 
 /// A frame in a streaming response.

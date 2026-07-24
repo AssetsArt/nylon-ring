@@ -185,14 +185,13 @@ impl PluginHandle {
     /// Call a plugin entry point with a request-response pattern.
     pub async fn call_response(&self, entry: &str, payload: &[u8]) -> Result<(NrStatus, Vec<u8>)> {
         let _call_guard = self.plugin.begin_call()?;
-        // Create Oneshot Channel
-        let (tx, rx) = tokio::sync::oneshot::channel();
-
-        // Generate SID
         let sid = next_sid();
 
-        // Insert into Map (Async Path)
-        context::insert_pending(&self.plugin.host_ctx, sid, types::Pending::Unary(tx));
+        context::insert_pending(
+            &self.plugin.host_ctx,
+            sid,
+            types::Pending::Unary(types::UnaryPending::waiting()),
+        );
         let mut pending_guard = PendingGuard::new(&self.plugin.host_ctx, sid);
 
         let payload_bytes = NrBytes::from_slice(payload);
@@ -207,8 +206,9 @@ impl PluginHandle {
             return Err(Self::status_error(status));
         }
 
-        // Wait for response (Allocation here for oneshot state)
-        let result = rx.await.map_err(|_| NylonRingHostError::PluginUnloaded);
+        let result = context::wait_for_unary(&self.plugin.host_ctx, sid)
+            .await
+            .ok_or(NylonRingHostError::PluginUnloaded);
         if result.is_ok() {
             pending_guard.disarm();
         }
@@ -228,10 +228,13 @@ impl PluginHandle {
         timeout: std::time::Duration,
     ) -> Result<(NrStatus, Vec<u8>)> {
         let _call_guard = self.plugin.begin_call()?;
-        let (tx, rx) = tokio::sync::oneshot::channel();
         let sid = next_sid();
 
-        context::insert_pending(&self.plugin.host_ctx, sid, types::Pending::Unary(tx));
+        context::insert_pending(
+            &self.plugin.host_ctx,
+            sid,
+            types::Pending::Unary(types::UnaryPending::waiting()),
+        );
         let mut pending_guard = PendingGuard::new(&self.plugin.host_ctx, sid);
 
         let payload_bytes = NrBytes::from_slice(payload);
@@ -245,12 +248,14 @@ impl PluginHandle {
             return Err(Self::status_error(status));
         }
 
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(v)) => {
+        match tokio::time::timeout(timeout, context::wait_for_unary(&self.plugin.host_ctx, sid))
+            .await
+        {
+            Ok(Some(v)) => {
                 pending_guard.disarm();
                 Ok(v)
             }
-            Ok(Err(_)) => Err(NylonRingHostError::PluginUnloaded),
+            Ok(None) => Err(NylonRingHostError::PluginUnloaded),
             Err(_) => Err(NylonRingHostError::Timeout),
         }
     }
@@ -603,6 +608,75 @@ impl NylonRingHost {
 mod tests {
     use super::*;
 
+    struct WakeFlag(Arc<std::sync::atomic::AtomicBool>);
+
+    impl std::task::Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    struct ReentrantWakerState {
+        host_ctx: Arc<HostContext>,
+        clones: Arc<std::sync::atomic::AtomicUsize>,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    unsafe fn clone_reentrant_waker(data: *const ()) -> std::task::RawWaker {
+        let state = unsafe { Arc::<ReentrantWakerState>::from_raw(data.cast()) };
+        state.host_ctx.pending_count();
+        state
+            .clones
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let clone = state.clone();
+        let _ = Arc::into_raw(state);
+        std::task::RawWaker::new(Arc::into_raw(clone).cast(), &REENTRANT_WAKER_VTABLE)
+    }
+
+    unsafe fn wake_reentrant_waker(data: *const ()) {
+        let state = unsafe { Arc::<ReentrantWakerState>::from_raw(data.cast()) };
+        state.host_ctx.pending_count();
+    }
+
+    unsafe fn wake_reentrant_waker_by_ref(data: *const ()) {
+        let state = unsafe { Arc::<ReentrantWakerState>::from_raw(data.cast()) };
+        state.host_ctx.pending_count();
+        let _ = Arc::into_raw(state);
+    }
+
+    unsafe fn drop_reentrant_waker(data: *const ()) {
+        let state = unsafe { Arc::<ReentrantWakerState>::from_raw(data.cast()) };
+        state.host_ctx.pending_count();
+        state
+            .drops
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    static REENTRANT_WAKER_VTABLE: std::task::RawWakerVTable = std::task::RawWakerVTable::new(
+        clone_reentrant_waker,
+        wake_reentrant_waker,
+        wake_reentrant_waker_by_ref,
+        drop_reentrant_waker,
+    );
+
+    fn reentrant_waker(
+        host_ctx: Arc<HostContext>,
+        clones: Arc<std::sync::atomic::AtomicUsize>,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> std::task::Waker {
+        let state = Arc::new(ReentrantWakerState {
+            host_ctx,
+            clones,
+            drops,
+        });
+        let raw = std::task::RawWaker::new(Arc::into_raw(state).cast(), &REENTRANT_WAKER_VTABLE);
+        unsafe { std::task::Waker::from_raw(raw) }
+    }
+
     fn example_plugin_path() -> Option<std::path::PathBuf> {
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()?
@@ -663,14 +737,122 @@ mod tests {
     fn dropping_pending_guard_unregisters_unary_request() {
         let host = NylonRingHost::new();
         let sid = 42;
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        context::insert_pending(&host.host_ctx, sid, types::Pending::Unary(tx));
+        context::insert_pending(
+            &host.host_ctx,
+            sid,
+            types::Pending::Unary(types::UnaryPending::waiting()),
+        );
         host.host_ctx.set_state(sid, "key".into(), vec![1]);
 
         drop(PendingGuard::new(&host.host_ctx, sid));
 
         assert!(context::remove_pending(&host.host_ctx, sid).is_none());
         assert!(!host.host_ctx.state_per_sid.contains_key(&sid));
+    }
+
+    #[test]
+    fn unary_completion_wakes_latest_waiter_across_threads() {
+        let host = NylonRingHost::new();
+        let sid = 46;
+        context::insert_pending(
+            &host.host_ctx,
+            sid,
+            types::Pending::Unary(types::UnaryPending::waiting()),
+        );
+        host.host_ctx.set_state(sid, "key".into(), vec![1]);
+
+        let first_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first_waker = std::task::Waker::from(Arc::new(WakeFlag(first_woken.clone())));
+        let second_waker = std::task::Waker::from(Arc::new(WakeFlag(second_woken.clone())));
+        let mut future = Box::pin(context::wait_for_unary(&host.host_ctx, sid));
+
+        let mut first_context = std::task::Context::from_waker(&first_waker);
+        assert!(matches!(
+            std::future::Future::poll(future.as_mut(), &mut first_context),
+            std::task::Poll::Pending
+        ));
+        let mut second_context = std::task::Context::from_waker(&second_waker);
+        assert!(matches!(
+            std::future::Future::poll(future.as_mut(), &mut second_context),
+            std::task::Poll::Pending
+        ));
+
+        let host_ctx = host.host_ctx.clone();
+        let dispatch_status = std::thread::spawn(move || {
+            context::dispatch_pending(
+                &host_ctx,
+                sid,
+                StreamFrame {
+                    status: NrStatus::Ok,
+                    data: vec![7],
+                },
+            )
+        })
+        .join()
+        .unwrap();
+        assert_eq!(dispatch_status, NrStatus::Ok);
+        assert!(!first_woken.load(std::sync::atomic::Ordering::Acquire));
+        assert!(second_woken.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!host.host_ctx.state_per_sid.contains_key(&sid));
+        assert_eq!(host.metrics().pending_requests, 1);
+
+        assert_eq!(
+            context::dispatch_pending(
+                &host.host_ctx,
+                sid,
+                StreamFrame {
+                    status: NrStatus::Ok,
+                    data: vec![8],
+                },
+            ),
+            NrStatus::Invalid
+        );
+
+        match std::future::Future::poll(future.as_mut(), &mut second_context) {
+            std::task::Poll::Ready(Some((status, data))) => {
+                assert_eq!(status, NrStatus::Ok);
+                assert_eq!(data, vec![7]);
+            }
+            result => panic!("unexpected unary completion result: {result:?}"),
+        }
+        assert_eq!(host.metrics().pending_requests, 0);
+    }
+
+    #[test]
+    fn unary_waker_callbacks_run_outside_pending_lock() {
+        let host = NylonRingHost::new();
+        let sid = 47;
+        context::insert_pending(
+            &host.host_ctx,
+            sid,
+            types::Pending::Unary(types::UnaryPending::waiting()),
+        );
+
+        let clones = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_waker = reentrant_waker(host.host_ctx.clone(), clones.clone(), drops.clone());
+        let mut future = Box::pin(context::wait_for_unary(&host.host_ctx, sid));
+        {
+            let mut context = std::task::Context::from_waker(&first_waker);
+            assert!(matches!(
+                std::future::Future::poll(future.as_mut(), &mut context),
+                std::task::Poll::Pending
+            ));
+        }
+        assert_eq!(clones.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        let second_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_waker = std::task::Waker::from(Arc::new(WakeFlag(second_woken)));
+        let mut context = std::task::Context::from_waker(&second_waker);
+        assert!(matches!(
+            std::future::Future::poll(future.as_mut(), &mut context),
+            std::task::Poll::Pending
+        ));
+        assert_eq!(drops.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        drop(future);
+        context::cleanup_sid(&host.host_ctx, sid);
     }
 
     #[test]

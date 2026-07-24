@@ -100,22 +100,24 @@ cargo run --release --package ex-nyring-host
 
 ## 📊 Performance
 
-Criterion release-build snapshot on an Apple M1 Pro (10 cores):
+Criterion release-build snapshot on an Apple M1 Pro. These are single-stream
+estimates, not aggregate throughput across all 10 cores.
 
 | Host operation | Time | Throughput |
 |---|---:|---:|
-| Fire-and-forget | 50.98 ns | 19.62M calls/s |
-| Synchronous fast path | 76.63 ns | 13.05M calls/s |
-| Standard unary | 162.06 ns | 6.17M calls/s |
-| Unary + 1 KiB payload | 242.63 ns | 4.12M calls/s |
-| Unary + 4 KiB payload | 321.19 ns | 3.11M calls/s |
+| Fire-and-forget | 48.105 ns | 20.788M calls/s |
+| Synchronous fast path | 73.140 ns | 13.672M calls/s |
+| Standard unary | 133.28 ns | 7.503M calls/s |
+| Unary + 128-byte payload | 140.25 ns | 7.130M calls/s |
+| Unary + 1 KiB payload | 209.85 ns | 4.765M calls/s |
+| Unary + 4 KiB payload | 268.86 ns | 3.720M calls/s |
 
 | ABI operation | Time |
 |---|---:|
-| `NrStr::new` | 0.77 ns |
-| `NrBytes::as_slice` | 0.32 ns |
-| `NrVec::from_vec` | 21.96 ns |
-| `NrVec::into_vec` | 31.66 ns |
+| `NrStr::new` | 0.735 ns |
+| `NrBytes::as_slice` | 0.311 ns |
+| `NrVec::from_vec` | 15.318 ns |
+| `NrVec::into_vec` | 24.544 ns |
 
 These are reference measurements, not cross-platform guarantees. Reproduce them
 with:

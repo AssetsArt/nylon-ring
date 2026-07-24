@@ -1,22 +1,28 @@
 [package]
 name = "nylon-ring-host"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Dynamic plugin host for the nylon-ring ABI"
+documentation = "https://docs.rs/nylon-ring-host"
 
 [dependencies]
-nylon-ring = { path = "../nylon-ring" }
+nylon-ring = { workspace = true }
 tokio = { workspace = true }
 libloading = { workspace = true }
 thiserror = { workspace = true }
-log = { workspace = true }
 dashmap = { workspace = true }
 rustc-hash = { workspace = true }
-slab = { workspace = true }
-parking_lot = { workspace = true }
-crossbeam-utils = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+tokio = { version = "1.48", default-features = false, features = ["rt-multi-thread"] }
 
 [[bench]]
 name = "host_overhead"

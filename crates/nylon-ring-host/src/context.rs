@@ -1,4 +1,4 @@
-use crate::types::{FastPendingMap, FastStateMap, Pending, UnaryResultSlot, UnarySender};
+use crate::types::{FastPendingMap, FastStateMap, Pending, UnaryResultSlot};
 use nylon_ring::NrHostExt;
 use rustc_hash::FxBuildHasher;
 use std::cell::Cell;
@@ -32,10 +32,6 @@ impl HostContext {
     }
 }
 
-// Safety: OK
-unsafe impl Send for HostContext {}
-unsafe impl Sync for HostContext {}
-
 #[inline(always)]
 fn get_shard(ctx: &HostContext, sid: u64) -> &FastPendingMap {
     unsafe {
@@ -54,6 +50,12 @@ pub(crate) fn remove_pending(ctx: &HostContext, sid: u64) -> Option<Pending> {
     get_shard(ctx, sid).remove(&sid).map(|(_, v)| v)
 }
 
+/// Remove all host-owned state associated with a completed SID.
+pub(crate) fn cleanup_sid(ctx: &HostContext, sid: u64) {
+    remove_pending(ctx, sid);
+    ctx.state_per_sid.remove(&sid);
+}
+
 /// Reinsert a pending request (used for streaming continuations).
 pub(crate) fn reinsert_pending(ctx: &HostContext, sid: u64, pending: Pending) {
     // Always insert into Global Shard for continuations to support cross-thread access
@@ -65,10 +67,10 @@ pub(crate) fn get_pending_stream(
     ctx: &HostContext,
     sid: u64,
 ) -> Option<tokio::sync::mpsc::UnboundedSender<crate::types::StreamFrame>> {
-    if let Some(entry) = get_shard(ctx, sid).get(&sid) {
-        if let crate::types::Pending::Stream(tx) = entry.value() {
-            return Some(tx.clone());
-        }
+    if let Some(entry) = get_shard(ctx, sid).get(&sid)
+        && let crate::types::Pending::Stream(tx) = entry.value()
+    {
+        return Some(tx.clone());
     }
     None
 }
@@ -76,5 +78,4 @@ pub(crate) fn get_pending_stream(
 // --- Thread Local Optimization for Unary Results ---
 thread_local! {
     pub(crate) static CURRENT_UNARY_RESULT: Cell<*mut UnaryResultSlot> = const { Cell::new(std::ptr::null_mut()) };
-    pub(crate) static CURRENT_UNARY_TX: Cell<*mut UnarySender> = const { Cell::new(std::ptr::null_mut()) };
 }

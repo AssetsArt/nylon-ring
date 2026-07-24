@@ -6,9 +6,6 @@ pub enum NylonRingHostError {
     #[error("failed to load plugin library: {0}")]
     FailedToLoadLibrary(#[source] libloading::Error),
 
-    #[error("invalid plugin path: {0}")]
-    InvalidPluginPath(String),
-
     #[error("missing required symbol: {0}")]
     MissingSymbol(String),
 
@@ -18,8 +15,8 @@ pub enum NylonRingHostError {
     #[error("incompatible ABI version: expected {expected}, got {actual}")]
     IncompatibleAbiVersion { expected: u32, actual: u32 },
 
-    #[error("incompatible NrPluginInfo struct size: host expected {expected}, plugin reported {actual}")]
-    IncompatibleStructSize { expected: u32, actual: u32 },
+    #[error("plugin info is too small: expected at least {expected} bytes, got {actual}")]
+    IncompatiblePluginInfoSize { expected: u32, actual: u32 },
 
     #[error("plugin vtable is null")]
     NullPluginVTable,
@@ -33,12 +30,9 @@ pub enum NylonRingHostError {
     #[error("plugin handle failed immediately with status: {0:?}")]
     PluginHandleFailed(nylon_ring::NrStatus),
 
-    #[error("failed to receive response from plugin: {0}")]
-    ReceiveResponseFailed(String),
-
     #[error("oneshot channel closed")]
     OneshotClosed,
 
-    #[error("plugin call timed out")]
-    Timeout,
+    #[error("the synchronous fast path is already active on this thread")]
+    FastPathReentrant,
 }

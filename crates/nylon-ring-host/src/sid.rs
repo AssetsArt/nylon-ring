@@ -36,7 +36,11 @@ pub(crate) fn next_sid() -> u64 {
     THREAD_LOCAL_SID_BLOCK.with(|cell| {
         let mut block = cell.get();
         if block.offset >= SID_BLOCK_SIZE {
-            let base = GLOBAL_SID.fetch_add(SID_BLOCK_SIZE, Ordering::Relaxed);
+            let base = GLOBAL_SID
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                    next.checked_add(SID_BLOCK_SIZE)
+                })
+                .expect("Nylon Ring session ID space exhausted");
             block = SidBlock { base, offset: 0 };
         }
         let sid = block.base + block.offset;
@@ -44,4 +48,26 @@ pub(crate) fn next_sid() -> u64 {
         cell.set(block);
         sid
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_sid;
+    use std::collections::HashSet;
+
+    #[test]
+    fn session_ids_are_unique_across_threads() {
+        let handles: Vec<_> = (0..4)
+            .map(|_| std::thread::spawn(|| (0..1_000).map(|_| next_sid()).collect::<Vec<_>>()))
+            .collect();
+
+        let ids: Vec<_> = handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap())
+            .collect();
+        let unique: HashSet<_> = ids.iter().copied().collect();
+
+        assert_eq!(ids.len(), unique.len());
+        assert!(!unique.contains(&0));
+    }
 }

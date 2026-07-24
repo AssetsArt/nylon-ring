@@ -13,32 +13,70 @@ mod sid;
 mod types;
 
 use callbacks::{get_state_callback, send_result_vec_callback, set_state_callback};
-use context::{HostContext, CURRENT_UNARY_RESULT};
+use context::{CURRENT_UNARY_RESULT, HostContext};
 use libloading::{Library, Symbol};
-use nylon_ring::{NrBytes, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrStr};
+use nylon_ring::{
+    ABI_VERSION, NrBytes, NrHostExt, NrHostVTable, NrPluginInfo, NrPluginVTable, NrStr,
+};
 use sid::next_sid;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Arc;
-use types::{Result, StreamFrame, StreamReceiver};
 
 pub use error::NylonRingHostError;
 pub use extensions::Extensions;
 pub use nylon_ring::NrStatus;
-pub use types::StreamFrame as PublicStreamFrame;
+pub use types::{Result, StreamFrame, StreamReceiver};
+
+struct PendingGuard {
+    host_ctx: Arc<HostContext>,
+    sid: u64,
+}
+
+impl PendingGuard {
+    fn new(host_ctx: Arc<HostContext>, sid: u64) -> Self {
+        Self { host_ctx, sid }
+    }
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        context::cleanup_sid(&self.host_ctx, self.sid);
+    }
+}
+
+struct FastSlotBinding;
+
+impl FastSlotBinding {
+    fn bind(slot: &mut types::UnaryResultSlot) -> Result<Self> {
+        let bound = CURRENT_UNARY_RESULT.with(|cell| {
+            if !cell.get().is_null() {
+                return false;
+            }
+            cell.set(slot as *mut _);
+            true
+        });
+        if bound {
+            Ok(Self)
+        } else {
+            Err(NylonRingHostError::FastPathReentrant)
+        }
+    }
+}
+
+impl Drop for FastSlotBinding {
+    fn drop(&mut self) {
+        CURRENT_UNARY_RESULT.with(|cell| cell.set(std::ptr::null_mut()));
+    }
+}
 
 /// A loaded plugin instance.
 pub struct LoadedPlugin {
     _lib: Library,
     vtable: &'static NrPluginVTable,
-    #[allow(dead_code)]
-    plugin_ctx: *mut c_void,
     host_ctx: Arc<HostContext>,
     path: String,
 }
-
-unsafe impl Send for LoadedPlugin {}
-unsafe impl Sync for LoadedPlugin {}
 
 impl Drop for LoadedPlugin {
     fn drop(&mut self) {
@@ -67,20 +105,17 @@ impl PluginHandle {
 
         // Insert into Map (Async Path)
         context::insert_pending(&self.plugin.host_ctx, sid, types::Pending::Unary(tx));
+        let _pending_guard = PendingGuard::new(self.plugin.host_ctx.clone(), sid);
 
         let payload_bytes = NrBytes::from_slice(payload);
         let handle_raw_fn = match self.plugin.vtable.handle {
             Some(f) => f,
-            None => {
-                context::remove_pending(&self.plugin.host_ctx, sid);
-                return Err(NylonRingHostError::MissingRequiredFunctions);
-            }
+            None => return Err(NylonRingHostError::MissingRequiredFunctions),
         };
 
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
         if status != NrStatus::Ok {
-            context::remove_pending(&self.plugin.host_ctx, sid);
             return Err(NylonRingHostError::PluginHandleFailed(status));
         }
 
@@ -149,34 +184,27 @@ impl PluginHandle {
             }
         }
 
-        let handle_raw_fn = self
-            .plugin
-            .vtable
-            .handle
-            .ok_or(NylonRingHostError::MissingRequiredFunctions)?;
+        let mut slot = types::UnaryResultSlot { sid, result: None };
 
-        let sid = next_sid();
-        let mut slot: types::UnaryResultSlot = None;
-
-        // Bind TLS slot under the guard.
-        CURRENT_UNARY_RESULT.with(|cell| {
-            debug_assert!(
-                cell.get().is_null(),
-                "CURRENT_UNARY_RESULT already in use on this thread"
-            );
-            cell.set(&mut slot as *mut _);
-        });
-        let _guard = TlsSlotGuard;
+        let binding = FastSlotBinding::bind(&mut slot)?;
 
         let payload_bytes = NrBytes::from_slice(payload);
+
+        let handle_raw_fn = match self.plugin.vtable.handle {
+            Some(f) => f,
+            None => return Err(NylonRingHostError::MissingRequiredFunctions),
+        };
+
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
-        // `_guard` clears the TLS slot here on drop, regardless of branch.
+        drop(binding);
+        self.plugin.host_ctx.state_per_sid.remove(&sid);
+
         if status != NrStatus::Ok {
             return Err(NylonRingHostError::PluginHandleFailed(status));
         }
 
-        match slot {
+        match slot.result {
             Some((st, data)) => Ok((st, data)),
             None => Err(NylonRingHostError::OneshotClosed),
         }
@@ -196,6 +224,10 @@ impl PluginHandle {
         };
 
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
+
+        // Fire-and-forget calls have no later response lifecycle in which to
+        // clean up extension state.
+        self.plugin.host_ctx.state_per_sid.remove(&sid);
 
         if status != NrStatus::Ok {
             return Err(NylonRingHostError::PluginHandleFailed(status));
@@ -217,7 +249,7 @@ impl PluginHandle {
         let handle_raw_fn = match self.plugin.vtable.handle {
             Some(f) => f,
             None => {
-                context::remove_pending(&self.plugin.host_ctx, sid);
+                context::cleanup_sid(&self.plugin.host_ctx, sid);
                 return Err(NylonRingHostError::MissingRequiredFunctions);
             }
         };
@@ -225,11 +257,14 @@ impl PluginHandle {
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
         if status != NrStatus::Ok {
-            context::remove_pending(&self.plugin.host_ctx, sid);
+            context::cleanup_sid(&self.plugin.host_ctx, sid);
             return Err(NylonRingHostError::PluginHandleFailed(status));
         }
 
-        Ok((sid, rx))
+        Ok((
+            sid,
+            StreamReceiver::new(rx, self.plugin.host_ctx.clone(), sid),
+        ))
     }
 
     /// Send data to an active stream.
@@ -258,9 +293,6 @@ pub struct NylonRingHost {
     host_ctx: Arc<HostContext>,
     host_vtable: Box<NrHostVTable>,
 }
-
-unsafe impl Send for NylonRingHost {}
-unsafe impl Sync for NylonRingHost {}
 
 impl Default for NylonRingHost {
     fn default() -> Self {
@@ -301,26 +333,25 @@ impl NylonRingHost {
             if info_ptr.is_null() {
                 return Err(NylonRingHostError::NullPluginInfo);
             }
-            let info = &*info_ptr;
+            let abi_version = std::ptr::read_unaligned(info_ptr.cast::<u32>());
+            let struct_size = std::ptr::read_unaligned(info_ptr.cast::<u32>().add(1));
 
-            if !info.compatible(1) {
+            if abi_version != ABI_VERSION {
                 return Err(NylonRingHostError::IncompatibleAbiVersion {
-                    expected: 1,
-                    actual: info.abi_version,
+                    expected: ABI_VERSION,
+                    actual: abi_version,
                 });
             }
 
-            // Validate the plugin's NrPluginInfo layout matches what the host
-            // was compiled against. A mismatch here means the plugin was built
-            // against a different version of the `nylon-ring` crate and any
-            // field access below would be undefined behaviour.
             let expected_size = std::mem::size_of::<NrPluginInfo>() as u32;
-            if info.struct_size != expected_size {
-                return Err(NylonRingHostError::IncompatibleStructSize {
+            if struct_size < expected_size {
+                return Err(NylonRingHostError::IncompatiblePluginInfoSize {
                     expected: expected_size,
-                    actual: info.struct_size,
+                    actual: struct_size,
                 });
             }
+
+            let info = &*info_ptr;
 
             if info.vtable.is_null() {
                 return Err(NylonRingHostError::NullPluginVTable);
@@ -331,21 +362,20 @@ impl NylonRingHost {
                 return Err(NylonRingHostError::MissingRequiredFunctions);
             }
 
-            // Plugin context from info
-            let plugin_ctx = info.plugin_ctx;
-
             // Initialize plugin
             if let Some(init_fn) = plugin_vtable.init {
-                init_fn(
+                let status = init_fn(
                     Arc::as_ptr(&self.host_ctx) as *mut c_void,
                     &*self.host_vtable,
                 );
+                if status != NrStatus::Ok {
+                    return Err(NylonRingHostError::PluginInitFailed(status));
+                }
             }
 
             let loaded = LoadedPlugin {
                 _lib: lib,
                 vtable: plugin_vtable,
-                plugin_ctx,
                 host_ctx: self.host_ctx.clone(),
                 path: path.to_string(),
             };
@@ -394,7 +424,40 @@ impl NylonRingHost {
         if host_ctx.is_null() {
             return std::ptr::null();
         }
-        let ctx = &*(host_ctx as *const HostContext);
+        let ctx = unsafe { &*host_ctx.cast::<HostContext>() };
         &ctx.host_ext as *const NrHostExt
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropping_pending_guard_unregisters_unary_request() {
+        let host = NylonRingHost::new();
+        let sid = 42;
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        context::insert_pending(&host.host_ctx, sid, types::Pending::Unary(tx));
+        host.host_ctx.state_per_sid.insert(sid, HashMap::new());
+
+        drop(PendingGuard::new(host.host_ctx.clone(), sid));
+
+        assert!(context::remove_pending(&host.host_ctx, sid).is_none());
+        assert!(!host.host_ctx.state_per_sid.contains_key(&sid));
+    }
+
+    #[test]
+    fn dropping_stream_receiver_unregisters_stream() {
+        let host = NylonRingHost::new();
+        let sid = 43;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        context::insert_pending(&host.host_ctx, sid, types::Pending::Stream(tx));
+        host.host_ctx.state_per_sid.insert(sid, HashMap::new());
+
+        drop(StreamReceiver::new(rx, host.host_ctx.clone(), sid));
+
+        assert!(context::remove_pending(&host.host_ctx, sid).is_none());
+        assert!(!host.host_ctx.state_per_sid.contains_key(&sid));
     }
 }

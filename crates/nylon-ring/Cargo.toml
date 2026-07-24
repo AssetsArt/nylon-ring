@@ -1,10 +1,16 @@
 [package]
 name = "nylon-ring"
-version = "0.1.0"
-edition = "2024"
-
-[lib]
-crate-type = ["rlib", "cdylib"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "ABI types and macros for building Rust host-plugin interfaces"
+documentation = "https://docs.rs/nylon-ring"
 
 [dependencies]
 

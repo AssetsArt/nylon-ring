@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use nylon_ring_host::{NylonRingHost, PluginHandle};
 use std::hint::black_box;
 
@@ -13,7 +13,7 @@ fn get_plugin_path() -> String {
     path.to_string()
 }
 
-fn setup_host() -> (NylonRingHost, PluginHandle) {
+fn setup_host() -> Option<(NylonRingHost, PluginHandle)> {
     // Get the workspace root directory
     let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -24,7 +24,11 @@ fn setup_host() -> (NylonRingHost, PluginHandle) {
 
     // Build the plugin first
     let plugin_manifest = workspace_root.join("examples/ex-nyring-plugin/Cargo.toml");
-    let _ = std::process::Command::new("cargo")
+    if !plugin_manifest.is_file() {
+        eprintln!("skipping host benchmark: workspace example plugin is not available");
+        return None;
+    }
+    let status = std::process::Command::new("cargo")
         .args([
             "build",
             "--manifest-path",
@@ -33,6 +37,9 @@ fn setup_host() -> (NylonRingHost, PluginHandle) {
         ])
         .status()
         .expect("Failed to build plugin");
+    if !status.success() {
+        panic!("Failed to build example plugin");
+    }
 
     let plugin_path = workspace_root.join(get_plugin_path());
     let mut host = NylonRingHost::new();
@@ -40,11 +47,13 @@ fn setup_host() -> (NylonRingHost, PluginHandle) {
         .expect("Failed to load plugin");
 
     let plugin = host.plugin("default").expect("Plugin not found");
-    (host, plugin)
+    Some((host, plugin))
 }
 
 fn bench_call_response(c: &mut Criterion) {
-    let (_host, plugin) = setup_host();
+    let Some((_host, plugin)) = setup_host() else {
+        return;
+    };
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
     let mut group = c.benchmark_group("call_response");
@@ -64,7 +73,9 @@ fn bench_call_response(c: &mut Criterion) {
 }
 
 fn bench_call_response_with_payload(c: &mut Criterion) {
-    let (_host, plugin) = setup_host();
+    let Some((_host, plugin)) = setup_host() else {
+        return;
+    };
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
     let mut group = c.benchmark_group("call_response_with_payload");
@@ -87,7 +98,9 @@ fn bench_call_response_with_payload(c: &mut Criterion) {
 }
 
 fn bench_call_response_fast(c: &mut Criterion) {
-    let (_host, plugin) = setup_host();
+    let Some((_host, plugin)) = setup_host() else {
+        return;
+    };
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
     let mut group = c.benchmark_group("call_response_fast");
@@ -109,7 +122,9 @@ fn bench_call_response_fast(c: &mut Criterion) {
 }
 
 fn bench_call_without_response(c: &mut Criterion) {
-    let (_host, plugin) = setup_host();
+    let Some((_host, plugin)) = setup_host() else {
+        return;
+    };
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
     let mut group = c.benchmark_group("call_without_response");

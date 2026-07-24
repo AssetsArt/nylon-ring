@@ -15,7 +15,7 @@ fn bench_nr_str(c: &mut Criterion) {
     let nr_str = NrStr::new(s);
     c.bench_function("NrStr::as_str", |b| {
         b.iter(|| {
-            black_box(nr_str.as_str());
+            black_box(unsafe { nr_str.as_str() }.unwrap());
         })
     });
 }
@@ -32,7 +32,7 @@ fn bench_nr_bytes(c: &mut Criterion) {
     let nr_bytes = NrBytes::from_slice(bytes);
     c.bench_function("NrBytes::as_slice", |b| {
         b.iter(|| {
-            black_box(nr_bytes.as_slice());
+            black_box(unsafe { nr_bytes.as_slice() }.unwrap());
         })
     });
 }

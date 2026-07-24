@@ -1,427 +1,209 @@
-<div align="center">
+# Nylon Ring
 
-# 🔗 Nylon Ring
+Nylon Ring is a small Rust workspace for building native host-plugin systems
+around an explicit C-compatible ABI. It provides:
 
-**Ultra-Fast ABI-Stable Host–Plugin Interface for Rust**
+- `nylon-ring`: ABI data types, vtables, and the `define_plugin!` macro.
+- `nylon-ring-host`: dynamic-library loading, request/response routing,
+  streaming responses, and per-session state callbacks.
 
-[![Rust](https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/License-MIT-green)](#)
+[![CI](https://github.com/AssetsArt/nylon-ring/actions/workflows/ci.yml/badge.svg)](https://github.com/AssetsArt/nylon-ring/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/nylon-ring.svg)](https://crates.io/crates/nylon-ring)
+[![Documentation](https://docs.rs/nylon-ring/badge.svg)](https://docs.rs/nylon-ring)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-*Write blazing-fast plugins with ABI stability — extreme multi-thread performance*
+## Status
 
-[Features](#-features) • [Quick Start](#-quick-start) • [Usage](#-usage) • [Performance](#-performance)
+Version `0.1.0` implements ABI version 1. The API is suitable for native Rust
+hosts and plugins that are built for the same target and use compatible global
+allocators. See [Safety and compatibility](#safety-and-compatibility) before
+using it in a production plugin system.
 
-</div>
+The minimum supported Rust version is 1.88.
 
----
+## Installation
 
-## ⚡ Performance Highlights
+Plugin crates need the ABI crate:
 
-> Benchmarked on **Apple M1 Pro (10-core)** — Release builds
-
-```
-call(...):               140M~ req/sec (10 threads, fire-and-forget)
-call_response_fast(...): 124M~ req/sec (10 threads, unary fast with response *thread-local optimized*)
-call_response(...):      27M~ req/sec (10 threads, unary with response)
-```
-
----
-
-## 🌟 Features
-
-### 🔒 **ABI-Stable**
-- All data structures use C ABI (`#[repr(C)]`)
-- Version-safe plugin loading across Rust versions
-- Compatible with C, C++, Zig, Go, Rust, ...
-
-### 🚀 **Extreme Performance**
-- **140M+ req/sec** multi-thread throughput
-- **Thread-local SID** generation (zero atomic operations)
-- **Zero-copy** data transfer with `NrVec<u8>`
-- Sub-nanosecond ABI overhead
-
-### ⚡ **Flexible Call Patterns**
-- **Fire-and-forget**: ~71.7ns (fastest)
-- **Unary with response**: ~143.2ns
-- **Fast path**: ~95.5ns (thread-local optimized)
-- **Streaming**: Bi-directional communication
-
-### 🔧 **Production Ready**
-- Thread-safe for 24/7 HTTP servers
-- Safe SID wrapping (no collision)
-- Entry-based routing for multiple handlers
-- Panic-safe FFI boundaries
-
----
-
-## 📦 Project Structure
-
-```
-nylon-ring/
-├── crates/
-│   ├── nylon-ring/              # Core ABI library
-│   │   ├── src/                 # NrStr, NrBytes, NrKV, NrVec
-│   │   └── benches/             # ABI benchmarks
-│   │
-│   └── nylon-ring-host/         # Host adapter
-│       ├── src/                 # NylonRingHost interface
-│       └── benches/             # Host overhead benchmarks
-│
-└── examples/
-    ├── ex-nyring-plugin/        # Example plugin
-    └── ex-nyring-host/          # Example host + stress test
+```toml
+[dependencies]
+nylon-ring = "0.1.0"
 ```
 
----
+Host applications normally need the host crate, which depends on the ABI
+crate:
 
-## 🚀 Quick Start
-
-### Build
-
-```bash
-cargo build --release
+```toml
+[dependencies]
+nylon-ring-host = "0.1.0"
 ```
 
-### Run Demo
+## Plugin example
 
-```bash
-cargo run --release --bin ex-nyring-host
+Build a plugin as a `cdylib`:
+
+```toml
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nylon-ring = "0.1.0"
 ```
 
-### Run Benchmarks
-
-```bash
-cargo bench                           # All benchmarks
-cargo bench --package nylon-ring      # ABI types only
-cargo bench --package nylon-ring-host # Host overhead only
-```
-
----
-
-## 💻 Usage
-
-### Host: Plugin Management
-
-```rust
-use nylon_ring_host::NylonRingHost;
-
-let mut host = NylonRingHost::new();
-
-// Load plugins
-host.load("plugin_a", "libs/plugin_a.so")?;
-host.load("plugin_b", "libs/plugin_b.so")?;
-
-// Get a handle to a specific plugin
-let plugin_a = host.plugin("plugin_a").expect("Plugin A not found");
-
-// Reload all plugins (useful for hot-swapping)
-host.reload()?;
-
-// Unload a plugin
-host.unload("plugin_b")?;
-```
-
-### Host: Calling a Plugin
-
-#### Fire-and-Forget (Fastest)
-
-```rust
-use nylon_ring_host::NylonRingHost;
-
-let mut host = NylonRingHost::new();
-host.load("default", "target/release/libmy_plugin.so")?;
-
-let plugin = host.plugin("default").expect("Plugin not found");
-
-// Fire-and-forget - no response waiting (~71.7ns, 13.95M calls/sec)
-let status = plugin.call("handler_name", b"payload").await?;
-```
-
-#### Unary with Response
-
-```rust
-// Wait for response from plugin (~143.2ns, 6.98M calls/sec)
-// Wait for response from plugin (~143.2ns, 6.98M calls/sec)
-let (status, response) = plugin.call_response("handler_name", b"payload").await?;
-println!("Response: {}", String::from_utf8_lossy(&response));
-```
-
-#### Fast Path
-
-```rust
-// Thread-local optimized path (~95.5ns, 10.47M calls/sec)
-// Thread-local optimized path (~95.5ns, 10.47M calls/sec)
-let (status, response) = plugin.call_response_fast("handler_name", b"payload").await?;
-```
-
-#### Streaming
-
-```rust
-use nylon_ring::NrStatus;
-
-// Start streaming
-// Start streaming
-let (sid, mut rx) = plugin.call_stream("stream_handler", b"payload").await?;
-
-// Receive frames
-while let Some(frame) = rx.recv().await {
-    println!("Data: {}", String::from_utf8_lossy(&frame.data));
-    
-    if matches!(frame.status, NrStatus::StreamEnd | NrStatus::Err) {
-        break;
-    }
-}
-```
-
----
-
-### Plugin: Implementing Handlers
+Define its entry points with `define_plugin!`:
 
 ```rust
 use nylon_ring::{define_plugin, NrBytes, NrHostVTable, NrStatus, NrVec};
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
-// Global state to store host context and vtable
-static mut HOST_CTX: *mut c_void = std::ptr::null_mut();
-static mut HOST_VTABLE: *const NrHostVTable = std::ptr::null();
+static HOST_CTX: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static HOST_VTABLE: AtomicPtr<NrHostVTable> = AtomicPtr::new(std::ptr::null_mut());
 
-// Initialize plugin
-unsafe fn init(host_ctx: *mut c_void, host_vtable: *const NrHostVTable) -> NrStatus {
-    HOST_CTX = host_ctx;
-    HOST_VTABLE = host_vtable;
+unsafe fn init(ctx: *mut c_void, vtable: *const NrHostVTable) -> NrStatus {
+    if ctx.is_null() || vtable.is_null() {
+        return NrStatus::Invalid;
+    }
+    HOST_CTX.store(ctx, Ordering::Release);
+    HOST_VTABLE.store(vtable.cast_mut(), Ordering::Release);
     NrStatus::Ok
 }
 
-// Handler example
-unsafe fn handle_echo(sid: u64, payload: NrBytes) -> NrStatus {
-    // Echo back using zero-copy NrVec
-    let nr_vec = NrVec::from_slice(payload.as_slice());
-    let send_result = (*HOST_VTABLE).send_result;
-    send_result(HOST_CTX, sid, NrStatus::Ok, nr_vec);
+unsafe fn echo(sid: u64, payload: NrBytes) -> NrStatus {
+    let bytes = match unsafe { payload.as_slice() } {
+        Ok(bytes) => bytes,
+        Err(_) => return NrStatus::Invalid,
+    };
+
+    let ctx = HOST_CTX.load(Ordering::Acquire);
+    let vtable = HOST_VTABLE.load(Ordering::Acquire);
+    if ctx.is_null() || vtable.is_null() {
+        return NrStatus::Err;
+    }
+
+    let response = NrVec::from_vec(bytes.to_vec());
+    let send_result = unsafe { (*vtable).send_result };
+    unsafe { send_result(ctx, sid, NrStatus::Ok, response) };
     NrStatus::Ok
 }
 
-// Plugin shutdown
 fn shutdown() {
-    // Cleanup
+    HOST_VTABLE.store(std::ptr::null_mut(), Ordering::Release);
+    HOST_CTX.store(std::ptr::null_mut(), Ordering::Release);
 }
 
-// Define plugin with entry points
 define_plugin! {
     init: init,
     shutdown: shutdown,
     entries: {
-        "echo" => handle_echo,
-    },
+        "echo" => echo,
+    }
 }
 ```
 
-**The `define_plugin!` macro:**
-- ✅ Creates panic-safe FFI wrappers
-- ✅ Exports `nylon_ring_get_plugin_v1()` entry point
-- ✅ Routes requests by entry name
-- ✅ Handles panics across FFI boundaries
+The macro exports `nylon_ring_get_plugin_v1`, publishes package name/version
+metadata, validates entry names as UTF-8, and catches unwinding panics before
+they cross the FFI boundary.
 
----
+## Host example
 
-## 📊 Performance
+```rust,no_run
+use nylon_ring_host::{NylonRingHost, NrStatus};
 
-> Measured on **Apple M1 Pro (10-core)** with release builds
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let mut host = NylonRingHost::new();
+host.load("example", "target/release/libexample_plugin.so")?;
 
-### ABI Types (Criterion Benchmarks)
-
-| Operation | Time | Notes |
-|-----------|------|-------|
-| `NrStr::new` | **1.03 ns** | Create string view |
-| `NrStr::as_str` | **0.33 ns** | Read string |
-| `NrBytes::from_slice` | **0.54 ns** | Create byte view |
-| `NrBytes::as_slice` | **0.33 ns** | Read bytes |
-| `NrKV::new` | **1.99 ns** | Key-value pair |
-| `NrVec::from_vec` | **22.7 ns** | Vec conversion |
-| `NrVec::into_vec` | **9.38 ns** | Back to Vec |
-| `NrVec::push` (100 items) | **323 ns** | Push 100 values |
-
-**Key Insight**: ABI overhead is negligible (sub-ns to 23ns)
-
----
-
-### Host Overhead (Single-Thread)
-
-| Operation | Time | Throughput | Notes |
-|-----------|------|------------|-------|
-| **Fire-and-forget** | **71.7 ns** | **13.95M calls/sec** | Fastest ⚡ |
-| **Fast path** | **95.5 ns** | **10.47M calls/sec** | Thread-local |
-| **Standard unary** | **143.2 ns** | **6.98M calls/sec** | With response |
-| **+ 128B payload** | **158.7 ns** | **6.30M calls/sec** | Small data |
-| **+ 1KB payload** | **193.7 ns** | **5.16M calls/sec** | Medium data |
-| **+ 4KB payload** | **228.5 ns** | **4.38M calls/sec** | Large data |
-
----
-
-### Multi-Core Scaling
-
-| Configuration | Throughput | Latency |
-|--------------|------------|---------|
-| **10 threads (fire-and-forget)** | **140M+ req/sec** | **70 ns** |
-| **10 threads (fast path)** | **124.8M req/sec** | **77 ns** |
-| **10 threads (standard)** | **27.3M req/sec** | **362 ns** |
-
-**Key Optimization**: Thread-local SID generation eliminates atomic operations entirely
-
----
-
-### System Overview
-
-The **Nylon Ring** architecture is designed around a strictly defined ABI boundary that separates the Host runtime from Plugin logic, connected by a high-performance routing layer.
-
-```text
-+-----------------------------------------------------------+
-|               Host Layer (nylon-ring-host)                |
-|                                                           |
-|  [Public API] NylonRingHost (Container)                   |
-|       |          |                                        |
-|       |          +---- [LoadedPlugin A] <----+            |
-|       |          |                           |            |
-|       |          +---- [LoadedPlugin B]      |            |
-|       |                                      |            |
-|       v (1. Get SID)                         |            |
-|    [ID Generator] <-----> [Shared Host Context]           |
-|       |                   +---------------------------+   |
-|       |                   |  [Thread-Local Slot]      |   |
-|       |                   |   (Zero Contention)       |   |
-|       |                   +---------------------------+   |
-|       |                   |  [Sharded DashMap]        |   |
-|       |                   |   (64 Shards)             |   |
-|       |                   +---------------------------+   |
-|       |                                 ^                 |
-|       v (2. FFI Call via PluginHandle)  |                 |
-|    [PluginHandle] ----------------------+                 |
-+-------+---------------------------------+-----------------+
-        |                                 |
-        v                                 | (3. send_result)
-+-------+---------------------------------+-----------------+
-|       |            ABI Boundary         |                 |
-|       v                                 |                 |
-|   [VTable Interface]               [Callback Router]      |
-|                                         ^                 |
-|                                         |                 |
-+-----------------------------------------+-----------------+
-        |                                 |
-        v                                 |
-+-------+---------------------------------+-----------------+
-|       |            Plugin Layer         |                 |
-|       v                                 |                 |
-|   [Business Logic] ---------------------+                 |
-|                                                           |
-+-----------------------------------------------------------+
+let plugin = host.plugin("example").expect("plugin was just loaded");
+let (status, response) = plugin.call_response("echo", b"hello").await?;
+assert_eq!(status, NrStatus::Ok);
+assert_eq!(response, b"hello");
+# Ok(())
+# }
 ```
 
-#### 1. The Host Layer (`nylon-ring-host`)
-The runtime environment that manages plugin lifecycles and request routing.
-- **Multi-Plugin Support**: `NylonRingHost` acts as a container for multiple `LoadedPlugin` instances. Each plugin is isolated but shares the underlying host context (state map, ID generator).
-- **Hybrid State Management**:
-    - **Fast Path (Sync)**: Uses `Thread-Local Storage` (TLS) to store result slots. This eliminates all lock contention and atomic operations for synchronous calls.
-    - **Standard Path (Async)**: Uses a **Sharded DashMap** (64 shards) to track pending requests. Sharding minimizes lock contention in multi-threaded environments.
-- **ID Generation**: simple, thread-local counter with blocked allocation (1M per block) to avoid global atomic contention.
-- **Routing**: The callback handler uses a **Waterfall Strategy**:
-    1.  Check **TLS Slot** (Is this a fast synchronous response on the same thread?).
-    2.  Check **Sharded Map** (Is this an async response from any thread?).
+Choose the dynamic-library suffix for the target platform:
 
-#### 2. The ABI Layer (`nylon-ring`)
-Defines the strictly stable interface between Host and Plugin.
-- **Stable Memory Layout**: All exchanged types (`NrVec`, `NrStr`, `NrStatus`) are `#[repr(C)]`, guaranteeing identical memory representation across languages (Rust, C++, etc.).
-- **Zero-Copy Protocol**: `NrVec<T>` allows ownership of heap-allocated memory (like a `Vec<u8>`) to be transferred across the FFI boundary without copying.
+- Linux: `.so`
+- macOS: `.dylib`
+- Windows: `.dll`
 
-#### 3. The Plugin Layer
-The implementer of business logic.
-- **Stateless & Async-Agnostic**: Plugins receive an ID and Payload. They process it (sync or async) and call `send_result` when finished. The Host handles the complexity of mapping that result back to the original caller.
+`PluginHandle` also provides:
 
----
+- `call` for fire-and-forget requests.
+- `call_response_fast` for handlers that respond synchronously on the calling
+  thread.
+- `call_stream`, `send_stream_data`, and `close_stream` for bidirectional
+  streams.
 
-## Core Types
+Dropping an in-progress response future or `StreamReceiver` unregisters its
+pending request from the host.
 
-### ABI Types (`nylon-ring`)
+## Running the workspace example
 
-- **`NrStr`** — String view (`&str` equivalent)
-- **`NrBytes`** — Byte slice view (`&[u8]` equivalent)
-- **`NrKV`** — Key-value pair
-- **`NrVec<T>`** — Owned vector with zero-copy transfer
-- **`NrStatus`** — Result status enum
-- **`NrHostVTable`** — Host callbacks
-- **`NrPluginVTable`** — Plugin entry points
+```bash
+cargo run --release --package ex-nyring-host
+```
 
-### Host Types (`nylon-ring-host`)
+The host example builds and loads `ex-nyring-plugin`, then exercises the call
+patterns and optional benchmarks.
 
-- **`NylonRingHost`** — Main host interface
-- **`StreamFrame`** — Streaming data frame
-- **`StreamReceiver`** — Stream receiver channel
+## Safety and compatibility
 
----
+Nylon Ring makes unsafe native-plugin operations explicit, but it cannot make
+arbitrary dynamic libraries safe. Plugin authors must uphold these rules:
 
-## 🎯 Use Cases
+- A host and plugin must target the same operating system, architecture, and
+  ABI version.
+- `NrStr` and `NrBytes` are borrowed views. A plugin must copy their contents
+  before retaining them after a callback returns. Their accessors are unsafe
+  because lifetimes cannot be represented in the C ABI.
+- `NrVec<T>` transfers a Rust allocation between modules. Both modules must use
+  compatible global allocators, and `T` must have a compatible layout. Do not
+  construct an `NrVec` from memory allocated by an unrelated C allocator.
+- Plugin `shutdown` must stop worker threads and callbacks before the dynamic
+  library is unloaded.
+- Panic containment requires unwinding panics. A crate built with
+  `panic = "abort"` will still abort the process.
+- `#[repr(C)]` stabilizes field layout; it does not make arbitrary Rust types
+  or Rust standard-library internals portable across compiler versions. Keep
+  the ABI boundary to the provided concrete wire types.
 
-### ✅ Perfect For
-- **High-throughput HTTP servers** (REST, GraphQL)
-- **WebSocket backends**
-- **RPC services**
-- **Plugin systems** requiring isolation
-- **Hot-reloadable** business logic
+Loading third-party native code is not a security boundary. Only load trusted
+plugins.
 
-### ⚠️ Consider Alternatives For
-- Cross-language plugins (use direct FFI)
-- Very low latency requirements (<10ns)
-- Single-threaded only workloads
+## Development
 
----
+Run the same checks as CI:
 
-## 📈 Benchmark Methodology
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+```
 
-### ABI Benchmarks
-- **Tool**: Criterion.rs with statistical analysis
-- **Iterations**: 100 samples, outlier detection
-- **Warmup**: Automatic warmup period
-- **Output**: HTML reports in `target/criterion/`
+Benchmarks are intentionally reported from the machine that runs them rather
+than as fixed project claims:
 
-### Host Overhead Benchmarks
-- **Method**: Full round-trip (host → plugin → callback)
-- **Plugin**: Example plugin with minimal work
-- **Runtime**: Tokio async runtime
-- **Builds**: Release builds only
+```bash
+cargo bench --package nylon-ring
+cargo bench --package nylon-ring-host
+```
 
-### Multi-Thread Stress Test
-- **Method**: 10 threads, 100 req/batch, 10-second run
-- **Pattern**: Fire-and-forget (no response wait)
-- **Total**: 1.40B~ requests in 10 seconds
+## Publishing
 
----
+The crates must be published in dependency order:
 
-## 🔬 Design Principles
+```bash
+cargo publish --package nylon-ring
+# Wait until nylon-ring 0.1.0 is available from the crates.io index.
+cargo publish --package nylon-ring-host
+```
 
-| Principle | Implementation |
-|-----------|----------------|
-| **ABI Stability** | All types are `#[repr(C)]` |
-| **Zero Atomic Ops** | Thread-local SID generation |
-| **Zero Copy** | `NrVec<u8>` ownership transfer |
-| **Panic Safety** | FFI boundaries catch panics |
-| **Thread Safety** | Safe for multi-threaded hosts |
-| **Fast Path** | Specialized optimizations available |
-
----
+Use `cargo publish --dry-run` for each crate first. The initial host dry run can
+only fully verify after the matching `nylon-ring` version exists on crates.io.
 
 ## License
 
-MIT License
-
----
-
-## Acknowledgments
-
-Inspired by high-performance plugin systems and FFI best practices.
-
-Built with:
-- **Tokio** — Async runtime
-- **DashMap** — Concurrent hashmap
-- **FxHash** — Fast hashing
-- **Criterion** — Benchmarking
-- **libloading** — Dynamic library loading
-
+Licensed under the [MIT License](LICENSE).

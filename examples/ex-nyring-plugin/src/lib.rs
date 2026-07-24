@@ -1,63 +1,42 @@
-use nylon_ring::{define_plugin, NrBytes, NrHostVTable, NrStatus, NrVec};
+use nylon_ring::{NrBytes, NrHostVTable, NrStatus, NrVec, define_plugin};
 use std::ffi::c_void;
-use std::sync::OnceLock;
-use tokio::sync::mpsc;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
-// Global state to store host context and vtable
-static mut HOST_CTX: *mut c_void = std::ptr::null_mut();
-static mut HOST_VTABLE: *const NrHostVTable = std::ptr::null();
-
-// Tokio runtime for async operations
-static TOKIO_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-
-thread_local! {
-    static ASYNC_Q_BENCHMARK: once_cell::sync::OnceCell<mpsc::UnboundedSender<(u64, NrBytes)>> = const { once_cell::sync::OnceCell::new() };
-    static ASYNC_Q: once_cell::sync::OnceCell<mpsc::UnboundedSender<(u64, NrBytes)>> = const { once_cell::sync::OnceCell::new() };
-}
-
-fn get_runtime() -> &'static tokio::runtime::Runtime {
-    TOKIO_RT.get_or_init(|| {
-        let concurrency = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(8);
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(concurrency)
-            .enable_all()
-            .build()
-            .expect("Failed to create Tokio runtime")
-    })
-}
+static HOST_CTX: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static HOST_VTABLE: AtomicPtr<NrHostVTable> = AtomicPtr::new(std::ptr::null_mut());
 
 #[inline(always)]
 pub fn send_result(sid: u64, status: NrStatus, data: nylon_ring::NrVec<u8>) {
-    unsafe {
-        let f = (*HOST_VTABLE).send_result;
-        f(HOST_CTX, sid, status, data);
-    }
+    let host_ctx = HOST_CTX.load(Ordering::Acquire);
+    let host_vtable = HOST_VTABLE.load(Ordering::Acquire);
+    assert!(!host_ctx.is_null(), "plugin is not initialized");
+    assert!(!host_vtable.is_null(), "plugin is not initialized");
+    let send_result = unsafe { (*host_vtable).send_result };
+    unsafe { send_result(host_ctx, sid, status, data) };
 }
 
 // Initialize the plugin
 unsafe fn init(host_ctx: *mut c_void, host_vtable: *const NrHostVTable) -> NrStatus {
-    println!("[Plugin] Initialized!");
-    // Initialize Tokio runtime
-    let _ = get_runtime();
-    println!("[Plugin] Tokio runtime initialized with 4 worker threads");
-    HOST_CTX = host_ctx;
-    HOST_VTABLE = host_vtable;
-
-    async_worker_benchmark();
-    async_worker();
+    if host_ctx.is_null() || host_vtable.is_null() {
+        return NrStatus::Invalid;
+    }
+    HOST_CTX.store(host_ctx, Ordering::Release);
+    HOST_VTABLE.store(host_vtable.cast_mut(), Ordering::Release);
     NrStatus::Ok
 }
 
 // Shutdown the plugin
 fn shutdown() {
-    println!("[Plugin] Shutting down!");
+    HOST_VTABLE.store(std::ptr::null_mut(), Ordering::Release);
+    HOST_CTX.store(std::ptr::null_mut(), Ordering::Release);
 }
 
 // Echo handler - simply returns the input data
 unsafe fn handle_echo(sid: u64, payload: NrBytes) -> NrStatus {
-    let data = payload.as_slice();
+    let data = match unsafe { payload.as_slice() } {
+        Ok(data) => data,
+        Err(_) => return NrStatus::Invalid,
+    };
     let text_str = String::from_utf8_lossy(data);
     println!("[Plugin] Echo received: {}", text_str);
 
@@ -76,7 +55,10 @@ unsafe fn handle_echo(sid: u64, payload: NrBytes) -> NrStatus {
 
 // Uppercase handler - converts input to uppercase
 unsafe fn handle_uppercase(sid: u64, payload: NrBytes) -> NrStatus {
-    let data = payload.as_slice();
+    let data = match unsafe { payload.as_slice() } {
+        Ok(data) => data,
+        Err(_) => return NrStatus::Invalid,
+    };
     let text = String::from_utf8_lossy(data).to_uppercase();
     println!("[Plugin] Uppercase received, sending back: {}", text);
 
@@ -106,65 +88,14 @@ unsafe fn handle_stream(sid: u64, _payload: NrBytes) -> NrStatus {
     NrStatus::Ok
 }
 
-pub fn async_worker_benchmark() {
-    let (tx, mut rx) = mpsc::unbounded_channel::<(u64, NrBytes)>();
-    ASYNC_Q_BENCHMARK.with(|cell| {
-        cell.set(tx).ok();
-    });
-
-    get_runtime().spawn(async move {
-        while let Some((sid, payload)) = rx.recv().await {
-            let nr_vec = NrVec::from_nr_bytes(payload);
-            send_result(sid, NrStatus::Ok, nr_vec);
-        }
-    });
-}
-
-pub fn async_worker() {
-    let (tx, mut rx) = mpsc::unbounded_channel::<(u64, NrBytes)>();
-    ASYNC_Q.with(|cell| {
-        cell.set(tx).ok();
-    });
-
-    get_runtime().spawn(async move {
-        while let Some((sid, payload)) = rx.recv().await {
-            let data = payload.as_slice();
-            let text = String::from_utf8_lossy(data).to_string();
-            println!(
-                "[Plugin] Async handler started for SID: {} with: {}",
-                sid, text
-            );
-            println!("[Plugin] Spawning async task...");
-            println!("[Plugin] Async task running on Tokio runtime...");
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            println!("[Plugin] Async task completed!");
-            let result = format!("Async result: {} (processed after 100ms)", text);
-            let nr_vec = NrVec::from_string(result);
-            send_result(sid, NrStatus::Ok, nr_vec);
-        }
-    });
-}
-
-// Async handler - demonstrates async operations using Tokio runtime
-unsafe fn handle_async(sid: u64, payload: NrBytes) -> NrStatus {
-    ASYNC_Q.with(|cell| {
-        if let Some(tx) = cell.get() {
-            let _ = tx.send((sid, payload));
-            return NrStatus::Ok;
-        }
-        NrStatus::Err
-    })
-}
-
-// benchmark - fast handler for benchmarking
+// Minimal synchronous handler used by both response benchmarks.
 unsafe fn handle_benchmark(sid: u64, payload: NrBytes) -> NrStatus {
-    ASYNC_Q_BENCHMARK.with(|cell| {
-        if let Some(tx) = cell.get() {
-            let _ = tx.send((sid, payload));
-            return NrStatus::Ok;
-        }
-        NrStatus::Err
-    })
+    let response = match unsafe { NrVec::from_nr_bytes(payload) } {
+        Ok(response) => response,
+        Err(_) => return NrStatus::Invalid,
+    };
+    send_result(sid, NrStatus::Ok, response);
+    NrStatus::Ok
 }
 
 // benchmark - without response
@@ -180,7 +111,6 @@ define_plugin! {
         "echo" => handle_echo,
         "uppercase" => handle_uppercase,
         "stream" => handle_stream,
-        "async" => handle_async,
         "benchmark" => handle_benchmark,
         "benchmark_without_response" => handle_benchmark_without_response,
     }

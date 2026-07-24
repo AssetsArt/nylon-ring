@@ -1,7 +1,7 @@
 use futures::future::join_all;
 use nylon_ring_host::PluginHandle;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 // Benchmark configuration
@@ -72,11 +72,7 @@ pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle) {
     let total_lat_nanos = total_latency_nanos.load(Ordering::Relaxed);
 
     let rps = total as f64 / elapsed.as_secs_f64();
-    let avg_latency_nanos = if total > 0 {
-        total_lat_nanos / total
-    } else {
-        0
-    };
+    let avg_latency_nanos = total_lat_nanos.checked_div(total).unwrap_or(0);
 
     println!("  -> Processed {} requests in {:.2?}", total, elapsed);
     println!("  -> RPS: {:.2}/sec", rps);
@@ -147,11 +143,7 @@ pub async fn run_request_response_benchmark(plugin: PluginHandle) {
     let total_lat_nanos = total_latency_nanos.load(Ordering::Relaxed);
 
     let rps = total as f64 / elapsed.as_secs_f64();
-    let avg_latency_nanos = if total > 0 {
-        total_lat_nanos / total
-    } else {
-        0
-    };
+    let avg_latency_nanos = total_lat_nanos.checked_div(total).unwrap_or(0);
 
     println!("  -> Processed {} requests in {:.2?}", total, elapsed);
     println!("  -> RPS: {:.2}/sec", rps);
@@ -222,11 +214,7 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle) {
     let total_lat_nanos = total_latency_nanos.load(Ordering::Relaxed);
 
     let rps = total as f64 / elapsed.as_secs_f64();
-    let avg_latency_nanos = if total > 0 {
-        total_lat_nanos / total
-    } else {
-        0
-    };
+    let avg_latency_nanos = total_lat_nanos.checked_div(total).unwrap_or(0);
 
     println!("  -> Processed {} requests in {:.2?}", total, elapsed);
     println!("  -> RPS: {:.2}/sec", rps);

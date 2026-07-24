@@ -1,4 +1,15 @@
+//! ABI-facing types and plugin-definition helpers for Nylon Ring.
+//!
+//! Borrowed views such as [`NrStr`] and [`NrBytes`] do not carry Rust
+//! lifetimes across the ABI boundary. Their accessors are therefore unsafe:
+//! callers must guarantee that the referenced memory remains valid while the
+//! returned borrow is used.
+
 use std::ffi::c_void;
+use std::fmt;
+
+/// ABI version implemented by this crate.
+pub const ABI_VERSION: u32 = 1;
 
 /// Status codes for the Nylon Ring ABI.
 #[repr(u32)]
@@ -15,7 +26,7 @@ pub enum NrStatus {
 /// A UTF-8 string slice with a pointer and length.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
-#[derive(Debug, Copy, Default)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct NrStr {
     pub ptr: *const u8,
     pub len: u32,
@@ -24,7 +35,7 @@ pub struct NrStr {
 /// A byte slice with a pointer and length.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
-#[derive(Debug, Copy, Default)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct NrBytes {
     pub ptr: *const u8,
     pub len: u64,
@@ -32,18 +43,49 @@ pub struct NrBytes {
 
 /// A key-value pair of strings.
 #[repr(C)]
-#[derive(Debug, Copy, Default)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct NrKV {
     pub key: NrStr,
     pub value: NrStr,
 }
 
+/// Error returned when an ABI string or byte view is malformed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NrViewError {
+    /// A non-empty view has a null pointer.
+    NullPointer,
+    /// The ABI length cannot be represented by this platform's `usize`.
+    LengthOverflow,
+    /// A string view does not contain valid UTF-8.
+    InvalidUtf8(std::str::Utf8Error),
+}
+
+impl fmt::Display for NrViewError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NullPointer => f.write_str("non-empty ABI view has a null pointer"),
+            Self::LengthOverflow => f.write_str("ABI view length exceeds usize"),
+            Self::InvalidUtf8(error) => write!(f, "ABI string is not valid UTF-8: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for NrViewError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidUtf8(error) => Some(error),
+            Self::NullPointer | Self::LengthOverflow => None,
+        }
+    }
+}
+
 /// A key-value pair with any type as value.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct NrKVAny {
-    pub key: NrStr,
+    key: NrStr,
+    key_storage: NrVec<u8>,
     pub value: NrAny,
 }
 
@@ -61,12 +103,12 @@ pub struct NrIndexSlot {
 /// A map/dictionary type implemented as a vector of key-value pairs with hash index.
 /// This struct is `#[repr(C)]` and ABI-stable.
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct NrMap {
-    pub entries: NrVec<NrKVAny>,
-    pub index: NrVec<NrIndexSlot>, // hash index table
-    pub used: u32,                 // number of full slots
-    pub tomb: u32,                 // number of tombstones
+    entries: NrVec<NrKVAny>,
+    index: NrVec<NrIndexSlot>, // hash index table
+    used: u32,                 // number of full slots
+    tomb: u32,                 // number of tombstones
 }
 
 /// A type-erased value that can hold any data type.
@@ -75,23 +117,28 @@ pub struct NrMap {
 #[derive(Debug)]
 pub struct NrAny {
     /// Pointer to the data
-    pub data: *mut c_void,
+    data: *mut c_void,
     /// Size of the data in bytes
-    pub size: u64,
+    size: u64,
     /// Type identifier (user-defined tag)
-    pub type_tag: u32,
+    type_tag: u32,
+    /// Optional clone function pointer.
+    clone_fn: Option<unsafe extern "C" fn(*const c_void) -> *mut c_void>,
     /// Optional destructor function pointer (can be null)
-    pub drop_fn: Option<unsafe extern "C" fn(*mut c_void)>,
+    drop_fn: Option<unsafe extern "C" fn(*mut c_void)>,
 }
 
 /// A vector with a pointer, length, and capacity.
 /// This struct is `#[repr(C)]` and ABI-stable.
+///
+/// Ownership may cross a module boundary only when producer and consumer use
+/// compatible global allocators. Prefer [`NrBytes`] for borrowed input.
 #[repr(C)]
 #[derive(Debug)]
 pub struct NrVec<T> {
-    pub ptr: *mut T,
-    pub len: usize,
-    pub cap: usize,
+    ptr: *mut T,
+    len: usize,
+    cap: usize,
 }
 
 impl<T> Default for NrVec<T> {
@@ -104,32 +151,13 @@ impl<T> Default for NrVec<T> {
     }
 }
 
-impl Default for NrKVAny {
-    fn default() -> Self {
-        Self {
-            key: NrStr::default(),
-            value: NrAny::default(),
-        }
-    }
-}
-
-impl Default for NrMap {
-    fn default() -> Self {
-        Self {
-            entries: NrVec::default(),
-            index: NrVec::default(),
-            used: 0,
-            tomb: 0,
-        }
-    }
-}
-
 impl Default for NrAny {
     fn default() -> Self {
         Self {
             data: std::ptr::null_mut(),
             size: 0,
             type_tag: 0,
+            clone_fn: None,
             drop_fn: None,
         }
     }
@@ -158,17 +186,17 @@ pub struct NrHostVTable {
 #[derive(Debug, Copy, Clone)]
 pub struct NrHostExt {
     /// Set state for a given sid and key.
-    /// Returns empty NrBytes on success, or error bytes on failure.
+    /// Returns a status code indicating whether the state was stored.
     pub set_state: unsafe extern "C" fn(
         host_ctx: *mut c_void,
         sid: u64,
         key: NrStr,
         value: NrBytes,
-    ) -> NrBytes,
+    ) -> NrStatus,
 
     /// Get state for a given sid and key.
-    /// Returns empty NrBytes if not found.
-    pub get_state: unsafe extern "C" fn(host_ctx: *mut c_void, sid: u64, key: NrStr) -> NrBytes,
+    /// Returns an owned, empty vector if the key is not found.
+    pub get_state: unsafe extern "C" fn(host_ctx: *mut c_void, sid: u64, key: NrStr) -> NrVec<u8>,
 }
 
 // Safety: NrHostExt is ABI-stable data carrier.
@@ -216,16 +244,10 @@ macro_rules! define_plugin {
 
         // Static Plugin Info
         static PLUGIN_INFO: $crate::NrPluginInfo = $crate::NrPluginInfo {
-            abi_version: 1,
+            abi_version: $crate::ABI_VERSION,
             struct_size: std::mem::size_of::<$crate::NrPluginInfo>() as u32,
-            name: $crate::NrStr {
-                ptr: env!("CARGO_PKG_NAME").as_ptr(),
-                len: env!("CARGO_PKG_NAME").len() as u32,
-            },
-            version: $crate::NrStr {
-                ptr: env!("CARGO_PKG_VERSION").as_ptr(),
-                len: env!("CARGO_PKG_VERSION").len() as u32,
-            },
+            name: $crate::NrStr::from_static(env!("CARGO_PKG_NAME")),
+            version: $crate::NrStr::from_static(env!("CARGO_PKG_VERSION")),
             plugin_ctx: std::ptr::null_mut(),
             vtable: &PLUGIN_VTABLE,
         };
@@ -241,11 +263,16 @@ macro_rules! define_plugin {
             host_ctx: *mut std::ffi::c_void,
             host_vtable: *const $crate::NrHostVTable,
         ) -> $crate::NrStatus {
-            $init_fn(host_ctx, host_vtable)
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                $init_fn(host_ctx, host_vtable)
+            }))
+            .unwrap_or($crate::NrStatus::Err)
         }
 
         unsafe extern "C" fn plugin_shutdown_wrapper() {
-            $shutdown_fn();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                $shutdown_fn();
+            }));
         }
 
         unsafe extern "C" fn plugin_handle_wrapper(
@@ -253,36 +280,50 @@ macro_rules! define_plugin {
             sid: u64,
             payload: $crate::NrBytes,
         ) -> $crate::NrStatus {
-            let entry_str = entry.as_str();
-            match entry_str {
-                $(
-                    $entry_name => {
-                        $handler_fn(sid, payload)
-                    }
-                )*
-                _ => $crate::NrStatus::Invalid,
-            }
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let entry_str = match unsafe { entry.as_str() } {
+                    Ok(entry) => entry,
+                    Err(_) => return $crate::NrStatus::Invalid,
+                };
+                match entry_str {
+                    $(
+                        $entry_name => unsafe {
+                            $handler_fn(sid, payload)
+                        }
+                    )*
+                    _ => $crate::NrStatus::Invalid,
+                }
+            }))
+            .unwrap_or($crate::NrStatus::Err)
         }
 
         unsafe extern "C" fn plugin_stream_data_wrapper(
             sid: u64,
             data: $crate::NrBytes,
         ) -> $crate::NrStatus {
-            $(
-                return $stream_data_fn(sid, data);
-            )?
-            #[allow(unreachable_code)]
-            $crate::NrStatus::Unsupported
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = (sid, data);
+                $(
+                    return unsafe { $stream_data_fn(sid, data) };
+                )?
+                #[allow(unreachable_code)]
+                $crate::NrStatus::Unsupported
+            }))
+            .unwrap_or($crate::NrStatus::Err)
         }
 
         unsafe extern "C" fn plugin_stream_close_wrapper(
             sid: u64,
         ) -> $crate::NrStatus {
-            $(
-                return $stream_close_fn(sid);
-            )?
-            #[allow(unreachable_code)]
-            $crate::NrStatus::Unsupported
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = sid;
+                $(
+                    return unsafe { $stream_close_fn(sid) };
+                )?
+                #[allow(unreachable_code)]
+                $crate::NrStatus::Unsupported
+            }))
+            .unwrap_or($crate::NrStatus::Err)
         }
     };
 }
@@ -302,139 +343,109 @@ pub struct NrPluginInfo {
 }
 
 impl NrStr {
-    /// Create a borrowed `NrStr` view over an existing `&str`.
+    /// Creates a borrowed ABI string view.
     ///
-    /// # Ownership
-    ///
-    /// The returned value **does not own** the bytes — it is a non-owning
-    /// view, equivalent to `&str`. The caller must ensure the source string
-    /// outlives the `NrStr`. Do **not** call [`NrStr::push_str`] on a borrowed
-    /// view that points into a string literal or borrowed buffer; doing so
-    /// will replace the pointer with a freshly allocated, leaked buffer (see
-    /// `push_str` docs) but the original borrow is *not* freed.
+    /// The returned value must not be used to access the string after `s` is
+    /// invalidated. Use [`NrStr::as_str`] only while the source is alive.
     pub fn new(s: &str) -> Self {
+        let len = u32::try_from(s.len()).expect("NrStr cannot represent strings larger than 4 GiB");
+        Self {
+            ptr: s.as_ptr(),
+            len,
+        }
+    }
+
+    /// Creates a borrowed ABI view from a static string.
+    pub const fn from_static(s: &'static str) -> Self {
+        assert!(
+            s.len() <= u32::MAX as usize,
+            "static string is too large for NrStr"
+        );
         Self {
             ptr: s.as_ptr(),
             len: s.len() as u32,
         }
     }
 
-    pub fn as_str(&self) -> &str {
-        unsafe {
-            let slice = std::slice::from_raw_parts(self.ptr, self.len as usize);
-            std::str::from_utf8_unchecked(slice)
-        }
+    /// Reads this ABI view as UTF-8.
+    ///
+    /// # Safety
+    ///
+    /// For a non-empty view, `ptr` must be valid for reads of `len` bytes for
+    /// the lifetime of the returned reference. The pointed-to memory must not
+    /// be mutated while that reference exists.
+    pub unsafe fn as_str<'a>(&self) -> Result<&'a str, NrViewError> {
+        let bytes = unsafe { view_bytes(self.ptr, u64::from(self.len))? };
+        std::str::from_utf8(bytes).map_err(NrViewError::InvalidUtf8)
     }
 
-    /// Append `s` to this string by reallocating into a fresh leaked buffer.
-    ///
-    /// # Ownership semantics (ABI)
-    ///
-    /// `NrStr` carries no ownership flag, so this method takes the
-    /// conservative path: it always allocates a *new* buffer, copies the old
-    /// contents plus `s` into it, and replaces `self.ptr`/`self.len` to point
-    /// at the new buffer wrapped in `ManuallyDrop` (i.e. leaked from Rust's
-    /// perspective).
-    ///
-    /// **The previous pointer is not freed**, because the host has no way of
-    /// knowing whether it was a borrowed string literal, a slice owned by a
-    /// foreign allocator, or a previously-leaked buffer from this same
-    /// function. After this call:
-    ///
-    /// * Any prior copy of the old `(ptr, len)` is now stale — it still
-    ///   points at valid memory, but `self` no longer references it.
-    /// * The new buffer is owned by *no one* and will leak unless reclaimed
-    ///   by an explicit free path on the same allocator that produced it
-    ///   (currently the global allocator on the host side).
-    ///
-    /// Treat `NrStr` as immutable across the FFI boundary whenever possible
-    /// and prefer constructing fresh values instead of mutating in place.
-    pub fn push_str(&mut self, s: &str) {
-        if self.ptr.is_null() {
-            let v = s.as_bytes().to_vec();
-            // Leak memory to keep it alive (ABI)
-            let mut v = std::mem::ManuallyDrop::new(v);
-            self.ptr = v.as_mut_ptr();
-            self.len = v.len() as u32;
-            return;
-        }
-
-        // We cannot just write to self.ptr because we don't know the capacity!
-        // It might be a string literal (read-only) or a short buffer.
-        // SAFE WAY: Always re-allocate.
-
-        let current_slice = unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) };
-        let mut new_vec = Vec::with_capacity(self.len as usize + s.len());
-        new_vec.extend_from_slice(current_slice);
-        new_vec.extend_from_slice(s.as_bytes());
-
-        // We must assume ownership of the old pointer?
-        // NO. In ABI, string ownership is ambiguous.
-        // But for `push_str`, we are mutating, so we become the owner of the new buffer.
-
-        let mut v = std::mem::ManuallyDrop::new(new_vec);
-        self.ptr = v.as_mut_ptr();
-        self.len = v.len() as u32;
+    /// Returns whether this view contains no bytes.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
+    /// Returns the view length in bytes.
+    pub const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Returns the underlying raw pointer.
+    pub const fn as_ptr(&self) -> *const u8 {
+        self.ptr
+    }
+
+    /// Resets this view without freeing the borrowed memory.
     pub fn clear(&mut self) {
         self.ptr = std::ptr::null();
         self.len = 0;
     }
 }
 
-impl Clone for NrStr {
-    /// Deep-clones the underlying bytes into a fresh, leaked buffer.
+unsafe fn view_bytes<'a>(ptr: *const u8, len: u64) -> Result<&'a [u8], NrViewError> {
+    if len == 0 {
+        return Ok(&[]);
+    }
+    if ptr.is_null() {
+        return Err(NrViewError::NullPointer);
+    }
+    let len = usize::try_from(len).map_err(|_| NrViewError::LengthOverflow)?;
+    Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
+}
+
+impl NrBytes {
+    /// Creates a borrowed ABI byte view.
+    pub fn from_slice(s: &[u8]) -> Self {
+        Self {
+            ptr: s.as_ptr(),
+            len: u64::try_from(s.len()).expect("NrBytes length does not fit in u64"),
+        }
+    }
+
+    /// Reads this ABI byte view.
     ///
-    /// The clone owns a brand-new heap allocation (via `ManuallyDrop<Vec<u8>>`)
-    /// that is **independent** of the original — both the source and the
-    /// clone can be passed across the ABI without aliasing. Like
-    /// [`NrStr::push_str`], the resulting buffer is not tracked by Rust and
-    /// will leak unless reclaimed via an explicit allocator-matched free.
-    fn clone(&self) -> Self {
-        if self.ptr.is_null() {
-            return Self::default();
-        }
-        let slice = unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) };
-        let v = slice.to_vec();
-        let mut v = std::mem::ManuallyDrop::new(v);
-        Self {
-            ptr: v.as_mut_ptr(),
-            len: v.len() as u32,
-        }
+    /// # Safety
+    ///
+    /// For a non-empty view, `ptr` must be valid for reads of `len` bytes for
+    /// the lifetime of the returned reference. The pointed-to memory must not
+    /// be mutated while that reference exists.
+    pub unsafe fn as_slice<'a>(&self) -> Result<&'a [u8], NrViewError> {
+        unsafe { view_bytes(self.ptr, self.len) }
     }
-}
 
-impl Clone for NrBytes {
-    fn clone(&self) -> Self {
-        if self.ptr.is_null() {
-            return Self::default();
-        }
-        let slice = unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) };
-        let v = slice.to_vec();
-        let mut v = std::mem::ManuallyDrop::new(v);
-        Self {
-            ptr: v.as_mut_ptr(),
-            len: v.len() as u64,
-        }
+    /// Returns whether this view contains no bytes.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
     }
-}
 
-impl Clone for NrKV {
-    fn clone(&self) -> Self {
-        Self {
-            key: self.key.clone(),
-            value: self.value.clone(),
-        }
+    /// Returns the view length in bytes.
+    pub const fn len(&self) -> u64 {
+        self.len
     }
 }
 
 impl Clone for NrKVAny {
     fn clone(&self) -> Self {
-        Self {
-            key: self.key.clone(),
-            value: self.value.clone(),
-        }
+        Self::new(self.key(), self.value.clone())
     }
 }
 
@@ -468,66 +479,28 @@ impl Clone for NrAny {
         if self.data.is_null() {
             return Self::default();
         }
-
-        if self.drop_fn.is_some() {
-            panic!(
-                "NrAny::clone: cannot deep-clone a non-POD NrAny (drop_fn is set) \
-                 without a clone_fn. ABI v1 lacks clone_fn; either use a POD payload \
-                 (drop_fn = None) or avoid cloning."
-            );
-        }
-
-        // Safe path: payload has no destructor → byte copy is sound.
-        let size = self.size as usize;
-        if size == 0 {
-            return Self {
-                data: std::ptr::null_mut(),
-                size: 0,
-                type_tag: self.type_tag,
-                drop_fn: None,
-            };
-        }
-        let layout = std::alloc::Layout::from_size_align(size, 1).unwrap();
-        unsafe {
-            let new_data = std::alloc::alloc(layout) as *mut c_void;
-            if new_data.is_null() {
-                std::alloc::handle_alloc_error(layout);
-            }
-            std::ptr::copy_nonoverlapping(self.data, new_data, size);
-            Self {
-                data: new_data,
-                size: self.size,
-                type_tag: self.type_tag,
-                drop_fn: None,
-            }
+        let clone_fn = self
+            .clone_fn
+            .expect("non-null NrAny values always have a clone function");
+        let data = unsafe { clone_fn(self.data.cast_const()) };
+        assert!(!data.is_null(), "NrAny clone callback failed");
+        Self {
+            data,
+            size: self.size,
+            type_tag: self.type_tag,
+            clone_fn: self.clone_fn,
+            drop_fn: self.drop_fn,
         }
     }
 }
 
 impl<T: Clone> Clone for NrVec<T> {
     fn clone(&self) -> Self {
-        if self.ptr.is_null() {
+        if self.len == 0 {
             return Self::default();
         }
-        let slice = unsafe { std::slice::from_raw_parts(self.ptr, self.len) };
-        let v = slice.to_vec(); // Deep copy elements via T::clone()
+        let v = self.as_slice().to_vec();
         Self::from_vec(v)
-    }
-}
-
-impl NrBytes {
-    pub fn from_slice(s: &[u8]) -> Self {
-        Self {
-            ptr: s.as_ptr(),
-            len: s.len() as u64,
-        }
-    }
-
-    pub fn as_slice(&self) -> &[u8] {
-        if self.ptr.is_null() {
-            return &[];
-        }
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) }
     }
 }
 
@@ -546,14 +519,32 @@ impl NrKV {
 
 impl NrKVAny {
     pub fn new(key: &str, value: NrAny) -> Self {
+        let key_storage = NrVec::from_vec(key.as_bytes().to_vec());
+        let key = NrStr::new(
+            std::str::from_utf8(key_storage.as_slice())
+                .expect("key bytes originate from a valid UTF-8 string"),
+        );
         Self {
-            key: NrStr::new(key),
+            key,
+            key_storage,
             value,
         }
     }
 
-    pub fn from_nr_str(key: NrStr, value: NrAny) -> Self {
-        Self { key, value }
+    /// Copies a borrowed ABI string into an owned key.
+    ///
+    /// # Safety
+    ///
+    /// `key` must point to readable memory for its declared length.
+    pub unsafe fn from_nr_str(key: NrStr, value: NrAny) -> Result<Self, NrViewError> {
+        let key = unsafe { key.as_str()? };
+        Ok(Self::new(key, value))
+    }
+
+    /// Returns the owned key as a string.
+    pub fn key(&self) -> &str {
+        // The storage is copied from UTF-8 and cannot be mutated externally.
+        unsafe { std::str::from_utf8_unchecked(self.key_storage.as_slice()) }
     }
 }
 
@@ -582,7 +573,7 @@ impl NrMap {
 
     fn ensure_index(&mut self) {
         // Create index when we have enough entries (threshold = 8)
-        if self.index.ptr.is_null() && self.entries.len >= 8 {
+        if self.index.is_empty() && self.entries.len >= 8 {
             self.rehash(16);
         }
     }
@@ -602,19 +593,21 @@ impl NrMap {
         // Insert all entries into index
         for i in 0..self.entries.len {
             let kv = unsafe { &*self.entries.ptr.add(i) };
-            let k = kv.key.as_str();
-            self.index_insert(hash_str(k), i as u32);
+            let k = kv.key();
+            let entry_idx =
+                u32::try_from(i).expect("NrMap cannot contain more than u32::MAX entries");
+            self.index_insert(hash_str(k), entry_idx);
         }
     }
 
     #[inline]
     fn should_grow(&self) -> bool {
         // Load factor approximately > 0.7 or too many tombstones
-        if self.index.ptr.is_null() {
+        if self.index.is_empty() {
             return false;
         }
-        let cap = self.index_len() as u32;
-        (self.used + self.tomb) * 10 >= cap * 7
+        let occupied = u64::from(self.used) + u64::from(self.tomb);
+        occupied * 10 >= self.index_len() as u64 * 7
     }
 
     fn maybe_grow(&mut self) {
@@ -648,11 +641,7 @@ impl NrMap {
                     self.used += 1;
                     return;
                 }
-                2 => {
-                    if first_tomb.is_none() {
-                        first_tomb = Some(pos);
-                    }
-                }
+                2 if first_tomb.is_none() => first_tomb = Some(pos),
                 _ => {}
             }
             pos = (pos + 1) & mask;
@@ -671,41 +660,57 @@ impl NrMap {
             return;
         }
 
+        assert!(
+            self.entries.len < u32::MAX as usize,
+            "NrMap cannot contain more than u32::MAX entries"
+        );
         let kv = NrKVAny::new(key, value);
         self.entries.push(kv);
 
         self.ensure_index();
-        if !self.index.ptr.is_null() {
+        if !self.index.is_empty() {
             self.maybe_grow();
-            let idx = (self.entries.len - 1) as u32;
+            let idx = u32::try_from(self.entries.len - 1)
+                .expect("NrMap cannot contain more than u32::MAX entries");
             self.index_insert(hash_str(key), idx);
         }
     }
 
-    pub fn insert_nr(&mut self, key: NrStr, value: NrAny) {
-        let key_str = key.as_str();
+    /// Copies an ABI string key and inserts the value.
+    ///
+    /// # Safety
+    ///
+    /// `key` must point to readable memory for its declared length.
+    pub unsafe fn insert_nr(&mut self, key: NrStr, value: NrAny) -> Result<(), NrViewError> {
+        let key_str = unsafe { key.as_str()? };
         // If key exists, replace the value (set behavior)
         if let Some(v) = self.get_mut(key_str) {
             *v = value;
-            return;
+            return Ok(());
         }
 
-        let kv = NrKVAny::from_nr_str(key, value);
+        assert!(
+            self.entries.len < u32::MAX as usize,
+            "NrMap cannot contain more than u32::MAX entries"
+        );
+        let kv = NrKVAny::new(key_str, value);
         self.entries.push(kv);
 
         self.ensure_index();
-        if !self.index.ptr.is_null() {
+        if !self.index.is_empty() {
             self.maybe_grow();
-            let idx = (self.entries.len - 1) as u32;
+            let idx = u32::try_from(self.entries.len - 1)
+                .expect("NrMap cannot contain more than u32::MAX entries");
             self.index_insert(hash_str(key_str), idx);
         }
+        Ok(())
     }
 
     pub fn get(&self, key: &str) -> Option<&NrAny> {
-        if self.index.ptr.is_null() {
+        if self.index.is_empty() {
             // Fallback to linear search (acceptable for small maps)
             for kv in self.entries.iter() {
-                if kv.key.as_str() == key {
+                if kv.key() == key {
                     return Some(&kv.value);
                 }
             }
@@ -723,7 +728,7 @@ impl NrMap {
                 0 => return None, // Empty slot found, key doesn't exist
                 1 if slot.hash == h => {
                     let kv = unsafe { &*self.entries.ptr.add(slot.entry_idx as usize) };
-                    if kv.key.as_str() == key {
+                    if kv.key() == key {
                         return Some(&kv.value);
                     }
                 }
@@ -735,9 +740,9 @@ impl NrMap {
     }
 
     pub fn get_mut(&mut self, key: &str) -> Option<&mut NrAny> {
-        if self.index.ptr.is_null() {
+        if self.index.is_empty() {
             for kv in self.entries.iter_mut() {
-                if kv.key.as_str() == key {
+                if kv.key() == key {
                     return Some(&mut kv.value);
                 }
             }
@@ -755,7 +760,7 @@ impl NrMap {
                 0 => return None,
                 1 if slot.hash == h => {
                     let kv = unsafe { &mut *self.entries.ptr.add(slot.entry_idx as usize) };
-                    if kv.key.as_str() == key {
+                    if kv.key() == key {
                         return Some(&mut kv.value);
                     }
                 }
@@ -767,17 +772,18 @@ impl NrMap {
     }
 
     pub fn remove(&mut self, key: &str) -> Option<NrKVAny> {
-        // Find the index of the entry to remove
-        let idx = if self.index.ptr.is_null() {
+        // Find the entry and its exact hash slot. Remembering the slot avoids
+        // deleting the wrong entry when two keys have the same hash.
+        let (idx, removed_slot) = if self.index.is_empty() {
             // Fallback to linear search
-            self.entries.iter().position(|kv| kv.key.as_str() == key)?
+            (self.entries.iter().position(|kv| kv.key() == key)?, None)
         } else {
             // Use hash lookup
             let h = hash_str(key);
             let cap = self.index.len;
             let mask = cap - 1;
             let mut pos = (h as usize) & mask;
-            let mut found_idx: Option<usize> = None;
+            let mut found: Option<(usize, usize)> = None;
 
             for _ in 0..cap {
                 let slot = unsafe { &*self.index.ptr.add(pos) };
@@ -786,8 +792,8 @@ impl NrMap {
                     1 if slot.hash == h => {
                         let entry_idx = slot.entry_idx as usize;
                         let kv = unsafe { &*self.entries.ptr.add(entry_idx) };
-                        if kv.key.as_str() == key {
-                            found_idx = Some(entry_idx);
+                        if kv.key() == key {
+                            found = Some((entry_idx, pos));
                             break;
                         }
                     }
@@ -796,7 +802,8 @@ impl NrMap {
                 pos = (pos + 1) & mask;
             }
 
-            found_idx?
+            let (entry_idx, slot) = found?;
+            (entry_idx, Some(slot))
         };
 
         let last = self.entries.len - 1;
@@ -812,10 +819,10 @@ impl NrMap {
             }
 
             // Update index for the moved entry (last -> idx)
-            if !self.index.ptr.is_null() {
+            if !self.index.is_empty() {
                 let h_last = unsafe {
                     let kv = &*self.entries.ptr.add(idx);
-                    hash_str(kv.key.as_str())
+                    hash_str(kv.key())
                 };
                 let cap = self.index.len;
                 let mask = cap - 1;
@@ -835,29 +842,12 @@ impl NrMap {
         self.entries.len -= 1;
 
         // Remove slot from index (mark as tombstone or rehash)
-        if !self.index.ptr.is_null() {
-            let h = hash_str(key);
-            let cap = self.index.len;
-            let mask = cap - 1;
-            let mut pos = (h as usize) & mask;
-
-            for _ in 0..cap {
-                let slot = unsafe { &mut *self.index.ptr.add(pos) };
-                match slot.state {
-                    0 => break,
-                    1 if slot.hash == h => {
-                        let entry_idx = slot.entry_idx as usize;
-                        if entry_idx == idx || (idx == last && entry_idx == last) {
-                            slot.state = 2; // tombstone
-                            self.used -= 1;
-                            self.tomb += 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-                pos = (pos + 1) & mask;
-            }
+        if let Some(pos) = removed_slot {
+            let slot = unsafe { &mut *self.index.ptr.add(pos) };
+            debug_assert_eq!(slot.state, 1);
+            slot.state = 2;
+            self.used -= 1;
+            self.tomb += 1;
 
             // Rehash if too many tombstones
             if self.should_grow() {
@@ -878,42 +868,35 @@ impl NrMap {
 
     pub fn clear(&mut self) {
         self.entries.clear();
-        if !self.index.ptr.is_null() {
-            self.index.clear();
-        }
+        self.index = NrVec::default();
         self.used = 0;
         self.tomb = 0;
     }
 }
 
 impl NrAny {
-    pub fn new<T>(value: T, type_tag: u32) -> Self {
+    /// Stores a clonable, thread-safe Rust value behind the ABI container.
+    pub fn new<T: Clone + Send + Sync + 'static>(value: T, type_tag: u32) -> Self {
         let size = std::mem::size_of::<T>() as u64;
         let data = Box::into_raw(Box::new(value)) as *mut c_void;
         Self {
             data,
             size,
             type_tag,
+            clone_fn: Some(clone_any::<T>),
             drop_fn: Some(drop_any::<T>),
         }
     }
 
-    pub fn from_bytes(bytes: NrBytes, type_tag: u32) -> Self {
-        let size = bytes.len;
-        let data = if size > 0 {
-            let v = bytes.as_slice().to_vec();
-            Box::into_raw(Box::new(v)) as *mut c_void
-        } else {
-            std::ptr::null_mut()
-        };
-        Self {
-            data,
-            size,
-            type_tag,
-            drop_fn: Some(drop_bytes),
-        }
+    /// Stores an owned copy of a byte slice as a `Vec<u8>`.
+    pub fn from_bytes(bytes: &[u8], type_tag: u32) -> Self {
+        Self::new(bytes.to_vec(), type_tag)
     }
 
+    /// Returns a typed raw pointer after checking the stored byte size.
+    ///
+    /// The user-defined type tag is not a Rust type identifier. The caller
+    /// must verify [`NrAny::type_tag`] before dereferencing the returned pointer.
     pub fn as_ptr<T>(&self) -> Result<*const T, NrStatus> {
         if self.data.is_null() {
             return Err(NrStatus::Invalid);
@@ -949,29 +932,32 @@ impl NrAny {
     }
 }
 
-unsafe extern "C" fn drop_any<T>(ptr: *mut c_void) {
+unsafe extern "C" fn clone_any<T: Clone>(ptr: *const c_void) -> *mut c_void {
     if !ptr.is_null() {
-        unsafe {
-            let _ = Box::from_raw(ptr as *mut T);
-        }
+        return std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let value = unsafe { &*ptr.cast::<T>() };
+            Box::into_raw(Box::new(value.clone())).cast::<c_void>()
+        }))
+        .unwrap_or(std::ptr::null_mut());
     }
+    std::ptr::null_mut()
 }
 
-unsafe extern "C" fn drop_bytes(ptr: *mut c_void) {
+unsafe extern "C" fn drop_any<T>(ptr: *mut c_void) {
     if !ptr.is_null() {
-        unsafe {
-            let _ = Box::from_raw(ptr as *mut Vec<u8>);
-        }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            drop(Box::from_raw(ptr.cast::<T>()));
+        }));
     }
 }
 
 impl Drop for NrAny {
     fn drop(&mut self) {
-        if let Some(drop_fn) = self.drop_fn {
-            if !self.data.is_null() {
-                unsafe {
-                    drop_fn(self.data);
-                }
+        if let Some(drop_fn) = self.drop_fn
+            && !self.data.is_null()
+        {
+            unsafe {
+                drop_fn(self.data);
             }
         }
     }
@@ -984,16 +970,23 @@ impl NrPluginInfo {
 }
 
 impl NrVec<u8> {
-    pub fn from_nr_bytes(bytes: NrBytes) -> Self {
-        let v = bytes.as_slice().to_vec();
-        Self::from_vec(v)
+    /// Copies an ABI byte view into an owned vector.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must point to readable memory for its declared length.
+    pub unsafe fn from_nr_bytes(bytes: NrBytes) -> Result<Self, NrViewError> {
+        let v = unsafe { bytes.as_slice()? }.to_vec();
+        Ok(Self::from_vec(v))
     }
+
     pub fn from_string(s: String) -> Self {
         Self::from_vec(s.into_bytes())
     }
 }
 
 impl<T> NrVec<T> {
+    /// Takes ownership of a Rust vector without copying its allocation.
     pub fn from_vec(v: Vec<T>) -> Self {
         let mut v = std::mem::ManuallyDrop::new(v);
         let ptr = v.as_mut_ptr();
@@ -1002,8 +995,13 @@ impl<T> NrVec<T> {
         Self { ptr, len, cap }
     }
 
+    /// Converts this ABI vector back into a Rust vector without copying.
     pub fn into_vec(self) -> Vec<T> {
         let this = std::mem::ManuallyDrop::new(self);
+        if this.cap == 0 {
+            debug_assert_eq!(this.len, 0);
+            return Vec::new();
+        }
         unsafe { Vec::from_raw_parts(this.ptr, this.len, this.cap) }
     }
 
@@ -1027,13 +1025,25 @@ impl<T> NrVec<T> {
     }
 
     pub fn reserve(&mut self, additional: usize) {
+        if std::mem::size_of::<T>() == 0 {
+            assert!(
+                self.len.checked_add(additional).is_some(),
+                "capacity overflow"
+            );
+            if self.cap == 0 {
+                self.ptr = std::ptr::NonNull::<T>::dangling().as_ptr();
+                self.cap = usize::MAX;
+            }
+            return;
+        }
+
         let available = self.cap - self.len;
         if available < additional {
-            let required = self.len + additional;
+            let required = self.len.checked_add(additional).expect("capacity overflow");
             let new_cap = if self.cap == 0 {
                 std::cmp::max(1, required)
             } else {
-                std::cmp::max(self.cap * 2, required)
+                std::cmp::max(self.cap.saturating_mul(2), required)
             };
 
             let new_layout = match std::alloc::Layout::array::<T>(new_cap) {
@@ -1073,23 +1083,37 @@ impl<T> NrVec<T> {
     pub fn capacity(&self) -> usize {
         self.cap
     }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn as_ptr(&self) -> *const T {
+        self.ptr
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        self.ptr
+    }
 }
 
 impl<T> Drop for NrVec<T> {
     fn drop(&mut self) {
-        if self.cap != 0 {
-            if self.ptr.is_null() {
-                return;
-            }
+        if self.len != 0 {
             unsafe {
-                // Drop elements
                 let s = std::slice::from_raw_parts_mut(self.ptr, self.len);
                 std::ptr::drop_in_place(s);
-
-                // Deallocate
-                if let Ok(layout) = std::alloc::Layout::array::<T>(self.cap) {
-                    std::alloc::dealloc(self.ptr as *mut u8, layout);
-                }
+            }
+        }
+        if self.cap != 0 && std::mem::size_of::<T>() != 0 {
+            unsafe {
+                let layout = std::alloc::Layout::array::<T>(self.cap)
+                    .expect("valid NrVec capacity must have a valid layout");
+                std::alloc::dealloc(self.ptr.cast::<u8>(), layout);
             }
         }
     }
@@ -1105,7 +1129,7 @@ impl<T> NrVec<T> {
     }
 
     pub fn as_slice(&self) -> &[T] {
-        if self.ptr.is_null() {
+        if self.len == 0 {
             &[]
         } else {
             unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
@@ -1113,7 +1137,7 @@ impl<T> NrVec<T> {
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        if self.ptr.is_null() {
+        if self.len == 0 {
             &mut []
         } else {
             unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
@@ -1143,47 +1167,48 @@ impl<'a, T> IntoIterator for &'a mut NrVec<T> {
 pub struct IntoIter<T> {
     buf: *mut T,
     cap: usize,
-    ptr: *const T,
-    end: *const T,
+    index: usize,
+    len: usize,
 }
 
 impl<T> Iterator for IntoIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.ptr == self.end {
+        if self.index == self.len {
             None
         } else {
-            unsafe {
-                let result = std::ptr::read(self.ptr);
-                self.ptr = self.ptr.add(1);
-                Some(result)
-            }
+            let value = unsafe { std::ptr::read(self.buf.add(self.index)) };
+            self.index += 1;
+            Some(value)
         }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = (self.end as usize - self.ptr as usize) / std::mem::size_of::<T>();
+        let len = self.len - self.index;
         (len, Some(len))
     }
 }
 
+impl<T> ExactSizeIterator for IntoIter<T> {}
+impl<T> std::iter::FusedIterator for IntoIter<T> {}
+
 impl<T> Drop for IntoIter<T> {
     fn drop(&mut self) {
         // Drop remaining elements
-        if self.ptr != self.end {
+        if self.index != self.len {
             unsafe {
-                let len = (self.end as usize - self.ptr as usize) / std::mem::size_of::<T>();
-                let s = std::slice::from_raw_parts_mut(self.ptr as *mut T, len);
+                let ptr = self.buf.add(self.index);
+                let s = std::slice::from_raw_parts_mut(ptr, self.len - self.index);
                 std::ptr::drop_in_place(s);
             }
         }
         // Deallocate buffer
-        if self.cap != 0 {
+        if self.cap != 0 && std::mem::size_of::<T>() != 0 {
             unsafe {
-                if let Ok(layout) = std::alloc::Layout::array::<T>(self.cap) {
-                    std::alloc::dealloc(self.buf as *mut u8, layout);
-                }
+                let layout = std::alloc::Layout::array::<T>(self.cap)
+                    .expect("valid NrVec capacity must have a valid layout");
+                std::alloc::dealloc(self.buf.cast::<u8>(), layout);
             }
         }
     }
@@ -1201,13 +1226,11 @@ impl<T> IntoIterator for NrVec<T> {
         let cap = this.cap;
         let len = this.len;
 
-        unsafe {
-            IntoIter {
-                buf: ptr,
-                cap,
-                ptr,
-                end: if ptr.is_null() { ptr } else { ptr.add(len) },
-            }
+        IntoIter {
+            buf: ptr,
+            cap,
+            index: 0,
+            len,
         }
     }
 }
@@ -1251,6 +1274,24 @@ unsafe impl<A: Sync, B: Sync> Sync for NrTuple<A, B> {}
 mod tests {
     use super::*;
     use std::mem::{align_of, size_of};
+
+    unsafe fn test_plugin_init(_: *mut c_void, _: *const NrHostVTable) -> NrStatus {
+        NrStatus::Ok
+    }
+
+    unsafe fn panicking_handler(_: u64, _: NrBytes) -> NrStatus {
+        panic!("test panic must not cross the FFI boundary");
+    }
+
+    fn test_plugin_shutdown() {}
+
+    define_plugin! {
+        init: test_plugin_init,
+        shutdown: test_plugin_shutdown,
+        entries: {
+            "panic" => panicking_handler,
+        }
+    }
 
     #[test]
     fn test_layout() {
@@ -1353,6 +1394,17 @@ mod tests {
     }
 
     #[test]
+    fn test_nr_vec_empty_and_zero_sized_values() {
+        assert!(NrVec::<u8>::default().into_vec().is_empty());
+
+        let mut values = NrVec::default();
+        values.push(());
+        values.push(());
+        assert_eq!(values.len(), 2);
+        assert_eq!(values.into_iter().count(), 2);
+    }
+
+    #[test]
     fn test_nr_vec_collect() {
         let mut v = NrVec::<u32>::default();
         v.push(10);
@@ -1412,6 +1464,24 @@ mod tests {
 
         map.clear();
         assert!(map.is_empty());
+
+        // Keys are copied into the map and remain valid after the source dies.
+        {
+            let temporary_key = String::from("owned-key");
+            map.insert(&temporary_key, NrAny::new(7_u32, 2));
+        }
+        let stored = map.get("owned-key").unwrap();
+        assert_eq!(unsafe { *stored.as_ptr::<u32>().unwrap() }, 7);
+
+        // Exercise the indexed path, then verify clear resets the index.
+        for index in 0..16 {
+            map.insert(&format!("key-{index}"), NrAny::new(index, 2));
+        }
+        for index in 0..16 {
+            assert!(map.remove(&format!("key-{index}")).is_some());
+        }
+        map.clear();
+        assert!(map.get("missing").is_none());
     }
 
     #[test]
@@ -1432,11 +1502,20 @@ mod tests {
         unsafe {
             assert_eq!(*str_ptr, "hello");
         }
+        let cloned_string = any_string.clone();
+        let cloned_ptr = cloned_string.as_ptr::<String>().unwrap();
+        unsafe {
+            assert_eq!(*cloned_ptr, "hello");
+            assert_ne!(str_ptr, cloned_ptr);
+        }
 
-        let bytes = NrBytes::from_slice(b"test");
-        let any_bytes = NrAny::from_bytes(bytes, 3);
+        let any_bytes = NrAny::from_bytes(b"test", 3);
         assert_eq!(any_bytes.type_tag(), 3);
-        assert_eq!(any_bytes.size(), 4);
+        assert_eq!(any_bytes.size(), std::mem::size_of::<Vec<u8>>() as u64);
+        let bytes_ptr = any_bytes.as_ptr::<Vec<u8>>().unwrap();
+        unsafe {
+            assert_eq!(&*bytes_ptr, b"test");
+        }
 
         let default_any = NrAny::default();
         assert!(default_any.is_null());
@@ -1453,5 +1532,49 @@ mod tests {
         assert_eq!(any_int.as_ptr::<u64>(), Err(NrStatus::Err)); // i32 size != u64 size
         let mut any_int_mut = NrAny::new(42i32, 1);
         assert_eq!(any_int_mut.as_mut_ptr::<u64>(), Err(NrStatus::Err));
+    }
+
+    #[test]
+    fn test_borrowed_view_validation() {
+        let empty = NrStr::default();
+        assert_eq!(unsafe { empty.as_str() }.unwrap(), "");
+
+        let invalid_utf8 = [0xff];
+        let invalid = NrStr {
+            ptr: invalid_utf8.as_ptr(),
+            len: 1,
+        };
+        assert!(matches!(
+            unsafe { invalid.as_str() },
+            Err(NrViewError::InvalidUtf8(_))
+        ));
+
+        let null_bytes = NrBytes {
+            ptr: std::ptr::null(),
+            len: 1,
+        };
+        assert_eq!(
+            unsafe { null_bytes.as_slice() },
+            Err(NrViewError::NullPointer)
+        );
+    }
+
+    #[test]
+    fn plugin_macro_contains_panics_and_rejects_invalid_utf8() {
+        let panic_entry = NrStr::new("panic");
+        assert_eq!(
+            unsafe { plugin_handle_wrapper(panic_entry, 1, NrBytes::default()) },
+            NrStatus::Err
+        );
+
+        let invalid_utf8 = [0xff];
+        let invalid_entry = NrStr {
+            ptr: invalid_utf8.as_ptr(),
+            len: 1,
+        };
+        assert_eq!(
+            unsafe { plugin_handle_wrapper(invalid_entry, 2, NrBytes::default()) },
+            NrStatus::Invalid
+        );
     }
 }

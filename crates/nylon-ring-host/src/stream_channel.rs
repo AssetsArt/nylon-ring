@@ -127,7 +127,11 @@ struct ChannelState {
     closed: bool,
 }
 
+/// Aligned to the M1's 128-byte cache lines: the whole struct is ~96 bytes,
+/// so unaligned instances from neighboring allocations can share a line
+/// across threads and turn every send/recv into cross-core traffic.
 #[derive(Debug)]
+#[repr(align(128))]
 pub(crate) struct StreamChannel {
     state: Mutex<ChannelState>,
     capacity: usize,

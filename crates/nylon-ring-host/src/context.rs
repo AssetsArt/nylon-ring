@@ -193,11 +193,13 @@ pub(crate) fn dispatch_pending(ctx: &HostContext, sid: u64, frame: StreamFrame) 
             }
 
             let terminal = frame.status.is_terminal();
-            let tx = match entry.get() {
-                Pending::Stream(tx) => tx.clone(),
+            // try_send borrows the sender in place; the borrow ends before
+            // entry.remove(), so no per-frame Sender clone is needed.
+            let send_result = match entry.get() {
+                Pending::Stream(tx) => tx.try_send(frame),
                 Pending::Unary(_) => unreachable!(),
             };
-            match tx.try_send(frame) {
+            match send_result {
                 Ok(()) => {
                     if terminal {
                         entry.remove();

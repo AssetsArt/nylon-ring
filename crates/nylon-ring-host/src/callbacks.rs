@@ -46,7 +46,7 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
     });
 
     if handled_fast {
-        ctx.state_per_sid.remove(&sid);
+        ctx.remove_state(sid);
         return NrStatus::Ok;
     }
 
@@ -81,10 +81,7 @@ pub(crate) unsafe extern "C" fn set_state_callback(
         Err(_) => return NrStatus::Invalid,
     };
 
-    ctx.state_per_sid
-        .entry(sid)
-        .or_default()
-        .insert(key_str, value_vec);
+    ctx.set_state(sid, key_str, value_vec);
 
     NrStatus::Ok
 }

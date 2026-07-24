@@ -5,6 +5,7 @@
 //! modes including fire-and-forget calls, request-response patterns, and
 //! bidirectional streaming.
 
+mod call_tracker;
 mod callbacks;
 mod context;
 mod error;
@@ -14,6 +15,7 @@ mod loom_tests;
 mod sid;
 mod types;
 
+use call_tracker::CallTracker;
 use callbacks::{get_state_callback, send_result_vec_callback, set_state_callback};
 use context::{CURRENT_UNARY_RESULT, HostContext};
 use libloading::{Library, Symbol};
@@ -24,7 +26,6 @@ use sid::next_sid;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 pub use error::NylonRingHostError;
@@ -44,20 +45,31 @@ pub struct HostMetrics {
     pub in_flight_calls: usize,
 }
 
-struct PendingGuard {
-    host_ctx: Arc<HostContext>,
+struct PendingGuard<'a> {
+    host_ctx: &'a HostContext,
     sid: u64,
+    armed: bool,
 }
 
-impl PendingGuard {
-    fn new(host_ctx: Arc<HostContext>, sid: u64) -> Self {
-        Self { host_ctx, sid }
+impl<'a> PendingGuard<'a> {
+    fn new(host_ctx: &'a HostContext, sid: u64) -> Self {
+        Self {
+            host_ctx,
+            sid,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
     }
 }
 
-impl Drop for PendingGuard {
+impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
-        context::cleanup_sid(&self.host_ctx, self.sid);
+        if self.armed {
+            context::cleanup_sid(self.host_ctx, self.sid);
+        }
     }
 }
 
@@ -92,37 +104,56 @@ pub struct LoadedPlugin {
     vtable: &'static NrPluginVTable,
     host_ctx: Arc<HostContext>,
     path: String,
-    accepting_calls: AtomicBool,
-    in_flight_calls: AtomicUsize,
+    call_tracker: CallTracker,
 }
 
 impl LoadedPlugin {
-    fn begin_call(self: &Arc<Self>) -> Result<PluginCallGuard> {
-        if !self.accepting_calls.load(Ordering::Acquire) {
-            return Err(NylonRingHostError::PluginUnloaded);
-        }
-        self.in_flight_calls.fetch_add(1, Ordering::AcqRel);
-        if !self.accepting_calls.load(Ordering::Acquire) {
-            self.in_flight_calls.fetch_sub(1, Ordering::AcqRel);
-            return Err(NylonRingHostError::PluginUnloaded);
-        }
+    fn begin_call(&self) -> Result<BorrowedPluginCallGuard<'_>> {
+        let shard = self
+            .call_tracker
+            .try_begin()
+            .ok_or(NylonRingHostError::PluginUnloaded)?;
+        Ok(BorrowedPluginCallGuard {
+            tracker: &self.call_tracker,
+            shard,
+        })
+    }
+
+    fn begin_owned_call(self: &Arc<Self>) -> Result<PluginCallGuard> {
+        let shard = self
+            .call_tracker
+            .try_begin()
+            .ok_or(NylonRingHostError::PluginUnloaded)?;
         Ok(PluginCallGuard {
             plugin: self.clone(),
+            shard,
         })
     }
 
     fn stop_accepting_calls(&self) {
-        self.accepting_calls.store(false, Ordering::Release);
+        self.call_tracker.stop();
+    }
+}
+
+struct BorrowedPluginCallGuard<'a> {
+    tracker: &'a CallTracker,
+    shard: usize,
+}
+
+impl Drop for BorrowedPluginCallGuard<'_> {
+    fn drop(&mut self) {
+        self.tracker.finish(self.shard);
     }
 }
 
 pub(crate) struct PluginCallGuard {
     plugin: Arc<LoadedPlugin>,
+    shard: usize,
 }
 
 impl Drop for PluginCallGuard {
     fn drop(&mut self) {
-        self.plugin.in_flight_calls.fetch_sub(1, Ordering::AcqRel);
+        self.plugin.call_tracker.finish(self.shard);
     }
 }
 
@@ -162,7 +193,7 @@ impl PluginHandle {
 
         // Insert into Map (Async Path)
         context::insert_pending(&self.plugin.host_ctx, sid, types::Pending::Unary(tx));
-        let _pending_guard = PendingGuard::new(self.plugin.host_ctx.clone(), sid);
+        let mut pending_guard = PendingGuard::new(&self.plugin.host_ctx, sid);
 
         let payload_bytes = NrBytes::from_slice(payload);
         let handle_raw_fn = match self.plugin.vtable.handle {
@@ -177,7 +208,11 @@ impl PluginHandle {
         }
 
         // Wait for response (Allocation here for oneshot state)
-        rx.await.map_err(|_| NylonRingHostError::PluginUnloaded)
+        let result = rx.await.map_err(|_| NylonRingHostError::PluginUnloaded);
+        if result.is_ok() {
+            pending_guard.disarm();
+        }
+        result
     }
 
     /// Like [`PluginHandle::call_response`] but bounded by a timeout.
@@ -197,7 +232,7 @@ impl PluginHandle {
         let sid = next_sid();
 
         context::insert_pending(&self.plugin.host_ctx, sid, types::Pending::Unary(tx));
-        let _pending_guard = PendingGuard::new(self.plugin.host_ctx.clone(), sid);
+        let mut pending_guard = PendingGuard::new(&self.plugin.host_ctx, sid);
 
         let payload_bytes = NrBytes::from_slice(payload);
         let handle_raw_fn = match self.plugin.vtable.handle {
@@ -211,7 +246,10 @@ impl PluginHandle {
         }
 
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(v)) => Ok(v),
+            Ok(Ok(v)) => {
+                pending_guard.disarm();
+                Ok(v)
+            }
             Ok(Err(_)) => Err(NylonRingHostError::PluginUnloaded),
             Err(_) => Err(NylonRingHostError::Timeout),
         }
@@ -239,7 +277,7 @@ impl PluginHandle {
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
         drop(binding);
-        self.plugin.host_ctx.state_per_sid.remove(&sid);
+        self.plugin.host_ctx.remove_state(sid);
 
         if status != NrStatus::Ok {
             return Err(Self::status_error(status));
@@ -269,7 +307,7 @@ impl PluginHandle {
 
         // Fire-and-forget calls have no later response lifecycle in which to
         // clean up extension state.
-        self.plugin.host_ctx.state_per_sid.remove(&sid);
+        self.plugin.host_ctx.remove_state(sid);
 
         if status != NrStatus::Ok {
             return Err(Self::status_error(status));
@@ -279,7 +317,7 @@ impl PluginHandle {
 
     /// Call a plugin entry point with a streaming response pattern.
     pub async fn call_stream(&self, entry: &str, payload: &[u8]) -> Result<(u64, StreamReceiver)> {
-        let call_guard = self.plugin.begin_call()?;
+        let call_guard = self.plugin.begin_owned_call()?;
         let sid = next_sid();
 
         let (tx, rx) =
@@ -434,8 +472,7 @@ impl NylonRingHost {
                 vtable: plugin_vtable,
                 host_ctx: self.host_ctx.clone(),
                 path: path.to_string(),
-                accepting_calls: AtomicBool::new(true),
-                in_flight_calls: AtomicUsize::new(0),
+                call_tracker: CallTracker::new(),
             };
 
             if let Some(previous) = self.plugins.insert(name.to_string(), Arc::new(loaded)) {
@@ -470,7 +507,7 @@ impl NylonRingHost {
         let active_calls: usize = self
             .plugins
             .values()
-            .map(|plugin| plugin.in_flight_calls.load(Ordering::Acquire))
+            .map(|plugin| plugin.call_tracker.active_calls())
             .sum();
         if active_calls != 0 {
             return Err(NylonRingHostError::PluginBusy { active_calls });
@@ -515,10 +552,10 @@ impl NylonRingHost {
 
     async fn wait_for_drain(plugin: &LoadedPlugin, grace: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + grace;
-        while plugin.in_flight_calls.load(Ordering::Acquire) != 0 {
+        while plugin.call_tracker.active_calls() != 0 {
             if tokio::time::Instant::now() >= deadline {
                 return Err(NylonRingHostError::DrainTimeout {
-                    remaining: plugin.in_flight_calls.load(Ordering::Acquire),
+                    remaining: plugin.call_tracker.active_calls(),
                 });
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -538,11 +575,11 @@ impl NylonRingHost {
         HostMetrics {
             loaded_plugins: self.plugins.len(),
             pending_requests: self.host_ctx.pending_count(),
-            state_sessions: self.host_ctx.state_per_sid.len(),
+            state_sessions: self.host_ctx.state_count(),
             in_flight_calls: self
                 .plugins
                 .values()
-                .map(|plugin| plugin.in_flight_calls.load(Ordering::Relaxed))
+                .map(|plugin| plugin.call_tracker.active_calls())
                 .sum(),
         }
     }
@@ -628,9 +665,9 @@ mod tests {
         let sid = 42;
         let (tx, _rx) = tokio::sync::oneshot::channel();
         context::insert_pending(&host.host_ctx, sid, types::Pending::Unary(tx));
-        host.host_ctx.state_per_sid.insert(sid, HashMap::new());
+        host.host_ctx.set_state(sid, "key".into(), vec![1]);
 
-        drop(PendingGuard::new(host.host_ctx.clone(), sid));
+        drop(PendingGuard::new(&host.host_ctx, sid));
 
         assert!(context::remove_pending(&host.host_ctx, sid).is_none());
         assert!(!host.host_ctx.state_per_sid.contains_key(&sid));
@@ -642,7 +679,7 @@ mod tests {
         let sid = 43;
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         context::insert_pending(&host.host_ctx, sid, types::Pending::Stream(tx));
-        host.host_ctx.state_per_sid.insert(sid, HashMap::new());
+        host.host_ctx.set_state(sid, "key".into(), vec![1]);
 
         drop(StreamReceiver::new(rx, host.host_ctx.clone(), sid, None));
 

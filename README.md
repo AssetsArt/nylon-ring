@@ -100,17 +100,28 @@ cargo run --release --package ex-nyring-host
 
 ## 📊 Performance
 
-Criterion release-build snapshot on an Apple M1 Pro. These are single-stream
-estimates, not aggregate throughput across all 10 cores.
+Release-build snapshot on an Apple M1 Pro.
+
+### Single-stream (Criterion)
 
 | Host operation | Time | Throughput |
 |---|---:|---:|
-| Fire-and-forget | 48.105 ns | 20.788M calls/s |
-| Synchronous fast path | 73.140 ns | 13.672M calls/s |
-| Standard unary | 133.28 ns | 7.503M calls/s |
-| Unary + 128-byte payload | 140.25 ns | 7.130M calls/s |
-| Unary + 1 KiB payload | 209.85 ns | 4.765M calls/s |
-| Unary + 4 KiB payload | 268.86 ns | 3.720M calls/s |
+| Fire-and-forget | 40.798 ns | 24.511M calls/s |
+| Synchronous fast path | 58.917 ns | 16.973M calls/s |
+| Standard unary | 116.99 ns | 8.548M calls/s |
+| Unary + 128-byte payload | 126.03 ns | 7.934M calls/s |
+| Unary + 1 KiB payload | 184.96 ns | 5.407M calls/s |
+| Unary + 4 KiB payload | 259.62 ns | 3.852M calls/s |
+
+### Multi-core (10 workers)
+
+| Host operation | Throughput |
+|---|---:|
+| Fire-and-forget | 125.12M calls/s |
+| Synchronous fast path | 88.67M calls/s |
+| Standard unary | 19.72M calls/s |
+
+### ABI primitives (Criterion)
 
 | ABI operation | Time |
 |---|---:|

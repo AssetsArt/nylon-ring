@@ -1,23 +1,34 @@
-use loom::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use loom::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use loom::sync::{Arc, Mutex};
 use loom::thread;
 
 struct CallGate {
-    accepting: AtomicBool,
-    in_flight: AtomicUsize,
+    in_flight: [AtomicUsize; 2],
 }
 
 impl CallGate {
-    fn try_begin(&self) -> bool {
-        if !self.accepting.load(Ordering::Acquire) {
-            return false;
+    fn try_begin(&self, shard: usize) -> bool {
+        const CLOSED: usize = 1 << (usize::BITS - 1);
+        self.in_flight[shard]
+            .fetch_update(Ordering::Acquire, Ordering::Relaxed, |state| {
+                (state & CLOSED == 0).then_some(state + 1)
+            })
+            .is_ok()
+    }
+
+    fn active_calls(&self) -> usize {
+        const ACTIVE_MASK: usize = (1 << (usize::BITS - 1)) - 1;
+        self.in_flight
+            .iter()
+            .map(|counter| counter.load(Ordering::Acquire) & ACTIVE_MASK)
+            .sum()
+    }
+
+    fn stop(&self) {
+        const CLOSED: usize = 1 << (usize::BITS - 1);
+        for counter in &self.in_flight {
+            counter.fetch_or(CLOSED, Ordering::AcqRel);
         }
-        self.in_flight.fetch_add(1, Ordering::AcqRel);
-        if !self.accepting.load(Ordering::Acquire) {
-            self.in_flight.fetch_sub(1, Ordering::AcqRel);
-            return false;
-        }
-        true
     }
 }
 
@@ -25,23 +36,21 @@ impl CallGate {
 fn loom_call_gate_drains_across_unload_race() {
     loom::model(|| {
         let gate = Arc::new(CallGate {
-            accepting: AtomicBool::new(true),
-            in_flight: AtomicUsize::new(0),
+            in_flight: [AtomicUsize::new(0), AtomicUsize::new(0)],
         });
         let caller_gate = gate.clone();
-        let caller = thread::spawn(move || caller_gate.try_begin());
+        let caller = thread::spawn(move || caller_gate.try_begin(1));
         let unload_gate = gate.clone();
-        let unload = thread::spawn(move || {
-            unload_gate.accepting.store(false, Ordering::Release);
-        });
+        let unload = thread::spawn(move || unload_gate.stop());
 
         let admitted = caller.join().unwrap();
         unload.join().unwrap();
         if admitted {
-            gate.in_flight.fetch_sub(1, Ordering::AcqRel);
+            gate.in_flight[1].fetch_sub(1, Ordering::Release);
         }
-        assert!(!gate.accepting.load(Ordering::Acquire));
-        assert_eq!(gate.in_flight.load(Ordering::Acquire), 0);
+        assert!(!gate.try_begin(0));
+        assert!(!gate.try_begin(1));
+        assert_eq!(gate.active_calls(), 0);
     });
 }
 

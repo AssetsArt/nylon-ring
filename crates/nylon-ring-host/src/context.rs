@@ -1,9 +1,11 @@
 use crate::types::{FastPendingMap, FastStateMap, Pending, StreamFrame, UnaryResultSlot};
-use dashmap::mapref::entry::Entry;
+use dashmap::mapref::entry::Entry as DashEntry;
 use nylon_ring::{NrHostExt, NrStatus};
 use rustc_hash::FxBuildHasher;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Number of shards for the pending requests.
 const SHARD_COUNT: usize = 64;
@@ -15,6 +17,7 @@ pub(crate) struct HostContext {
     pending_shards: OnceLock<Box<[FastPendingMap]>>,
 
     pub(crate) state_per_sid: FastStateMap,
+    state_shard_counts: [AtomicUsize; SHARD_COUNT],
     pub(crate) host_ext: NrHostExt,
     stream_capacity: usize,
 }
@@ -24,6 +27,7 @@ impl HostContext {
         Self {
             pending_shards: OnceLock::new(),
             state_per_sid: FastStateMap::with_hasher(FxBuildHasher),
+            state_shard_counts: std::array::from_fn(|_| AtomicUsize::new(0)),
             host_ext,
             stream_capacity,
         }
@@ -48,6 +52,40 @@ impl HostContext {
     pub(crate) fn stream_capacity(&self) -> usize {
         self.stream_capacity
     }
+
+    pub(crate) fn set_state(&self, sid: u64, key: String, value: Vec<u8>) {
+        match self.state_per_sid.entry(sid) {
+            DashEntry::Occupied(mut entry) => {
+                entry.get_mut().insert(key, value);
+            }
+            DashEntry::Vacant(entry) => {
+                let mut state = HashMap::new();
+                state.insert(key, value);
+                self.state_shard_counts[(sid as usize) & SHARD_MASK]
+                    .fetch_add(1, Ordering::Release);
+                entry.insert(state);
+            }
+        }
+    }
+
+    /// Remove state only when the SID's occupancy shard can contain entries.
+    /// The common no-state call path avoids locking the DashMap entirely.
+    pub(crate) fn remove_state(&self, sid: u64) {
+        let count = &self.state_shard_counts[(sid as usize) & SHARD_MASK];
+        if count.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        if self.state_per_sid.remove(&sid).is_some() {
+            count.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    pub(crate) fn state_count(&self) -> usize {
+        self.state_shard_counts
+            .iter()
+            .map(|count| count.load(Ordering::Acquire))
+            .sum()
+    }
 }
 
 #[inline(always)]
@@ -62,26 +100,26 @@ pub(crate) fn insert_pending(ctx: &HostContext, sid: u64, pending: Pending) {
 
 /// Remove and return a pending request.
 pub(crate) fn remove_pending(ctx: &HostContext, sid: u64) -> Option<Pending> {
-    get_shard(ctx, sid).remove(&sid).map(|(_, v)| v)
+    get_shard(ctx, sid).remove(&sid).map(|(_, pending)| pending)
 }
 
 /// Remove all host-owned state associated with a completed SID.
 pub(crate) fn cleanup_sid(ctx: &HostContext, sid: u64) {
     remove_pending(ctx, sid);
-    ctx.state_per_sid.remove(&sid);
+    ctx.remove_state(sid);
 }
 
 /// Deliver a result while holding one shard entry lock for the whole state
 /// transition. This prevents remove/reinsert and terminal-frame races.
 pub(crate) fn dispatch_pending(ctx: &HostContext, sid: u64, frame: StreamFrame) -> NrStatus {
     match get_shard(ctx, sid).entry(sid) {
-        Entry::Vacant(_) => NrStatus::Invalid,
-        Entry::Occupied(entry) => {
+        DashEntry::Vacant(_) => NrStatus::Invalid,
+        DashEntry::Occupied(entry) => {
             if matches!(entry.get(), Pending::Unary(_)) {
                 let Pending::Unary(tx) = entry.remove() else {
                     unreachable!();
                 };
-                ctx.state_per_sid.remove(&sid);
+                ctx.remove_state(sid);
                 return if tx.send((frame.status, frame.data)).is_ok() {
                     NrStatus::Ok
                 } else {
@@ -98,14 +136,14 @@ pub(crate) fn dispatch_pending(ctx: &HostContext, sid: u64, frame: StreamFrame) 
                 Ok(()) => {
                     if terminal {
                         entry.remove();
-                        ctx.state_per_sid.remove(&sid);
+                        ctx.remove_state(sid);
                     }
                     NrStatus::Ok
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => NrStatus::Backpressure,
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     entry.remove();
-                    ctx.state_per_sid.remove(&sid);
+                    ctx.remove_state(sid);
                     NrStatus::Invalid
                 }
             }

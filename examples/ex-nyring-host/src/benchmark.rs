@@ -1,4 +1,3 @@
-use futures::future::join_all;
 use nylon_ring_host::PluginHandle;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -198,16 +197,17 @@ pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle, config: Benchma
 
             let start_time = Instant::now();
             let bench_duration = Duration::from_secs(config.duration_secs);
-            let mut futures_batch = Vec::with_capacity(config.batch_size);
             let mut cpu_samples = CpuSamples::default();
             let mut completed_batches = 0;
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
+                // Await each call directly: these plugin ops complete
+                // synchronously, so batching futures through join_all only
+                // added a large per-batch allocation to the measurement.
                 for _ in 0..config.batch_size {
-                    futures_batch.push(plugin.call("benchmark_without_response", payload));
+                    let _ = plugin.call("benchmark_without_response", payload).await;
                 }
-                let _ = join_all(futures_batch.drain(..)).await;
                 let batch_elapsed = batch_start.elapsed();
 
                 counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);
@@ -278,16 +278,15 @@ pub async fn run_request_response_benchmark(plugin: PluginHandle, config: Benchm
 
             let start_time = Instant::now();
             let bench_duration = Duration::from_secs(config.duration_secs);
-            let mut futures_batch = Vec::with_capacity(config.batch_size);
             let mut cpu_samples = CpuSamples::default();
             let mut completed_batches = 0;
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
+                // Await each call directly; see run_fire_and_forget_benchmark.
                 for _ in 0..config.batch_size {
-                    futures_batch.push(plugin.call_response("benchmark", payload));
+                    let _ = plugin.call_response("benchmark", payload).await;
                 }
-                let _ = join_all(futures_batch.drain(..)).await;
                 let batch_elapsed = batch_start.elapsed();
 
                 counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);
@@ -358,16 +357,15 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: B
 
             let start_time = Instant::now();
             let bench_duration = Duration::from_secs(config.duration_secs);
-            let mut futures_batch = Vec::with_capacity(config.batch_size);
             let mut cpu_samples = CpuSamples::default();
             let mut completed_batches = 0;
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
+                // Await each call directly; see run_fire_and_forget_benchmark.
                 for _ in 0..config.batch_size {
-                    futures_batch.push(plugin.call_response_fast("benchmark", payload));
+                    let _ = plugin.call_response_fast("benchmark", payload).await;
                 }
-                let _ = join_all(futures_batch.drain(..)).await;
                 let batch_elapsed = batch_start.elapsed();
 
                 counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);

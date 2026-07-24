@@ -7,4 +7,3 @@ publish = false
 [dependencies]
 nylon-ring-host = { path = "../../crates/nylon-ring-host" }
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
-futures = "0.3"

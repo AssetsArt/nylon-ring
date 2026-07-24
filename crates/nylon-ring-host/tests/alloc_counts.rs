@@ -101,6 +101,8 @@ fn steady_state_host_allocations_per_call() {
                 .call_response("benchmark", &payload_128)
                 .await
                 .unwrap();
+            let (_sid, mut receiver) = plugin.call_stream("benchmark_stream", b"").await.unwrap();
+            while receiver.recv().await.is_some() {}
         }
     });
 
@@ -163,5 +165,24 @@ fn steady_state_host_allocations_per_call() {
         (a, d),
         (1.0, 1.0),
         "1-byte unary must cost exactly one host alloc/free pair"
+    );
+
+    // A full empty-frame stream round trip reuses a pooled channel, so in
+    // steady state it must not touch the allocator at all.
+    let (a, d) = measure(CALLS, || {
+        runtime.block_on(async {
+            let (_sid, mut receiver) = plugin.call_stream("benchmark_stream", b"").await.unwrap();
+            let mut frames = 0u32;
+            while let Some(frame) = receiver.recv().await {
+                assert!(frame.status == NrStatus::Ok || frame.status == NrStatus::StreamEnd);
+                frames += 1;
+            }
+            assert_eq!(frames, 9);
+        });
+    });
+    assert_eq!(
+        (a, d),
+        (0.0, 0.0),
+        "steady-state empty stream must not allocate host-side"
     );
 }

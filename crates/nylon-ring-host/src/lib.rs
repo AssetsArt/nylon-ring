@@ -13,6 +13,7 @@ mod extensions;
 #[cfg(test)]
 mod loom_tests;
 mod sid;
+mod stream_channel;
 mod types;
 
 use call_tracker::CallTracker;
@@ -325,8 +326,7 @@ impl PluginHandle {
         let call_guard = self.plugin.begin_owned_call()?;
         let sid = next_sid();
 
-        let (tx, rx) =
-            tokio::sync::mpsc::channel::<StreamFrame>(self.plugin.host_ctx.stream_capacity());
+        let (tx, rx) = stream_channel::acquire(self.plugin.host_ctx.stream_capacity());
 
         // Register the stream channel (Map)
         context::insert_pending(&self.plugin.host_ctx, sid, types::Pending::Stream(tx));
@@ -856,7 +856,7 @@ mod tests {
     fn dropping_stream_receiver_unregisters_stream() {
         let host = NylonRingHost::new();
         let sid = 43;
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = stream_channel::acquire(1);
         context::insert_pending(&host.host_ctx, sid, types::Pending::Stream(tx));
         host.host_ctx.set_state(sid, "key".into(), vec![1]);
 
@@ -894,7 +894,7 @@ mod tests {
     fn bounded_stream_reports_backpressure_and_removes_terminal_once() {
         let host = NylonRingHost::with_stream_capacity(1);
         let sid = 44;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (tx, mut rx) = stream_channel::acquire(1);
         context::insert_pending(&host.host_ctx, sid, types::Pending::Stream(tx));
 
         assert_eq!(
@@ -939,7 +939,7 @@ mod tests {
     fn concurrent_terminal_frames_complete_stream_once() {
         let host = NylonRingHost::with_stream_capacity(2);
         let sid = 45;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let (tx, mut rx) = stream_channel::acquire(2);
         context::insert_pending(&host.host_ctx, sid, types::Pending::Stream(tx));
         let barrier = Arc::new(std::sync::Barrier::new(3));
 
@@ -982,8 +982,8 @@ mod tests {
                 .count(),
             1
         );
-        assert!(rx.try_recv().is_ok());
-        assert!(rx.try_recv().is_err());
+        assert!(rx.try_recv().is_some());
+        assert!(rx.try_recv().is_none());
         assert_eq!(host.metrics().pending_requests, 0);
     }
 

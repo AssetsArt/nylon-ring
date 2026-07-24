@@ -1,6 +1,7 @@
 //! Type definitions and aliases for the nylon-ring-host crate.
 
 use crate::error::NylonRingHostError;
+use crate::stream_channel::{StreamChannelReceiver, StreamSender};
 use crate::{PluginCallGuard, context, context::HostContext};
 use dashmap::DashMap;
 use nylon_ring::NrStatus;
@@ -8,7 +9,6 @@ use rustc_hash::FxBuildHasher;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::task::Waker;
-use tokio::sync::mpsc;
 
 /// Result type alias for this crate.
 pub type Result<T> = std::result::Result<T, NylonRingHostError>;
@@ -17,7 +17,7 @@ pub type Result<T> = std::result::Result<T, NylonRingHostError>;
 #[derive(Debug)]
 pub(crate) enum Pending {
     Unary(UnaryPending),
-    Stream(mpsc::Sender<StreamFrame>),
+    Stream(StreamSender),
 }
 
 /// Completion state stored inline in the pending-request map.
@@ -44,7 +44,7 @@ pub struct StreamFrame {
 ///
 /// Dropping the receiver unregisters its pending stream from the host.
 pub struct StreamReceiver {
-    inner: mpsc::Receiver<StreamFrame>,
+    inner: StreamChannelReceiver,
     /// Populated only when no call guard is held (host-internal uses); with a
     /// guard the context is reached through the guarded plugin instead of
     /// paying a second shared refcount round-trip per stream.
@@ -55,7 +55,7 @@ pub struct StreamReceiver {
 
 impl StreamReceiver {
     pub(crate) fn new(
-        inner: mpsc::Receiver<StreamFrame>,
+        inner: StreamChannelReceiver,
         host_ctx: Option<Arc<HostContext>>,
         sid: u64,
         call_guard: Option<PluginCallGuard>,
@@ -89,8 +89,11 @@ impl StreamReceiver {
 impl Drop for StreamReceiver {
     fn drop(&mut self) {
         // The call guard (if any) outlives this cleanup: Drop::drop runs
-        // before the struct's fields are dropped.
+        // before the struct's fields are dropped. Removing the pending entry
+        // drops the channel's sender under the shard lock, which is what
+        // makes recycling the receiving half sound.
         context::cleanup_sid(self.host_ctx(), self.sid);
+        self.inner.recycle();
     }
 }
 

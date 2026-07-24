@@ -194,7 +194,9 @@ pub(crate) fn dispatch_pending(ctx: &HostContext, sid: u64, frame: StreamFrame) 
 
             let terminal = frame.status.is_terminal();
             // try_send borrows the sender in place; the borrow ends before
-            // entry.remove(), so no per-frame Sender clone is needed.
+            // entry.remove(), so no per-frame Sender clone is needed. A live
+            // pending entry implies a live receiver (its Drop removes the
+            // entry first), so there is no closed-channel case here.
             let send_result = match entry.get() {
                 Pending::Stream(tx) => tx.try_send(frame),
                 Pending::Unary(_) => unreachable!(),
@@ -207,12 +209,7 @@ pub(crate) fn dispatch_pending(ctx: &HostContext, sid: u64, frame: StreamFrame) 
                     }
                     NrStatus::Ok
                 }
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => NrStatus::Backpressure,
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    entry.remove();
-                    ctx.remove_state(sid);
-                    NrStatus::Invalid
-                }
+                Err(_rejected_frame) => NrStatus::Backpressure,
             }
         }
     }

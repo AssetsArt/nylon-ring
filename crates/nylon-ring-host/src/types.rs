@@ -45,23 +45,38 @@ pub struct StreamFrame {
 /// Dropping the receiver unregisters its pending stream from the host.
 pub struct StreamReceiver {
     inner: mpsc::Receiver<StreamFrame>,
-    host_ctx: Arc<HostContext>,
+    /// Populated only when no call guard is held (host-internal uses); with a
+    /// guard the context is reached through the guarded plugin instead of
+    /// paying a second shared refcount round-trip per stream.
+    host_ctx: Option<Arc<HostContext>>,
     sid: u64,
-    _call_guard: Option<PluginCallGuard>,
+    call_guard: Option<PluginCallGuard>,
 }
 
 impl StreamReceiver {
     pub(crate) fn new(
         inner: mpsc::Receiver<StreamFrame>,
-        host_ctx: Arc<HostContext>,
+        host_ctx: Option<Arc<HostContext>>,
         sid: u64,
         call_guard: Option<PluginCallGuard>,
     ) -> Self {
+        debug_assert!(
+            host_ctx.is_some() || call_guard.is_some(),
+            "stream receiver needs a context source"
+        );
         Self {
             inner,
             host_ctx,
             sid,
-            _call_guard: call_guard,
+            call_guard,
+        }
+    }
+
+    fn host_ctx(&self) -> &HostContext {
+        match (&self.call_guard, &self.host_ctx) {
+            (Some(guard), _) => &guard.plugin.host_ctx,
+            (None, Some(host_ctx)) => host_ctx,
+            (None, None) => unreachable!("checked at construction"),
         }
     }
 
@@ -73,7 +88,9 @@ impl StreamReceiver {
 
 impl Drop for StreamReceiver {
     fn drop(&mut self) {
-        context::cleanup_sid(&self.host_ctx, self.sid);
+        // The call guard (if any) outlives this cleanup: Drop::drop runs
+        // before the struct's fields are dropped.
+        context::cleanup_sid(self.host_ctx(), self.sid);
     }
 }
 

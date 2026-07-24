@@ -348,10 +348,7 @@ impl PluginHandle {
             return Err(Self::status_error(status));
         }
 
-        Ok((
-            sid,
-            StreamReceiver::new(rx, self.plugin.host_ctx.clone(), sid, Some(call_guard)),
-        ))
+        Ok((sid, StreamReceiver::new(rx, None, sid, Some(call_guard))))
     }
 
     /// Send data to an active stream.
@@ -863,7 +860,12 @@ mod tests {
         context::insert_pending(&host.host_ctx, sid, types::Pending::Stream(tx));
         host.host_ctx.set_state(sid, "key".into(), vec![1]);
 
-        drop(StreamReceiver::new(rx, host.host_ctx.clone(), sid, None));
+        drop(StreamReceiver::new(
+            rx,
+            Some(host.host_ctx.clone()),
+            sid,
+            None,
+        ));
 
         assert!(context::remove_pending(&host.host_ctx, sid).is_none());
         assert!(!host.host_ctx.state_per_sid.contains_key(&sid));

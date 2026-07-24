@@ -100,35 +100,52 @@ cargo run --release --package ex-nyring-host
 
 ## 📊 Performance
 
-Release-build snapshot on an Apple M1 Pro.
+Reference snapshot on an Apple M1 Pro (8 performance + 2 efficiency cores),
+release build. All host numbers come from the worker-loop harness in
+`ex-nyring-host`: workers await each call sequentially (in-flight depth 1 per
+worker) and every counted call is asserted `Ok`. Single-stream is the same
+harness at one worker, so the two columns are directly comparable. Each value
+is the median of three runs.
 
-### Single-stream (Criterion)
+### Throughput
 
-| Host operation | Time | Throughput |
+| Host operation | 1 worker | 10 workers | Scaling |
+|---|---:|---:|---:|
+| Fire-and-forget | 86.09M calls/s (11.6 ns) | 537.35M calls/s | 6.2× |
+| Synchronous fast path | 42.59M calls/s (23.5 ns) | 301.46M calls/s | 7.1× |
+| Standard unary | 23.34M calls/s (42.8 ns) | 163.93M calls/s | 7.0× |
+| Streaming | 14.97M frames/s (66.8 ns) | 61.27M frames/s | 4.1× |
+
+Streaming times full 9-frame round trips (8 data frames + `StreamEnd`); its
+scaling is currently bounded by per-stream channel setup.
+
+### Unary payload curve (1 worker)
+
+| Payload | Time per call | Throughput |
 |---|---:|---:|
-| Fire-and-forget | 40.610 ns | 24.625M calls/s |
-| Synchronous fast path | 59.121 ns | 16.914M calls/s |
-| Standard unary | 95.797 ns | 10.439M calls/s |
-| Unary + 128-byte payload | 110.07 ns | 9.085M calls/s |
-| Unary + 1 KiB payload | 172.30 ns | 5.804M calls/s |
-| Unary + 4 KiB payload | 232.85 ns | 4.295M calls/s |
+| empty | 42.8 ns | 23.34M calls/s |
+| 128 B | 82.0 ns | 12.19M calls/s |
+| 1 KiB | 141.8 ns | 7.05M calls/s |
+| 4 KiB | 217.4 ns | 4.60M calls/s |
 
-### Multi-core (10 workers)
+Non-empty payloads pay two alloc/free pairs and two copies under ABI v1: the
+response crosses the boundary as a foreign allocation and is copied into
+host-owned memory because allocator provenance cannot be proven across
+images.
 
-| Host operation | Throughput |
-|---|---:|
-| Fire-and-forget | 126.01M calls/s |
-| Synchronous fast path | 99.18M calls/s |
-| Standard unary | 25.34M calls/s |
-
-These are reference measurements, not cross-platform guarantees. Single-stream
-uses Criterion estimates; multi-core is a direct-terminal run with 100 requests
-per batch for 10 seconds. Reproduce them with:
+These are reference measurements, not cross-platform guarantees; absolute
+numbers shift a few percent with thermal and scheduling state. Numbers
+published before 0.1.3 used per-iteration `block_on` (single-stream) and a
+`join_all` batch loop (multi-core) and are not comparable with this table.
+Reproduce with:
 
 ```bash
-cargo bench --package nylon-ring-host
 cargo build --release --package ex-nyring-host --package ex-nyring-plugin
-NYRING_BENCH_WORKERS=10 ./target/release/ex-nyring-host
+NYRING_BENCH_OPERATION=all NYRING_BENCH_WORKERS=10 ./target/release/ex-nyring-host
+# NYRING_BENCH_OPERATION: fire | fast | unary | stream | all
+# Also: NYRING_BENCH_WORKERS, NYRING_BENCH_SECONDS, NYRING_BENCH_BATCH_SIZE,
+#       NYRING_BENCH_PAYLOAD_BYTES, NYRING_BENCH_CPU_SAMPLES
+cargo bench --package nylon-ring --bench abi_types   # ABI type microbenches
 ```
 
 ---

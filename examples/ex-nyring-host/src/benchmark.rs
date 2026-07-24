@@ -83,6 +83,15 @@ pub struct BenchmarkConfig {
     duration_secs: u64,
     batch_size: usize,
     sample_cpus: bool,
+    operation: BenchmarkOperation,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum BenchmarkOperation {
+    All,
+    FireAndForget,
+    Fast,
+    Unary,
 }
 
 impl BenchmarkConfig {
@@ -96,7 +105,42 @@ impl BenchmarkConfig {
             duration_secs: parse_positive_env("NYRING_BENCH_SECONDS", DEFAULT_DURATION_SECS)?,
             batch_size: parse_positive_env("NYRING_BENCH_BATCH_SIZE", DEFAULT_BATCH_SIZE)?,
             sample_cpus: parse_bool_env("NYRING_BENCH_CPU_SAMPLES")?,
+            operation: parse_operation_env()?,
         })
+    }
+
+    pub fn runs_fire_and_forget(self) -> bool {
+        matches!(
+            self.operation,
+            BenchmarkOperation::All | BenchmarkOperation::FireAndForget
+        )
+    }
+
+    pub fn runs_fast(self) -> bool {
+        matches!(
+            self.operation,
+            BenchmarkOperation::All | BenchmarkOperation::Fast
+        )
+    }
+
+    pub fn runs_unary(self) -> bool {
+        matches!(
+            self.operation,
+            BenchmarkOperation::All | BenchmarkOperation::Unary
+        )
+    }
+}
+
+fn parse_operation_env() -> Result<BenchmarkOperation, Box<dyn std::error::Error>> {
+    let Some(value) = std::env::var_os("NYRING_BENCH_OPERATION") else {
+        return Ok(BenchmarkOperation::All);
+    };
+    match value.to_string_lossy().as_ref() {
+        "all" => Ok(BenchmarkOperation::All),
+        "fire" => Ok(BenchmarkOperation::FireAndForget),
+        "fast" => Ok(BenchmarkOperation::Fast),
+        "unary" => Ok(BenchmarkOperation::Unary),
+        _ => Err("NYRING_BENCH_OPERATION must be one of: all, fire, fast, unary".into()),
     }
 }
 

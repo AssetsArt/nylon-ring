@@ -152,13 +152,19 @@ async fn run(
     println!("  10 calls completed in {:?}\n", now.elapsed());
 
     // Fire-and-Forget Benchmark
-    benchmark::run_fire_and_forget_benchmark(plugin.clone(), benchmark_config).await;
+    if benchmark_config.runs_fire_and_forget() {
+        benchmark::run_fire_and_forget_benchmark(plugin.clone(), benchmark_config).await;
+    }
 
     // Request-Response Fast Benchmark
-    benchmark::run_request_response_fast_benchmark(plugin.clone(), benchmark_config).await;
+    if benchmark_config.runs_fast() {
+        benchmark::run_request_response_fast_benchmark(plugin.clone(), benchmark_config).await;
+    }
 
     // Request-Response Benchmark
-    benchmark::run_request_response_benchmark(plugin.clone(), benchmark_config).await;
+    if benchmark_config.runs_unary() {
+        benchmark::run_request_response_benchmark(plugin.clone(), benchmark_config).await;
+    }
 
     println!("\n=== Demo Complete ===");
     println!("\nExecution Path Summary:");

@@ -106,28 +106,38 @@ release build. All host numbers come from the worker-loop harness in
 `ex-nyring-host`: workers await each call sequentially (in-flight depth 1 per
 worker) and every counted call is asserted `Ok`. Single-stream is the same
 harness at one worker, so the two columns are directly comparable. Each value
-is the median of three runs.
+is the best of at least three 10-second runs, all captured in one session
+(2026-07-25) — compare rows within this table, not against older snapshots.
 
 ### Throughput
 
 | Host operation | 1 worker | 10 workers | Scaling |
 |---|---:|---:|---:|
-| Fire-and-forget | 86.09M calls/s (11.6 ns) | 537.35M calls/s | 6.2× |
-| Synchronous fast path | 42.59M calls/s (23.5 ns) | 301.46M calls/s | 7.1× |
-| Standard unary | 23.34M calls/s (42.8 ns) | 163.93M calls/s | 7.0× |
-| Streaming | 14.97M frames/s (66.8 ns) | 61.27M frames/s | 4.1× |
+| Fire-and-forget | 86.83M calls/s (11.5 ns) | 578.31M calls/s | 6.7× |
+| Fire-and-forget (entry id) | 95.50M calls/s (10.5 ns) | 664.00M calls/s | 7.0× |
+| Synchronous fast path | 39.05M calls/s (25.6 ns) | 294.68M calls/s | 7.5× |
+| Synchronous fast path (entry id) | 58.90M calls/s (17.0 ns) | 421.00M calls/s | 7.1× |
+| Standard unary | 17.60M calls/s (56.8 ns) | 136.83M calls/s | 7.8× |
+| Streaming | 32.72M frames/s (30.6 ns) | 208.39M frames/s | 6.4× |
 
-Streaming times full 9-frame round trips (8 data frames + `StreamEnd`); its
-scaling is currently bounded by per-stream channel setup.
+"Entry id" rows dispatch through a pre-resolved `PluginEntry`
+(`handle.entry(name)` once, then id-only calls) instead of comparing the
+entry name on every call. Streaming times full 9-frame round trips (8 data
+frames + `StreamEnd`) through pooled per-stream channels.
 
-### Unary payload curve (1 worker)
+### Unary payload curve (1 worker, time per call)
 
-| Payload | Time per call | Throughput |
-|---|---:|---:|
-| empty | 42.8 ns | 23.34M calls/s |
-| 128 B | 82.0 ns | 12.19M calls/s |
-| 1 KiB | 141.8 ns | 7.05M calls/s |
-| 4 KiB | 217.4 ns | 4.60M calls/s |
+| Payload | `send_result` (copying) | `send_result_owned` | buffer lease |
+|---|---:|---:|---:|
+| empty | 56.8 ns | 54.6 ns | 64.2 ns |
+| 128 B | 92.6 ns | 55.5 ns | 81.4 ns |
+| 1 KiB | 153.0 ns | 55.6 ns | 110.2 ns |
+| 4 KiB | 217.9 ns | 55.3 ns | 146.4 ns |
+
+The owned column is flat: the plugin answers from its own long-lived buffer
+and the host consumes it zero-copy through `call_response_bytes`. The lease
+column pays one host alloc plus the plugin's serialize-in-place, and returns
+a plain `Vec<u8>` through `call_response`.
 
 Non-empty payloads pay two alloc/free pairs and two copies on the copying
 `send_result` path: the response crosses the boundary as a foreign
@@ -136,17 +146,20 @@ provenance cannot be proven across images. The `send_result_owned` and
 buffer-lease paths avoid this; see `docs/ABI_EVOLUTION.md`.
 
 These are reference measurements, not cross-platform guarantees; absolute
-numbers shift a few percent with thermal and scheduling state. Numbers
-published before 0.1.3 used per-iteration `block_on` (single-stream) and a
-`join_all` batch loop (multi-core) and are not comparable with this table.
-Reproduce with:
+numbers shift with thermal and scheduling state (up to tens of percent
+between sessions on the same machine), which is why every value above comes
+from one session. Numbers published before 0.1.3 used per-iteration
+`block_on` (single-stream) and a `join_all` batch loop (multi-core) and are
+not comparable with this table. Reproduce with:
 
 ```bash
 cargo build --release --package ex-nyring-host --package ex-nyring-plugin
 NYRING_BENCH_OPERATION=all NYRING_BENCH_WORKERS=10 ./target/release/ex-nyring-host
-# NYRING_BENCH_OPERATION: fire | fast | unary | stream | all
+# NYRING_BENCH_OPERATION: fire | fireid | fast | fastid | unary | unaryid
+#                         | owned | lease | stream | all
 # Also: NYRING_BENCH_WORKERS, NYRING_BENCH_SECONDS, NYRING_BENCH_BATCH_SIZE,
-#       NYRING_BENCH_PAYLOAD_BYTES, NYRING_BENCH_CPU_SAMPLES
+#       NYRING_BENCH_PAYLOAD_BYTES, NYRING_BENCH_STREAM_FRAMES,
+#       NYRING_BENCH_CPU_SAMPLES
 cargo bench --package nylon-ring --bench abi_types   # ABI type microbenches
 ```
 

@@ -59,4 +59,7 @@ pub enum NylonRingHostError {
 
     #[error("plugin has no entry named: {0}")]
     EntryNotFound(String),
+
+    #[error("plugin is pinned and cannot be unloaded, reloaded, or replaced: {0}")]
+    PluginPinned(String),
 }

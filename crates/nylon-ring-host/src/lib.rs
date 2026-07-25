@@ -127,12 +127,22 @@ impl PluginDispatch {
 
 /// A loaded plugin instance.
 pub struct LoadedPlugin {
-    _lib: Library,
+    _lib: std::mem::ManuallyDrop<Library>,
     dispatch: PluginDispatch,
     host_ctx: Arc<HostContext>,
     path: String,
     call_tracker: CallTracker,
+    /// Pinned plugins opt out of unload/reload entirely: per-call guards
+    /// skip the tracker RMWs, and the library is leaked on drop instead of
+    /// running shutdown/dlclose that can no longer be proven quiescent.
+    /// Streams still take real tracker slots (their guards hold raw plugin
+    /// pointers whose validity relies on the tracker).
+    pinned: bool,
 }
+
+/// Sentinel shard for calls on pinned plugins: no tracker slot was taken
+/// and `finish` must not run.
+const PINNED_SHARD: usize = usize::MAX;
 
 /// Plugins removed from a host while calls may still be in flight.
 ///
@@ -184,6 +194,14 @@ fn sweep_retired_plugins() {
 
 impl LoadedPlugin {
     fn begin_call(&self) -> Result<BorrowedPluginCallGuard<'_>> {
+        if self.pinned {
+            // The borrow ties the guard to a live `Arc<LoadedPlugin>` and a
+            // pinned library is never unloaded, so no tracker slot is needed.
+            return Ok(BorrowedPluginCallGuard {
+                tracker: &self.call_tracker,
+                shard: PINNED_SHARD,
+            });
+        }
         let shard = self
             .call_tracker
             .try_begin()
@@ -217,7 +235,7 @@ struct BorrowedPluginCallGuard<'a> {
 
 impl Drop for BorrowedPluginCallGuard<'_> {
     fn drop(&mut self) {
-        if self.tracker.finish(self.shard) {
+        if self.shard != PINNED_SHARD && self.tracker.finish(self.shard) {
             sweep_retired_plugins();
         }
     }
@@ -263,11 +281,20 @@ impl Drop for PluginCallGuard {
 
 impl Drop for LoadedPlugin {
     fn drop(&mut self) {
+        if self.pinned {
+            // Untracked borrowed calls may still be executing plugin code;
+            // leak the library and skip shutdown rather than pull code pages
+            // out from under them.
+            return;
+        }
         if let Some(shutdown_fn) = self.dispatch.shutdown {
             unsafe {
                 shutdown_fn();
             }
         }
+        // SAFETY: dropped exactly once here; the pinned branch above returns
+        // without dropping, which is the intended leak.
+        unsafe { std::mem::ManuallyDrop::drop(&mut self._lib) };
     }
 }
 
@@ -801,6 +828,27 @@ impl NylonRingHost {
     /// The plugin must export `nylon_ring_get_plugin` and match this host's
     /// `ABI_VERSION` exactly.
     pub fn load(&mut self, name: &str, path: &str) -> Result<()> {
+        self.load_inner(name, path, false)
+    }
+
+    /// Load a plugin that opts out of unload/reload for the life of the
+    /// process.
+    ///
+    /// Per-call guards on a pinned plugin skip the in-flight tracker RMWs
+    /// (the dominant per-call cost on short paths); in exchange the plugin
+    /// can never be unloaded, reloaded, or replaced, its `shutdown` callback
+    /// never runs, and its library handle is intentionally leaked at host
+    /// drop. Streams still take tracker slots.
+    pub fn load_pinned(&mut self, name: &str, path: &str) -> Result<()> {
+        self.load_inner(name, path, true)
+    }
+
+    fn load_inner(&mut self, name: &str, path: &str, pinned: bool) -> Result<()> {
+        if let Some(existing) = self.plugins.get(name)
+            && existing.pinned
+        {
+            return Err(NylonRingHostError::PluginPinned(name.to_owned()));
+        }
         unsafe {
             let lib = Library::new(path).map_err(NylonRingHostError::FailedToLoadLibrary)?;
 
@@ -830,11 +878,12 @@ impl NylonRingHost {
             let dispatch = PluginDispatch::from_vtable(plugin_vtable);
 
             let loaded = LoadedPlugin {
-                _lib: lib,
+                _lib: std::mem::ManuallyDrop::new(lib),
                 dispatch,
                 host_ctx: self.host_ctx.clone(),
                 path: path.to_string(),
                 call_tracker: CallTracker::new(),
+                pinned,
             };
 
             if let Some(previous) = self.plugins.insert(name.to_string(), Arc::new(loaded)) {
@@ -875,6 +924,7 @@ impl NylonRingHost {
 
     /// Unload a plugin by name.
     pub fn unload(&mut self, name: &str) -> Result<()> {
+        self.refuse_pinned(name)?;
         let plugin = self
             .plugins
             .remove(name)
@@ -883,8 +933,20 @@ impl NylonRingHost {
         Ok(())
     }
 
+    /// Pinned plugins hold untracked in-flight calls, so retiring them is
+    /// never provably safe; every unload/reload entry point refuses first.
+    fn refuse_pinned(&self, name: &str) -> Result<()> {
+        if let Some(plugin) = self.plugins.get(name)
+            && plugin.pinned
+        {
+            return Err(NylonRingHostError::PluginPinned(name.to_owned()));
+        }
+        Ok(())
+    }
+
     /// Stop accepting new calls, then wait for tracked calls to drain.
     pub async fn unload_with_grace(&mut self, name: &str, grace: Duration) -> Result<()> {
+        self.refuse_pinned(name)?;
         let plugin = self
             .plugins
             .remove(name)
@@ -897,6 +959,13 @@ impl NylonRingHost {
 
     /// Reload all plugins.
     pub fn reload(&mut self) -> Result<()> {
+        if let Some(name) = self
+            .plugins
+            .iter()
+            .find_map(|(name, plugin)| plugin.pinned.then(|| name.clone()))
+        {
+            return Err(NylonRingHostError::PluginPinned(name));
+        }
         let active_calls: usize = self
             .plugins
             .values()
@@ -921,6 +990,13 @@ impl NylonRingHost {
 
     /// Reload all plugins and wait for calls on replaced instances to drain.
     pub async fn reload_with_grace(&mut self, grace: Duration) -> Result<()> {
+        if let Some(name) = self
+            .plugins
+            .iter()
+            .find_map(|(name, plugin)| plugin.pinned.then(|| name.clone()))
+        {
+            return Err(NylonRingHostError::PluginPinned(name));
+        }
         let old_plugins: Vec<_> = self
             .plugins
             .drain()
@@ -1723,6 +1799,63 @@ mod tests {
         });
     }
 
+    #[test]
+    fn pinned_plugin_calls_and_refuses_unload() {
+        let _guard = plugin_test_lock();
+        let Some(path) = example_plugin_path() else {
+            return;
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let mut host = NylonRingHost::new();
+        host.load_pinned("pinned", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("pinned").unwrap();
+        runtime.block_on(async {
+            let (status, data) = handle
+                .call_response_fast("benchmark", b"pin")
+                .await
+                .unwrap();
+            assert_eq!(status, NrStatus::Ok);
+            assert_eq!(data, b"pin");
+            let (status, data) = handle.call_response("benchmark", b"pin2").await.unwrap();
+            assert_eq!(status, NrStatus::Ok);
+            assert_eq!(data, b"pin2");
+            // Streams still take real tracker slots on a pinned plugin.
+            let (_sid, mut receiver) = handle.call_stream("stream", b"").await.unwrap();
+            let mut frames = 0u32;
+            while receiver.recv().await.is_some() {
+                frames += 1;
+            }
+            assert!(frames > 0);
+        });
+        assert_eq!(handle.plugin.call_tracker.active_calls(), 0);
+        assert!(matches!(
+            host.unload("pinned"),
+            Err(NylonRingHostError::PluginPinned(_))
+        ));
+        assert!(matches!(
+            host.reload(),
+            Err(NylonRingHostError::PluginPinned(_))
+        ));
+        assert!(matches!(
+            host.load("pinned", path.to_str().unwrap()),
+            Err(NylonRingHostError::PluginPinned(_))
+        ));
+        runtime.block_on(async {
+            assert!(matches!(
+                host.unload_with_grace("pinned", Duration::from_millis(10))
+                    .await,
+                Err(NylonRingHostError::PluginPinned(_))
+            ));
+            assert!(matches!(
+                host.reload_with_grace(Duration::from_millis(10)).await,
+                Err(NylonRingHostError::PluginPinned(_))
+            ));
+        });
+    }
+
     /// Manual cycle-budget probe for the single-worker call paths. Run with:
     /// `cargo test --release -p nylon-ring-host --lib cycle_budget_probe -- --ignored --nocapture`
     #[test]
@@ -1803,6 +1936,82 @@ mod tests {
                 let _ = black_box(plugin.call_tracker.finish(shard));
             }),
         );
+
+        // Atomic microbenches mimicking the tracker's shard word, on a
+        // dedicated 128-byte-aligned line, to separate instruction choice
+        // (CAS loop vs single fetch_add) from ordering strength.
+        #[repr(align(128))]
+        struct PaddedCounter(std::sync::atomic::AtomicUsize);
+        use std::sync::atomic::Ordering as AtomOrd;
+        let word = PaddedCounter(std::sync::atomic::AtomicUsize::new(0));
+        report(
+            "atomics: casa loop + ldaddl",
+            time_ns(N, || {
+                let _ = black_box(
+                    word.0
+                        .fetch_update(AtomOrd::Acquire, AtomOrd::Relaxed, |v| Some(v + 1)),
+                );
+                black_box(word.0.fetch_sub(1, AtomOrd::Release));
+            }),
+        );
+        report(
+            "atomics: relaxed cas + sub",
+            time_ns(N, || {
+                let _ = black_box(
+                    word.0
+                        .fetch_update(AtomOrd::Relaxed, AtomOrd::Relaxed, |v| Some(v + 1)),
+                );
+                black_box(word.0.fetch_sub(1, AtomOrd::Relaxed));
+            }),
+        );
+        report(
+            "atomics: ldadda + ldaddl",
+            time_ns(N, || {
+                black_box(word.0.fetch_add(1, AtomOrd::Acquire));
+                black_box(word.0.fetch_sub(1, AtomOrd::Release));
+            }),
+        );
+        report(
+            "atomics: single ldadda",
+            time_ns(N, || {
+                black_box(word.0.fetch_add(1, AtomOrd::Acquire));
+            }),
+        );
+        report(
+            "atomics: relaxed cas + ldaddl",
+            time_ns(N, || {
+                let _ = black_box(
+                    word.0
+                        .fetch_update(AtomOrd::Relaxed, AtomOrd::Relaxed, |v| Some(v + 1)),
+                );
+                black_box(word.0.fetch_sub(1, AtomOrd::Release));
+            }),
+        );
+
+        // B diagnostic: the same begin/finish pair with 8 threads, each on
+        // its own thread-shard. The tracker is already sharded per thread,
+        // so per-op cost should stay ~1x the single-thread figure.
+        {
+            let tracker = std::sync::Arc::new(crate::call_tracker::CallTracker::new());
+            let per_thread: u64 = 4_000_000;
+            let start = std::time::Instant::now();
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    let tracker = tracker.clone();
+                    std::thread::spawn(move || {
+                        for _ in 0..per_thread {
+                            let shard = tracker.try_begin().unwrap();
+                            let _ = black_box(tracker.finish(shard));
+                        }
+                    })
+                })
+                .collect();
+            for t in threads {
+                t.join().unwrap();
+            }
+            let ns = start.elapsed().as_nanos() as f64 / per_thread as f64;
+            report("tracker pair, 8 threads", ns);
+        }
         report(
             "component: next_sid",
             time_ns(N, || {

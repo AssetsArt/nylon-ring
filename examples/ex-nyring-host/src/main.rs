@@ -52,8 +52,14 @@ async fn run(
 
     println!("Loading plugin from: {}\n", plugin_path);
     let mut host = NylonRingHost::new();
-    host.load("default", plugin_path)
-        .expect("Failed to load plugin");
+    if std::env::var("NYRING_BENCH_PINNED").is_ok_and(|value| value == "1") {
+        println!("(pinned mode: unload/reload disabled, per-call guards elided)");
+        host.load_pinned("default", plugin_path)
+            .expect("Failed to load plugin");
+    } else {
+        host.load("default", plugin_path)
+            .expect("Failed to load plugin");
+    }
 
     // Get a handle to the plugin
     let plugin = host.plugin("default").expect("Plugin not found");

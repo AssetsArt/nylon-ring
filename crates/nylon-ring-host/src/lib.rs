@@ -100,6 +100,30 @@ impl Drop for FastSlotBinding {
     }
 }
 
+/// Binds the thread-local stream-frame slot for the duration of a plugin
+/// `handle` call. Binding is best-effort: a reentrant `call_stream` on the
+/// same thread simply falls back to the pending-map frame path.
+struct StreamSlotBinding;
+
+impl StreamSlotBinding {
+    fn bind(slot: &mut context::StreamFrameSlot) -> Option<Self> {
+        let bound = context::CURRENT_STREAM_FRAME.with(|cell| {
+            if !cell.get().is_null() {
+                return false;
+            }
+            cell.set(slot as *mut _);
+            true
+        });
+        bound.then_some(Self)
+    }
+}
+
+impl Drop for StreamSlotBinding {
+    fn drop(&mut self) {
+        context::CURRENT_STREAM_FRAME.with(|cell| cell.set(std::ptr::null_mut()));
+    }
+}
+
 /// The plugin's dispatch surface, copied out of its vtable at load time
 /// (`init` is only used during load and not retained).
 #[derive(Copy, Clone)]
@@ -559,6 +583,14 @@ impl PluginHandle {
 
         let (tx, rx) = stream_channel::acquire(self.plugin.host_ctx.stream_capacity());
 
+        // Frames the plugin sends synchronously inside `handle` land in the
+        // channel through this slot without a per-frame map lookup.
+        let mut frame_slot = context::StreamFrameSlot {
+            sid,
+            chan: tx.channel(),
+            terminal_seen: false,
+        };
+
         // Register the stream channel (Map)
         context::insert_pending(&self.plugin.host_ctx, sid, types::Pending::Stream(tx));
 
@@ -572,7 +604,15 @@ impl PluginHandle {
             }
         };
 
+        let binding = StreamSlotBinding::bind(&mut frame_slot);
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
+        drop(binding);
+
+        if frame_slot.terminal_seen {
+            // The stream completed inside `handle`; drop the map entry (and
+            // with it the sender) so the receiver observes end-of-stream.
+            context::cleanup_sid(&self.plugin.host_ctx, sid);
+        }
 
         if status != NrStatus::Ok {
             context::cleanup_sid(&self.plugin.host_ctx, sid);
@@ -745,6 +785,14 @@ impl PluginEntry {
         let sid = next_sid();
 
         let (tx, rx) = stream_channel::acquire(self.plugin.host_ctx.stream_capacity());
+
+        // Same synchronous-frame slot as `PluginHandle::call_stream`.
+        let mut frame_slot = context::StreamFrameSlot {
+            sid,
+            chan: tx.channel(),
+            terminal_seen: false,
+        };
+
         context::insert_pending(&self.plugin.host_ctx, sid, types::Pending::Stream(tx));
 
         let handle_by_id_fn = match self.handle_by_id_fn() {
@@ -754,7 +802,13 @@ impl PluginEntry {
                 return Err(error);
             }
         };
+        let binding = StreamSlotBinding::bind(&mut frame_slot);
         let status = unsafe { handle_by_id_fn(self.id, sid, NrBytes::from_slice(payload)) };
+        drop(binding);
+
+        if frame_slot.terminal_seen {
+            context::cleanup_sid(&self.plugin.host_ctx, sid);
+        }
 
         if status != NrStatus::Ok {
             context::cleanup_sid(&self.plugin.host_ctx, sid);

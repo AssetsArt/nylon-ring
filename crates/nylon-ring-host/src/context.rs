@@ -386,3 +386,20 @@ pub(crate) fn commit_pending_lease(
 thread_local! {
     pub(crate) static CURRENT_UNARY_RESULT: Cell<*mut UnaryResultSlot> = const { Cell::new(std::ptr::null_mut()) };
 }
+
+/// Thread-local target for stream frames sent synchronously inside the
+/// plugin's `handle` call: frames land directly in the channel without the
+/// per-frame pending-map lookup. Frames sent from other threads (or after
+/// `handle` returns) still route through the map.
+pub(crate) struct StreamFrameSlot {
+    pub(crate) sid: u64,
+    pub(crate) chan: std::sync::Arc<crate::stream_channel::StreamChannel>,
+    /// Set when a terminal frame went through this slot; the caller removes
+    /// the pending entry after `handle` returns (the map path removes it
+    /// inline instead).
+    pub(crate) terminal_seen: bool,
+}
+
+thread_local! {
+    pub(crate) static CURRENT_STREAM_FRAME: Cell<*mut StreamFrameSlot> = const { Cell::new(std::ptr::null_mut()) };
+}

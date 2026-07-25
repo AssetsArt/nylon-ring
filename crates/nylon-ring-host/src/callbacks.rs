@@ -50,6 +50,35 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
         return NrStatus::Ok;
     }
 
+    // ── DIRECT STREAM SLOT (frames sent inside the same `handle` call) ──
+    let mut stream_status = None;
+    crate::context::CURRENT_STREAM_FRAME.with(|cell| {
+        let ptr = cell.get();
+        if !ptr.is_null() {
+            let slot: &mut crate::context::StreamFrameSlot = unsafe { &mut *ptr };
+            if slot.sid == sid
+                && let Some(data) = data_vec.take()
+            {
+                let terminal = status.is_terminal();
+                match slot
+                    .chan
+                    .try_send(crate::types::StreamFrame { status, data })
+                {
+                    Ok(()) => {
+                        if terminal {
+                            slot.terminal_seen = true;
+                        }
+                        stream_status = Some(NrStatus::Ok);
+                    }
+                    Err(_rejected_frame) => stream_status = Some(NrStatus::Backpressure),
+                }
+            }
+        }
+    });
+    if let Some(status) = stream_status {
+        return status;
+    }
+
     let data = data_vec.take().expect("fast path did not consume payload");
     crate::context::dispatch_pending(ctx, sid, status, ResponsePayload::Owned(data))
 }

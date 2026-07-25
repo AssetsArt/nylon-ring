@@ -144,12 +144,15 @@ pub(crate) struct StreamSender {
     chan: Arc<StreamChannel>,
 }
 
-impl StreamSender {
-    /// Queues a frame. When the queue already holds `capacity` frames the
-    /// frame is handed back in `Err` so its payload drops outside the lock.
+impl StreamChannel {
+    /// Queues a frame. When the queue already holds `capacity` frames — or
+    /// the channel is already closed (only reachable through the thread-local
+    /// frame slot after an async terminal frame removed the pending entry) —
+    /// the frame is handed back in `Err` so its payload drops outside the
+    /// lock.
     pub(crate) fn try_send(&self, frame: StreamFrame) -> Result<(), StreamFrame> {
-        let mut state = self.chan.state.lock();
-        if state.queue.len() >= self.chan.capacity {
+        let mut state = self.state.lock();
+        if state.closed || state.queue.len() >= self.capacity {
             drop(state);
             return Err(frame);
         }
@@ -160,6 +163,19 @@ impl StreamSender {
             waker.wake();
         }
         Ok(())
+    }
+}
+
+impl StreamSender {
+    pub(crate) fn try_send(&self, frame: StreamFrame) -> Result<(), StreamFrame> {
+        self.chan.try_send(frame)
+    }
+
+    /// Shared handle for the thread-local frame slot: keeps the channel
+    /// alive across the plugin's `handle` call independently of the pending
+    /// map entry (an async terminal frame may remove that entry mid-call).
+    pub(crate) fn channel(&self) -> Arc<StreamChannel> {
+        self.chan.clone()
     }
 }
 

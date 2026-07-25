@@ -107,19 +107,33 @@ release build. All host numbers come from the worker-loop harness in
 worker) and every counted call is asserted `Ok`. Single-stream is the same
 harness at one worker, so the two columns are directly comparable. Each value
 is the best of at least three 10-second runs, all captured in one session
-(2026-07-25, code at `efed861`) — compare rows within this table, not
-against older snapshots.
+(code at `94a1c33`) — compare rows within this table, not against older
+snapshots.
 
 ### Throughput
 
 | Host operation | 1 worker | 10 workers | Scaling |
 |---|---:|---:|---:|
-| Fire-and-forget | 85.92M calls/s (11.6 ns) | 690.98M calls/s | 8.0× |
-| Fire-and-forget (entry id) | 93.32M calls/s (10.7 ns) | 772.72M calls/s | 8.3× |
-| Synchronous fast path | 40.90M calls/s (24.4 ns) | 334.65M calls/s | 8.2× |
-| Synchronous fast path (entry id) | 58.97M calls/s (17.0 ns) | 481.37M calls/s | 8.2× |
-| Standard unary | 24.58M calls/s (40.7 ns) | 194.80M calls/s | 7.9× |
-| Streaming | 32.73M frames/s (30.6 ns) | 202.41M frames/s | 6.2× |
+| Fire-and-forget | 84.56M calls/s (11.8 ns) | 679.67M calls/s | 8.0× |
+| Fire-and-forget (entry id) | 96.89M calls/s (10.3 ns) | 791.78M calls/s | 8.2× |
+| Synchronous fast path | 40.62M calls/s (24.6 ns) | 332.10M calls/s | 8.2× |
+| Synchronous fast path (entry id) | 58.94M calls/s (17.0 ns) | 476.26M calls/s | 8.1× |
+| Standard unary | 24.67M calls/s (40.5 ns) | 197.11M calls/s | 8.0× |
+| Streaming | 37.48M frames/s (26.7 ns) | 235.58M frames/s | 6.3× |
+
+For calibration: the raw FFI boundary itself (indirect call into the
+dylib, dispatch wrapper, and handler) measures **1.9 ns / 6 cycles** in
+`cycle_budget_probe`. Everything above that line is the priced cost of
+session routing, async delivery, and hot-unload safety — not the ABI.
+
+Plugins loaded with `load_pinned` opt out of unload/reload for the life
+of the process, which removes the per-call in-flight tracking:
+
+| Host operation (pinned) | 1 worker | 10 workers |
+|---|---:|---:|
+| Fire-and-forget (entry id) | 177.30M calls/s (5.6 ns) | 1.45B calls/s |
+| Synchronous fast path (entry id) | 73.47M calls/s (13.6 ns) | 602.20M calls/s |
+| Standard unary | 26.53M calls/s (37.7 ns) | 213.10M calls/s |
 
 "Entry id" rows dispatch through a pre-resolved `PluginEntry`
 (`handle.entry(name)` once, then id-only calls) instead of comparing the
@@ -130,10 +144,10 @@ frames + `StreamEnd`) through pooled per-stream channels.
 
 | Payload | `send_result` (copying) | `send_result_owned` | buffer lease |
 |---|---:|---:|---:|
-| empty | 40.7 ns | 56.6 ns | 46.3 ns |
-| 128 B | 76.7 ns | 56.6 ns | 62.0 ns |
-| 1 KiB | 137.2 ns | 56.2 ns | 96.6 ns |
-| 4 KiB | 211.6 ns | 56.0 ns | 128.0 ns |
+| empty | 40.5 ns | 56.9 ns | 47.4 ns |
+| 128 B | 82.3 ns | 56.5 ns | 62.1 ns |
+| 1 KiB | 136.5 ns | 56.5 ns | 95.9 ns |
+| 4 KiB | 203.6 ns | 56.1 ns | 128.3 ns |
 
 The owned column is flat: the plugin answers from its own long-lived buffer
 and the host consumes it zero-copy through `call_response_bytes`. The lease

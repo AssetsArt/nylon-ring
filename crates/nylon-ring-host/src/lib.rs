@@ -298,6 +298,17 @@ impl PluginHandle {
         );
         let mut pending_guard = PendingGuard::new(&self.plugin.host_ctx, sid);
 
+        // Synchronous responses land in the thread-local slot without touching
+        // the pending map again; the map entry (inserted above, before the
+        // plugin runs) still catches responses from other threads. A reentrant
+        // caller already owns the slot, so binding is best-effort.
+        let mut slot = types::UnaryResultSlot {
+            sid,
+            result: None,
+            lease: None,
+        };
+        let binding = FastSlotBinding::bind(&mut slot).ok();
+
         let payload_bytes = NrBytes::from_slice(payload);
         let handle_raw_fn = match self.plugin.dispatch.handle {
             Some(f) => f,
@@ -306,8 +317,21 @@ impl PluginHandle {
 
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
+        drop(binding);
+        // A lease the plugin acquired but never committed may still be
+        // written to by misbehaving plugin threads; park it instead of
+        // freeing stack-adjacent heap memory (see HostContext orphans).
+        if let Some(lease) = slot.lease.take() {
+            self.plugin.host_ctx.park_orphan_lease(lease);
+        }
+
         if status != NrStatus::Ok {
             return Err(Self::status_error(status));
+        }
+
+        if let Some((status, data)) = slot.result.take() {
+            // The pending guard removes the unused map entry on drop.
+            return Ok((status, data));
         }
 
         match context::wait_for_unary(&self.plugin.host_ctx, sid).await {
@@ -390,6 +414,14 @@ impl PluginHandle {
         );
         let mut pending_guard = PendingGuard::new(&self.plugin.host_ctx, sid);
 
+        // Same synchronous-response slot as `call_response`.
+        let mut slot = types::UnaryResultSlot {
+            sid,
+            result: None,
+            lease: None,
+        };
+        let binding = FastSlotBinding::bind(&mut slot).ok();
+
         let payload_bytes = NrBytes::from_slice(payload);
         let handle_raw_fn = match self.plugin.dispatch.handle {
             Some(f) => f,
@@ -397,8 +429,18 @@ impl PluginHandle {
         };
 
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
+
+        drop(binding);
+        if let Some(lease) = slot.lease.take() {
+            self.plugin.host_ctx.park_orphan_lease(lease);
+        }
+
         if status != NrStatus::Ok {
             return Err(Self::status_error(status));
+        }
+
+        if let Some((status, data)) = slot.result.take() {
+            return Ok((status, data));
         }
 
         match tokio::time::timeout(timeout, context::wait_for_unary(&self.plugin.host_ctx, sid))
@@ -606,11 +648,28 @@ impl PluginEntry {
         );
         let mut pending_guard = PendingGuard::new(&self.plugin.host_ctx, sid);
 
+        // Same synchronous-response slot as `PluginHandle::call_response`.
+        let mut slot = types::UnaryResultSlot {
+            sid,
+            result: None,
+            lease: None,
+        };
+        let binding = FastSlotBinding::bind(&mut slot).ok();
+
         let handle_by_id_fn = self.handle_by_id_fn()?;
         let status = unsafe { handle_by_id_fn(self.id, sid, NrBytes::from_slice(payload)) };
 
+        drop(binding);
+        if let Some(lease) = slot.lease.take() {
+            self.plugin.host_ctx.park_orphan_lease(lease);
+        }
+
         if status != NrStatus::Ok {
             return Err(PluginHandle::status_error(status));
+        }
+
+        if let Some((status, data)) = slot.result.take() {
+            return Ok((status, data));
         }
 
         match context::wait_for_unary(&self.plugin.host_ctx, sid).await {
@@ -1662,5 +1721,161 @@ mod tests {
             }
             assert_eq!(frames, 9);
         });
+    }
+
+    /// Manual cycle-budget probe for the single-worker call paths. Run with:
+    /// `cargo test --release -p nylon-ring-host --lib cycle_budget_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual probe; needs --release for meaningful numbers"]
+    fn cycle_budget_probe() {
+        use std::future::Future;
+        use std::hint::black_box;
+        use std::task::{Context, Poll, Waker};
+
+        let _guard = plugin_test_lock();
+        let path = example_plugin_path().expect("example plugin must build");
+        let mut host = NylonRingHost::new();
+        host.load("bench", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("bench").unwrap();
+        let fire_entry = handle.entry("benchmark_without_response").unwrap();
+        let fast_entry = handle.entry("benchmark").unwrap();
+
+        const N: u64 = 20_000_000;
+
+        fn time_ns(iters: u64, mut f: impl FnMut()) -> f64 {
+            for _ in 0..iters / 10 {
+                f();
+            }
+            let start = std::time::Instant::now();
+            for _ in 0..iters {
+                f();
+            }
+            start.elapsed().as_nanos() as f64 / iters as f64
+        }
+
+        // A 16-deep dependent add chain retires at 1/cycle on Apple Silicon:
+        // measures the actual clock so cycle numbers below don't assume
+        // nominal boost. The loop lives inside one asm block so the chain
+        // never round-trips through memory; the loop counter's subs/branch
+        // overlap with the chain and add no cycles.
+        let calibrate = |iters: u64| -> f64 {
+            let mut x: u64 = black_box(0);
+            let start = std::time::Instant::now();
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                let mut n = iters;
+                std::arch::asm!(
+                    "2:",
+                    "add {x}, {x}, #1", "add {x}, {x}, #1", "add {x}, {x}, #1",
+                    "add {x}, {x}, #1", "add {x}, {x}, #1", "add {x}, {x}, #1",
+                    "add {x}, {x}, #1", "add {x}, {x}, #1", "add {x}, {x}, #1",
+                    "add {x}, {x}, #1", "add {x}, {x}, #1", "add {x}, {x}, #1",
+                    "add {x}, {x}, #1", "add {x}, {x}, #1", "add {x}, {x}, #1",
+                    "add {x}, {x}, #1",
+                    "subs {n}, {n}, #1",
+                    "b.ne 2b",
+                    x = inout(reg) x,
+                    n = inout(reg) n,
+                );
+                black_box(n);
+            }
+            black_box(x);
+            start.elapsed().as_nanos() as f64 / iters as f64
+        };
+        calibrate(200_000_000); // DVFS ramp warmup
+        let calib_ns = calibrate(100_000_000).min(calibrate(100_000_000));
+        let ghz = 16.0 / calib_ns;
+        println!("clock calibration: {calib_ns:.2} ns / 16 adds -> {ghz:.3} GHz");
+
+        let cyc = |ns: f64| ns * ghz;
+        let report = |name: &str, ns: f64| {
+            println!("{name:<28} {ns:>7.2} ns  {:>6.1} cycles", cyc(ns));
+        };
+
+        let plugin = &fire_entry.plugin;
+        let handle_by_id_fn = plugin.dispatch.handle_by_id.unwrap();
+        let fire_id = fire_entry.id;
+
+        report(
+            "component: tracker begin+fin",
+            time_ns(N, || {
+                let shard = plugin.call_tracker.try_begin().unwrap();
+                let _ = black_box(plugin.call_tracker.finish(shard));
+            }),
+        );
+        report(
+            "component: next_sid",
+            time_ns(N, || {
+                black_box(sid::next_sid());
+            }),
+        );
+        report(
+            "component: remove_state",
+            time_ns(N, || {
+                plugin.host_ctx.remove_state(black_box(1));
+            }),
+        );
+        report(
+            "raw FFI handle_by_id (fire)",
+            time_ns(N, || {
+                let status = unsafe {
+                    handle_by_id_fn(black_box(fire_id), 1, NrBytes::from_slice(black_box(b"")))
+                };
+                assert_eq!(status, NrStatus::Ok);
+            }),
+        );
+
+        let mut cx = Context::from_waker(Waker::noop());
+        macro_rules! poll_ready {
+            ($fut:expr) => {{
+                let fut = $fut;
+                let mut fut = std::pin::pin!(fut);
+                match fut.as_mut().poll(&mut cx) {
+                    Poll::Ready(result) => result.unwrap(),
+                    Poll::Pending => panic!("probe future must complete synchronously"),
+                }
+            }};
+        }
+
+        report(
+            "full fire (entry id)",
+            time_ns(N, || {
+                poll_ready!(fire_entry.call(black_box(b"")));
+            }),
+        );
+        report(
+            "full fire (by name)",
+            time_ns(N, || {
+                poll_ready!(handle.call("benchmark_without_response", black_box(b"")));
+            }),
+        );
+        report(
+            "full fast (entry id)",
+            time_ns(N, || {
+                black_box(poll_ready!(fast_entry.call_response_fast(black_box(b""))));
+            }),
+        );
+        report(
+            "full fast (by name)",
+            time_ns(N, || {
+                black_box(poll_ready!(
+                    handle.call_response_fast("benchmark", black_box(b""))
+                ));
+            }),
+        );
+        report(
+            "full unary (entry id)",
+            time_ns(N, || {
+                black_box(poll_ready!(fast_entry.call_response(black_box(b""))));
+            }),
+        );
+        report(
+            "full unary (by name)",
+            time_ns(N, || {
+                black_box(poll_ready!(
+                    handle.call_response("benchmark", black_box(b""))
+                ));
+            }),
+        );
     }
 }

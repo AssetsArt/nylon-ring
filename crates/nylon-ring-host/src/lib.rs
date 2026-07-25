@@ -1946,6 +1946,9 @@ mod tests {
         // never round-trips through memory; the loop counter's subs/branch
         // overlap with the chain and add no cycles.
         let calibrate = |iters: u64| -> f64 {
+            // Only the aarch64 asm below mutates `x`; other targets compile
+            // this probe (it is #[ignore]d) without running it.
+            #[cfg_attr(not(target_arch = "aarch64"), allow(unused_mut))]
             let mut x: u64 = black_box(0);
             let start = std::time::Instant::now();
             #[cfg(target_arch = "aarch64")]

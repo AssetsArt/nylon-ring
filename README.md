@@ -107,7 +107,7 @@ release build. All host numbers come from the worker-loop harness in
 worker) and every counted call is asserted `Ok`. Single-stream is the same
 harness at one worker, so the two columns are directly comparable. Each value
 is the best of at least three 10-second runs, all captured in one session
-(2026-07-25, harness at `198518c`) — compare rows within this table, not
+(2026-07-25, code at `efed861`) — compare rows within this table, not
 against older snapshots.
 
 ### Throughput
@@ -118,7 +118,7 @@ against older snapshots.
 | Fire-and-forget (entry id) | 93.32M calls/s (10.7 ns) | 772.72M calls/s | 8.3× |
 | Synchronous fast path | 40.90M calls/s (24.4 ns) | 334.65M calls/s | 8.2× |
 | Synchronous fast path (entry id) | 58.97M calls/s (17.0 ns) | 481.37M calls/s | 8.2× |
-| Standard unary | 17.09M calls/s (58.5 ns) | 137.97M calls/s | 8.1× |
+| Standard unary | 24.58M calls/s (40.7 ns) | 194.80M calls/s | 7.9× |
 | Streaming | 32.73M frames/s (30.6 ns) | 202.41M frames/s | 6.2× |
 
 "Entry id" rows dispatch through a pre-resolved `PluginEntry`
@@ -130,10 +130,10 @@ frames + `StreamEnd`) through pooled per-stream channels.
 
 | Payload | `send_result` (copying) | `send_result_owned` | buffer lease |
 |---|---:|---:|---:|
-| empty | 58.5 ns | 56.7 ns | 64.0 ns |
-| 128 B | 93.3 ns | 56.6 ns | 80.1 ns |
-| 1 KiB | 153.3 ns | 56.2 ns | 108.4 ns |
-| 4 KiB | 218.9 ns | 56.1 ns | 149.6 ns |
+| empty | 40.7 ns | 56.6 ns | 46.3 ns |
+| 128 B | 76.7 ns | 56.6 ns | 62.0 ns |
+| 1 KiB | 137.2 ns | 56.2 ns | 96.6 ns |
+| 4 KiB | 211.6 ns | 56.0 ns | 128.0 ns |
 
 The owned column is flat: the plugin answers from its own long-lived buffer
 and the host consumes it zero-copy through `call_response_bytes`. The lease

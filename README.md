@@ -107,18 +107,19 @@ release build. All host numbers come from the worker-loop harness in
 worker) and every counted call is asserted `Ok`. Single-stream is the same
 harness at one worker, so the two columns are directly comparable. Each value
 is the best of at least three 10-second runs, all captured in one session
-(2026-07-25) — compare rows within this table, not against older snapshots.
+(2026-07-25, harness at `198518c`) — compare rows within this table, not
+against older snapshots.
 
 ### Throughput
 
 | Host operation | 1 worker | 10 workers | Scaling |
 |---|---:|---:|---:|
-| Fire-and-forget | 86.83M calls/s (11.5 ns) | 578.31M calls/s | 6.7× |
-| Fire-and-forget (entry id) | 95.50M calls/s (10.5 ns) | 664.00M calls/s | 7.0× |
-| Synchronous fast path | 39.05M calls/s (25.6 ns) | 294.68M calls/s | 7.5× |
-| Synchronous fast path (entry id) | 58.90M calls/s (17.0 ns) | 421.00M calls/s | 7.1× |
-| Standard unary | 17.60M calls/s (56.8 ns) | 136.83M calls/s | 7.8× |
-| Streaming | 32.72M frames/s (30.6 ns) | 208.39M frames/s | 6.4× |
+| Fire-and-forget | 85.92M calls/s (11.6 ns) | 690.98M calls/s | 8.0× |
+| Fire-and-forget (entry id) | 93.32M calls/s (10.7 ns) | 757.89M calls/s | 8.1× |
+| Synchronous fast path | 40.51M calls/s (24.7 ns) | 319.99M calls/s | 7.9× |
+| Synchronous fast path (entry id) | 58.40M calls/s (17.1 ns) | 462.01M calls/s | 7.9× |
+| Standard unary | 17.07M calls/s (58.6 ns) | 132.15M calls/s | 7.7× |
+| Streaming | 32.41M frames/s (30.9 ns) | 202.41M frames/s | 6.2× |
 
 "Entry id" rows dispatch through a pre-resolved `PluginEntry`
 (`handle.entry(name)` once, then id-only calls) instead of comparing the
@@ -129,10 +130,10 @@ frames + `StreamEnd`) through pooled per-stream channels.
 
 | Payload | `send_result` (copying) | `send_result_owned` | buffer lease |
 |---|---:|---:|---:|
-| empty | 56.8 ns | 54.6 ns | 64.2 ns |
-| 128 B | 92.6 ns | 55.5 ns | 81.4 ns |
-| 1 KiB | 153.0 ns | 55.6 ns | 110.2 ns |
-| 4 KiB | 217.9 ns | 55.3 ns | 146.4 ns |
+| empty | 58.6 ns | 57.1 ns | 64.2 ns |
+| 128 B | 93.9 ns | 56.6 ns | 80.7 ns |
+| 1 KiB | 153.3 ns | 56.2 ns | 108.4 ns |
+| 4 KiB | 218.9 ns | 56.1 ns | 149.6 ns |
 
 The owned column is flat: the plugin answers from its own long-lived buffer
 and the host consumes it zero-copy through `call_response_bytes`. The lease
@@ -149,8 +150,10 @@ These are reference measurements, not cross-platform guarantees; absolute
 numbers shift with thermal and scheduling state (up to tens of percent
 between sessions on the same machine), which is why every value above comes
 from one session. Numbers published before 0.1.3 used per-iteration
-`block_on` (single-stream) and a `join_all` batch loop (multi-core) and are
-not comparable with this table. Reproduce with:
+`block_on` (single-stream) and a `join_all` batch loop (multi-core), and
+multi-worker numbers published before `198518c` under-read by 15–22%
+(the harness updated shared counters every batch); neither is comparable
+with this table. Reproduce with:
 
 ```bash
 cargo build --release --package ex-nyring-host --package ex-nyring-plugin

@@ -140,21 +140,45 @@ Removes the host-side alloc/copy/free (the guarded half of the ~30 ns).
 
 ### P2: host-owned output buffers — zero-copy in the other direction
 
+**Status: implemented** (as two further members of `NrHostVTableV2`, added
+before any v2 release shipped, so no v3 was needed). The signature deviates
+from the original sketch in one way: `acquire` takes the `sid`, which is
+what ties the lease to the pending entry for reclamation.
+
 ```c
-NrBufferLease nr_acquire_result_buffer(void *host_ctx, uint64_t capacity);
-/* NrBufferLease { uint8_t *ptr; uint64_t cap; uint64_t token; } */
-NrStatus nr_commit_result_buffer(void *host_ctx, uint64_t sid,
-                                 NrStatus status, uint64_t token,
-                                 uint64_t initialized_len);
+/* NrBufferLeaseV2 { uint8_t *ptr; uint64_t cap; uint64_t token; } */
+NrBufferLeaseV2 acquire_result_buffer(void *host_ctx, uint64_t sid,
+                                      uint64_t capacity);
+NrStatus commit_result_buffer(void *host_ctx, uint64_t sid,
+                              NrStatus status, uint64_t token,
+                              uint64_t initialized_len);
 ```
 
 The plugin writes its response directly into memory the host allocated, then
 commits it; the host hands its own `Vec` to the caller with no provenance
-question. Removes **both** alloc/free pairs and one copy for producers that
-can serialize straight into the lease. Requires leak handling for
-acquired-but-never-committed leases (tie the lease to the sid and reclaim it
-on timeout/cancel cleanup, the same path that already removes pending
-entries).
+question — the plain `call_response` Vec API becomes zero-copy with no
+guard or deferred-release entanglement.
+
+Contract as shipped:
+
+- A failed acquire returns a null `ptr` (unknown sid, streaming sid, or a
+  lease already outstanding — at most one per sid); the plugin must fall
+  back to another response path.
+- `commit` passes the lease's `token` back with `initialized_len <= cap`
+  bytes written. On `Ok` the buffer belongs to the host; a failed commit
+  (bad token, oversized length) keeps the lease valid for a corrected
+  retry; committing a consumed lease reports `Invalid`.
+- Responding through any other channel for the same sid consumes the lease;
+  touching the buffer afterwards is undefined behavior.
+- Leak/soundness handling: a lease whose call the host abandons (timeout,
+  cancel, receiver drop) is parked, not freed — the plugin may still hold
+  the pointer. It is freed on a late commit or at host-context drop, after
+  the plugin's shutdown contract forbids further writes.
+
+Reference numbers (M1 Pro, avg-latency harness, `NYRING_BENCH_OPERATION=
+lease`): v1 echo 53/89/150/221 ns at 0/128/1024/4096 B versus lease echo
+59/77/106/145 ns — ~+6 ns fixed for acquire+commit, break-even ≈ 64 B; at
+10 workers and 4 KiB, 19.2M -> 50.1M calls/s.
 
 ### P3 (candidate): integer entry dispatch
 
@@ -176,6 +200,8 @@ Implemented layout (additive):
 - `NrPluginInfoV2` / `NrPluginVTableV2`: identical shape to v1; only `init`
   differs, receiving `NrHostVTableV2`.
 - `NrHostVTableV2` embeds the v1 table as its first field, so v2-aware
-  plugin code can hand `&table.v1` to v1-style helpers unchanged.
+  plugin code can hand `&table.v1` to v1-style helpers unchanged; after it
+  come `send_result_owned` (P1) and `acquire_result_buffer`/
+  `commit_result_buffer` (P2).
 - `define_plugin!` accepts an optional `init_v2:` handler; without one, the
   v2 export reuses the v1 init through the embedded table.

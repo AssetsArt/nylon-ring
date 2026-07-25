@@ -23,7 +23,13 @@ pub(crate) enum Pending {
 /// Completion state stored inline in the pending-request map.
 #[derive(Debug)]
 pub(crate) enum UnaryPending {
-    Waiting(Option<Waker>),
+    Waiting {
+        waker: Option<Waker>,
+        /// Host-owned buffer leased to the plugin (ABI v2); the plugin may
+        /// write into it until the call completes, so removal paths must
+        /// park it in the orphan list instead of freeing it.
+        lease: Option<Vec<u8>>,
+    },
     Ready(NrStatus, ResponsePayload),
 }
 
@@ -162,7 +168,10 @@ impl std::fmt::Debug for ResponseBytes {
 
 impl UnaryPending {
     pub(crate) const fn waiting() -> Self {
-        Self::Waiting(None)
+        Self::Waiting {
+            waker: None,
+            lease: None,
+        }
     }
 }
 
@@ -240,4 +249,6 @@ pub(crate) type FastStateMap = DashMap<u64, HashMap<String, Vec<u8>>, FxBuildHas
 pub(crate) struct UnaryResultSlot {
     pub(crate) sid: u64,
     pub(crate) result: Option<(NrStatus, Vec<u8>)>,
+    /// Host-owned buffer leased to the plugin (ABI v2) for this call.
+    pub(crate) lease: Option<Vec<u8>>,
 }

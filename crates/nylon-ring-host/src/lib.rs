@@ -18,7 +18,8 @@ mod types;
 
 use call_tracker::CallTracker;
 use callbacks::{
-    get_state_callback, send_result_owned_callback, send_result_vec_callback, set_state_callback,
+    acquire_result_buffer_callback, commit_result_buffer_callback, get_state_callback,
+    send_result_owned_callback, send_result_vec_callback, set_state_callback,
 };
 use context::{CURRENT_UNARY_RESULT, HostContext};
 use libloading::{Library, Symbol};
@@ -428,7 +429,11 @@ impl PluginHandle {
     ) -> Result<(NrStatus, Vec<u8>)> {
         let _call_guard = self.plugin.begin_call()?;
         let sid = next_sid();
-        let mut slot = types::UnaryResultSlot { sid, result: None };
+        let mut slot = types::UnaryResultSlot {
+            sid,
+            result: None,
+            lease: None,
+        };
 
         let binding = FastSlotBinding::bind(&mut slot)?;
 
@@ -442,6 +447,12 @@ impl PluginHandle {
         let status = unsafe { handle_raw_fn(NrStr::new(entry), sid, payload_bytes) };
 
         drop(binding);
+        // A lease the plugin acquired but never committed may still be
+        // written to by misbehaving plugin threads; park it instead of
+        // freeing stack-adjacent heap memory (see HostContext orphans).
+        if let Some(lease) = slot.lease.take() {
+            self.plugin.host_ctx.park_orphan_lease(lease);
+        }
         self.plugin.host_ctx.remove_state(sid);
 
         if status != NrStatus::Ok {
@@ -581,6 +592,8 @@ impl NylonRingHost {
         let host_vtable_v2 = Box::new(NrHostVTableV2 {
             v1: *host_vtable,
             send_result_owned: send_result_owned_callback,
+            acquire_result_buffer: acquire_result_buffer_callback,
+            commit_result_buffer: commit_result_buffer_callback,
         });
 
         Self {
@@ -1094,10 +1107,12 @@ mod tests {
         let mut first = types::UnaryResultSlot {
             sid: 1,
             result: None,
+            lease: None,
         };
         let mut second = types::UnaryResultSlot {
             sid: 2,
             result: None,
+            lease: None,
         };
         let binding = FastSlotBinding::bind(&mut first).unwrap();
         assert!(matches!(
@@ -1378,6 +1393,87 @@ mod tests {
         assert_eq!(response.len(), 64);
         assert!(response.iter().all(|&byte| byte == 42));
         drop(response);
+    }
+
+    #[test]
+    fn v2_lease_round_trips_and_rejects_misuse() {
+        let _plugin_lock = plugin_test_lock();
+        let Some(path) = example_plugin_path() else {
+            return;
+        };
+        let mut host = NylonRingHost::new();
+        host.load("example", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("example").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime.block_on(async {
+            // Standard unary path: the response Vec is the leased buffer.
+            let (status, data) = handle
+                .call_response("echo_lease", b"through the lease")
+                .await
+                .unwrap();
+            assert_eq!(status, NrStatus::Ok);
+            assert_eq!(data, b"through the lease");
+
+            // Empty payloads commit a zero-length lease.
+            let (status, data) = handle.call_response("echo_lease", b"").await.unwrap();
+            assert_eq!(status, NrStatus::Ok);
+            assert!(data.is_empty());
+
+            // Fast path: the lease lives in the TLS slot.
+            let (status, data) = handle
+                .call_response_fast("echo_lease", b"fast lease")
+                .await
+                .unwrap();
+            assert_eq!(status, NrStatus::Ok);
+            assert_eq!(data, b"fast lease");
+
+            // The misuse handler asserts double acquire, bad token, bad
+            // length, and double commit all report Invalid; an assertion
+            // failure would surface here as PluginPanicked.
+            let (status, data) = handle
+                .call_response("lease_misuse", b"contract")
+                .await
+                .unwrap();
+            assert_eq!(status, NrStatus::Ok);
+            assert_eq!(data, b"contract");
+        });
+
+        // Every lease was committed; nothing should be parked or pending.
+        assert_eq!(host.host_ctx.orphaned_lease_count(), 0);
+        assert_eq!(host.host_ctx.pending_count(), 0);
+    }
+
+    #[test]
+    fn v2_abandoned_leases_are_parked_not_freed() {
+        let _plugin_lock = plugin_test_lock();
+        let Some(path) = example_plugin_path() else {
+            return;
+        };
+        let mut host = NylonRingHost::new();
+        host.load("example", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("example").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime.block_on(async {
+            // The plugin acquires a lease and never commits: the call times
+            // out and cleanup must park the lease (the plugin could still
+            // hold the pointer), not free it.
+            let result = handle
+                .call_response_timeout("lease_abandon", b"", std::time::Duration::from_millis(50))
+                .await;
+            assert!(matches!(result, Err(NylonRingHostError::Timeout)));
+            assert_eq!(host.host_ctx.orphaned_lease_count(), 1);
+            assert_eq!(host.host_ctx.pending_count(), 0);
+
+            // Fast path: an uncommitted lease in the TLS slot is parked too.
+            let result = handle.call_response_fast("lease_abandon", b"").await;
+            assert!(matches!(
+                result,
+                Err(NylonRingHostError::MissingSynchronousResponse)
+            ));
+            assert_eq!(host.host_ctx.orphaned_lease_count(), 2);
+        });
     }
 
     #[test]

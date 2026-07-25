@@ -25,6 +25,13 @@ pub(crate) struct HostContext {
     state_shard_counts: [AtomicUsize; SHARD_COUNT],
     pub(crate) host_ext: NrHostExt,
     stream_capacity: usize,
+
+    /// Leased response buffers whose call the host abandoned (timeout,
+    /// cancel, receiver drop) while the plugin may still write into them.
+    /// They are freed on a late commit or when this context drops — by
+    /// which point the plugin's shutdown contract forbids further writes.
+    /// Only cold paths touch this lock.
+    orphaned_leases: std::sync::Mutex<Vec<Vec<u8>>>,
 }
 
 impl HostContext {
@@ -35,7 +42,35 @@ impl HostContext {
             state_shard_counts: std::array::from_fn(|_| AtomicUsize::new(0)),
             host_ext,
             stream_capacity,
+            orphaned_leases: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Keep an abandoned lease alive instead of freeing memory the plugin
+    /// may still be writing to.
+    pub(crate) fn park_orphan_lease(&self, lease: Vec<u8>) {
+        self.orphaned_leases.lock().unwrap().push(lease);
+    }
+
+    /// Free the orphaned lease identified by `token` (its buffer address),
+    /// if present. Called on a late commit — the plugin's commit is its
+    /// promise that it will not touch the buffer again.
+    pub(crate) fn release_orphan_lease(&self, token: u64) -> bool {
+        let mut orphans = self.orphaned_leases.lock().unwrap();
+        if let Some(index) = orphans
+            .iter()
+            .position(|lease| lease.as_ptr() as u64 == token)
+        {
+            orphans.swap_remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn orphaned_lease_count(&self) -> usize {
+        self.orphaned_leases.lock().unwrap().len()
     }
 
     fn pending_shards(&self) -> &[FastPendingMap] {
@@ -140,7 +175,7 @@ pub(crate) async fn wait_for_unary(
                         drop(replacement);
                         return Poll::Ready(Some((status, data)));
                     }
-                    Pending::Unary(UnaryPending::Waiting(waker)) => {
+                    Pending::Unary(UnaryPending::Waiting { waker, .. }) => {
                         if waker
                             .as_ref()
                             .is_some_and(|waker| waker.will_wake(cx.waker()))
@@ -171,8 +206,16 @@ pub(crate) async fn wait_for_unary(
 }
 
 /// Remove all host-owned state associated with a completed SID.
+///
+/// An outstanding lease in the removed entry is parked, not freed: the
+/// plugin may still write into it (see `HostContext::orphaned_leases`).
 pub(crate) fn cleanup_sid(ctx: &HostContext, sid: u64) {
-    remove_pending(ctx, sid);
+    if let Some(Pending::Unary(UnaryPending::Waiting {
+        lease: Some(lease), ..
+    })) = remove_pending(ctx, sid)
+    {
+        ctx.park_orphan_lease(lease);
+    }
     ctx.remove_state(sid);
 }
 
@@ -198,8 +241,8 @@ pub(crate) fn dispatch_pending(
         }
         DashEntry::Occupied(mut entry) => {
             if let Pending::Unary(pending) = entry.get_mut() {
-                let waker = match pending {
-                    UnaryPending::Waiting(waker) => waker.take(),
+                let (waker, stale_lease) = match pending {
+                    UnaryPending::Waiting { waker, lease } => (waker.take(), lease.take()),
                     UnaryPending::Ready(_, _) => {
                         drop(entry);
                         drop(payload);
@@ -208,6 +251,11 @@ pub(crate) fn dispatch_pending(
                 };
                 *pending = UnaryPending::Ready(status, payload);
                 drop(entry);
+                // A response through this path supersedes any outstanding
+                // lease; park it in case the plugin still holds the pointer.
+                if let Some(lease) = stale_lease {
+                    ctx.park_orphan_lease(lease);
+                }
                 ctx.remove_state(sid);
                 if let Some(waker) = waker {
                     waker.wake();
@@ -249,6 +297,89 @@ pub(crate) fn dispatch_pending(
     };
     drop(deferred_release);
     dispatch_status
+}
+
+/// Lease a host-owned response buffer for a pending unary request (ABI v2).
+///
+/// The buffer is allocated before the shard lock is taken and stored inside
+/// the pending entry, so the same cleanup that removes the entry also
+/// reclaims the lease. Fails for unknown sids, streaming sids, completed
+/// requests, and sids that already hold an outstanding lease.
+pub(crate) fn acquire_pending_lease(
+    ctx: &HostContext,
+    sid: u64,
+    capacity: u64,
+) -> nylon_ring::NrBufferLeaseV2 {
+    let Ok(capacity) = usize::try_from(capacity) else {
+        return nylon_ring::NrBufferLeaseV2::failed();
+    };
+    let mut buffer: Vec<u8> = Vec::with_capacity(capacity);
+    let granted = nylon_ring::NrBufferLeaseV2 {
+        ptr: buffer.as_mut_ptr(),
+        cap: buffer.capacity() as u64,
+        token: buffer.as_ptr() as u64,
+    };
+    match get_shard(ctx, sid).entry(sid) {
+        DashEntry::Occupied(mut entry) => match entry.get_mut() {
+            Pending::Unary(UnaryPending::Waiting {
+                lease: lease @ None,
+                ..
+            }) => {
+                *lease = Some(buffer);
+                granted
+            }
+            _ => nylon_ring::NrBufferLeaseV2::failed(),
+        },
+        DashEntry::Vacant(_) => nylon_ring::NrBufferLeaseV2::failed(),
+    }
+}
+
+/// Commit a leased buffer as the response to a pending unary request.
+///
+/// On a bad token or oversized `initialized_len` the lease stays stored (and
+/// valid for a corrected retry); a commit for a sid the host has already
+/// abandoned frees the matching orphaned lease and reports `Invalid`.
+pub(crate) fn commit_pending_lease(
+    ctx: &HostContext,
+    sid: u64,
+    status: NrStatus,
+    token: u64,
+    initialized_len: u64,
+) -> NrStatus {
+    let waker = match get_shard(ctx, sid).entry(sid) {
+        DashEntry::Vacant(entry) => {
+            drop(entry);
+            ctx.release_orphan_lease(token);
+            return NrStatus::Invalid;
+        }
+        DashEntry::Occupied(mut entry) => {
+            let Pending::Unary(pending) = entry.get_mut() else {
+                return NrStatus::Invalid;
+            };
+            let UnaryPending::Waiting { waker, lease } = pending else {
+                return NrStatus::Invalid;
+            };
+            let Some(mut buffer) = lease.take() else {
+                return NrStatus::Invalid;
+            };
+            if buffer.as_ptr() as u64 != token || initialized_len > buffer.capacity() as u64 {
+                *lease = Some(buffer);
+                return NrStatus::Invalid;
+            }
+            // SAFETY: initialized_len is within the buffer's capacity and
+            // the plugin's commit asserts it wrote that prefix (v2 ABI
+            // contract; u8 needs no validity beyond initialization).
+            unsafe { buffer.set_len(initialized_len as usize) };
+            let waker = waker.take();
+            *pending = UnaryPending::Ready(status, ResponsePayload::Owned(buffer));
+            waker
+        }
+    };
+    ctx.remove_state(sid);
+    if let Some(waker) = waker {
+        waker.wake();
+    }
+    NrStatus::Ok
 }
 
 // --- Thread Local Optimization for Unary Results ---

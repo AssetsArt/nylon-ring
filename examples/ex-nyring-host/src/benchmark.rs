@@ -93,6 +93,7 @@ enum BenchmarkOperation {
     Fast,
     Unary,
     OwnedUnary,
+    LeaseUnary,
     Stream,
 }
 
@@ -144,6 +145,13 @@ impl BenchmarkConfig {
         )
     }
 
+    pub fn runs_lease(self) -> bool {
+        matches!(
+            self.operation,
+            BenchmarkOperation::All | BenchmarkOperation::LeaseUnary
+        )
+    }
+
     pub fn runs_stream(self) -> bool {
         matches!(
             self.operation,
@@ -162,9 +170,11 @@ fn parse_operation_env() -> Result<BenchmarkOperation, Box<dyn std::error::Error
         "fast" => Ok(BenchmarkOperation::Fast),
         "unary" => Ok(BenchmarkOperation::Unary),
         "owned" => Ok(BenchmarkOperation::OwnedUnary),
+        "lease" => Ok(BenchmarkOperation::LeaseUnary),
         "stream" => Ok(BenchmarkOperation::Stream),
         _ => Err(
-            "NYRING_BENCH_OPERATION must be one of: all, fire, fast, unary, owned, stream".into(),
+            "NYRING_BENCH_OPERATION must be one of: all, fire, fast, unary, owned, lease, stream"
+                .into(),
         ),
     }
 }
@@ -502,6 +512,91 @@ pub async fn run_owned_response_benchmark(plugin: PluginHandle, config: Benchmar
                         .expect("benchmarked call failed");
                     assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
                     assert_eq!(data.len(), payload.len(), "owned response length mismatch");
+                }
+                let batch_elapsed = batch_start.elapsed();
+
+                counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);
+                latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);
+                if config.sample_cpus && completed_batches % CPU_SAMPLE_BATCH_INTERVAL == 0 {
+                    cpu_samples.record_current();
+                }
+                completed_batches += 1;
+            }
+            cpu_samples
+        });
+        handles.push(handle);
+    }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let start_time = Instant::now();
+    start_signal.notify_waiters();
+
+    let mut cpu_samples = CpuSamples::default();
+    for h in handles {
+        if let Ok(samples) = h.await {
+            cpu_samples.merge(samples);
+        }
+    }
+
+    let elapsed = start_time.elapsed();
+    let total = total_requests.load(Ordering::Relaxed);
+    let total_lat_nanos = total_latency_nanos.load(Ordering::Relaxed);
+
+    let rps = total as f64 / elapsed.as_secs_f64();
+    let avg_latency_nanos = total_lat_nanos.checked_div(total).unwrap_or(0);
+
+    println!("  -> Processed {} requests in {:.2?}", total, elapsed);
+    println!("  -> RPS: {:.2}/sec", rps);
+    println!("  -> Average latency: {:.2} ns/request", avg_latency_nanos);
+    if config.sample_cpus {
+        cpu_samples.print();
+    }
+}
+
+/// Run an ABI v2 lease benchmark: the plugin echoes the payload by writing
+/// straight into a host-leased buffer, so the response reaches the plain
+/// `call_response` Vec API with no extra alloc/copy pair.
+pub async fn run_lease_response_benchmark(plugin: PluginHandle, config: BenchmarkConfig) {
+    println!("\n--- Benchmark: Request-Response Lease (ABI v2) ---");
+
+    let mut handles = Vec::with_capacity(config.workers);
+    let total_requests = Arc::new(AtomicU64::new(0));
+    let total_latency_nanos = Arc::new(AtomicU64::new(0));
+    let start_signal = Arc::new(tokio::sync::Notify::new());
+
+    println!("  -> Using {} threads", config.workers);
+    println!("  -> Using {} requests per batch", config.batch_size);
+    println!("  -> Using {} seconds for benchmark", config.duration_secs);
+
+    let payload = config.payload();
+    println!("  -> Payload Size: {}", payload.len());
+
+    for _ in 0..config.workers {
+        let plugin = plugin.clone();
+        let payload = payload.clone();
+        let counter = total_requests.clone();
+        let latency_counter = total_latency_nanos.clone();
+        let start_signal = start_signal.clone();
+
+        let handle = tokio::spawn(async move {
+            start_signal.notified().await;
+
+            let start_time = Instant::now();
+            let bench_duration = Duration::from_secs(config.duration_secs);
+            let mut cpu_samples = CpuSamples::default();
+            let mut completed_batches = 0;
+
+            while start_time.elapsed() < bench_duration {
+                let batch_start = Instant::now();
+                // Await each call directly; see run_fire_and_forget_benchmark.
+                for _ in 0..config.batch_size {
+                    let (status, data) = plugin
+                        .call_response("echo_lease", &payload)
+                        .await
+                        .expect("benchmarked call failed");
+                    assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
+                    assert_eq!(data.len(), payload.len(), "lease response length mismatch");
                 }
                 let batch_elapsed = batch_start.elapsed();
 

@@ -303,6 +303,38 @@ impl NrOwnedBytesV2 {
     }
 }
 
+/// A host-owned output buffer leased to the plugin (ABI v2).
+///
+/// Contract: the plugin may write `ptr..ptr+cap` until it either commits the
+/// lease (passing `token` back) or responds through any other channel for
+/// the same `sid` — both consume the lease, and touching the buffer after
+/// that is undefined behavior. A failed acquire returns a null `ptr`; the
+/// plugin must fall back to another response path. At most one lease per
+/// `sid` is outstanding at a time.
+#[repr(C)]
+#[derive(Debug)]
+pub struct NrBufferLeaseV2 {
+    pub ptr: *mut u8,
+    pub cap: u64,
+    pub token: u64,
+}
+
+impl NrBufferLeaseV2 {
+    /// The lease returned when the host cannot grant one.
+    pub const fn failed() -> Self {
+        Self {
+            ptr: std::ptr::null_mut(),
+            cap: 0,
+            token: 0,
+        }
+    }
+
+    /// Whether the host declined the lease.
+    pub fn is_failed(&self) -> bool {
+        self.ptr.is_null()
+    }
+}
+
 /// v2 host callback table. The v1 table is embedded first, so v2-aware
 /// plugin code can hand `&table.v1` to v1-style helpers unchanged.
 #[repr(C)]
@@ -316,6 +348,23 @@ pub struct NrHostVTableV2 {
         sid: u64,
         status: NrStatus,
         payload: NrOwnedBytesV2,
+    ) -> NrStatus,
+    /// Leases a host-owned buffer of at least `capacity` bytes for the
+    /// response to `sid`. Fails (null `ptr`) for unknown sids, streaming
+    /// sids, and sids that already hold an outstanding lease.
+    pub acquire_result_buffer:
+        unsafe extern "C" fn(host_ctx: *mut c_void, sid: u64, capacity: u64) -> NrBufferLeaseV2,
+    /// Commits the leased buffer as the response to `sid`:
+    /// `initialized_len` bytes (at most the leased capacity) must have been
+    /// written. On `Ok` the buffer now belongs to the host; on `Invalid`
+    /// with a live lease (bad token or oversized length) the lease stays
+    /// valid and may be committed again.
+    pub commit_result_buffer: unsafe extern "C" fn(
+        host_ctx: *mut c_void,
+        sid: u64,
+        status: NrStatus,
+        token: u64,
+        initialized_len: u64,
     ) -> NrStatus,
 }
 

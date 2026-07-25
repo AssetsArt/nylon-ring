@@ -1,5 +1,6 @@
 use nylon_ring::{
-    NrBytes, NrHostVTable, NrHostVTableV2, NrOwnedBytesV2, NrStatus, NrVec, define_plugin,
+    NrBufferLeaseV2, NrBytes, NrHostVTable, NrHostVTableV2, NrOwnedBytesV2, NrStatus, NrVec,
+    define_plugin,
 };
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
@@ -28,6 +29,35 @@ pub fn send_result_owned(sid: u64, status: NrStatus, data: NrOwnedBytesV2) -> Nr
     assert!(!host_vtable.is_null(), "host does not speak ABI v2");
     let send_result_owned = unsafe { (*host_vtable).send_result_owned };
     unsafe { send_result_owned(host_ctx, sid, status, data) }
+}
+
+/// Leases a host-owned response buffer (ABI v2 only); check `is_failed()`.
+#[inline(always)]
+pub fn acquire_result_buffer(sid: u64, capacity: u64) -> NrBufferLeaseV2 {
+    let host_ctx = HOST_CTX.load(Ordering::Acquire);
+    let host_vtable = HOST_VTABLE_V2.load(Ordering::Acquire);
+    assert!(!host_ctx.is_null(), "plugin is not initialized");
+    if host_vtable.is_null() {
+        return NrBufferLeaseV2::failed();
+    }
+    let acquire = unsafe { (*host_vtable).acquire_result_buffer };
+    unsafe { acquire(host_ctx, sid, capacity) }
+}
+
+/// Commits a leased buffer as the response for `sid` (ABI v2 only).
+#[inline(always)]
+pub fn commit_result_buffer(
+    sid: u64,
+    status: NrStatus,
+    token: u64,
+    initialized_len: u64,
+) -> NrStatus {
+    let host_ctx = HOST_CTX.load(Ordering::Acquire);
+    let host_vtable = HOST_VTABLE_V2.load(Ordering::Acquire);
+    assert!(!host_ctx.is_null(), "plugin is not initialized");
+    assert!(!host_vtable.is_null(), "host does not speak ABI v2");
+    let commit = unsafe { (*host_vtable).commit_result_buffer };
+    unsafe { commit(host_ctx, sid, status, token, initialized_len) }
 }
 
 // Initialize the plugin
@@ -198,6 +228,67 @@ unsafe fn handle_owned_release_count(sid: u64, _payload: NrBytes) -> NrStatus {
     )
 }
 
+/// Echoes the payload through a host-owned buffer lease (ABI v2 P2): the
+/// response bytes are written straight into memory the host allocated, so
+/// neither side copies again afterwards. Falls back to the v1 send_result
+/// path when the host declines the lease (v1 host or streaming sid).
+unsafe fn handle_echo_lease(sid: u64, payload: NrBytes) -> NrStatus {
+    let data = match unsafe { payload.as_slice() } {
+        Ok(data) => data,
+        Err(_) => return NrStatus::Invalid,
+    };
+    let lease = acquire_result_buffer(sid, data.len() as u64);
+    if lease.is_failed() {
+        return send_result(sid, NrStatus::Ok, NrVec::from_vec(data.to_vec()));
+    }
+    // SAFETY: the host guarantees lease.ptr..lease.ptr+cap is writable until
+    // the lease is committed, and cap >= data.len() was requested.
+    unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), lease.ptr, data.len()) };
+    commit_result_buffer(sid, NrStatus::Ok, lease.token, data.len() as u64)
+}
+
+/// Exercises the lease misuse contract: double commit and a bogus token
+/// must both report Invalid without disturbing the delivered response.
+/// Assertion failures surface to the host as NrStatus::Panic.
+unsafe fn handle_lease_misuse(sid: u64, payload: NrBytes) -> NrStatus {
+    let data = match unsafe { payload.as_slice() } {
+        Ok(data) => data,
+        Err(_) => return NrStatus::Invalid,
+    };
+    let lease = acquire_result_buffer(sid, data.len() as u64);
+    assert!(!lease.is_failed(), "lease acquire failed for a unary sid");
+    // A second acquire while one lease is outstanding must fail.
+    assert!(acquire_result_buffer(sid, 8).is_failed());
+    // A commit with the wrong token must fail and keep the lease alive.
+    assert_eq!(
+        commit_result_buffer(sid, NrStatus::Ok, lease.token.wrapping_add(1), 0),
+        NrStatus::Invalid
+    );
+    // An oversized length must fail and keep the lease alive.
+    assert_eq!(
+        commit_result_buffer(sid, NrStatus::Ok, lease.token, lease.cap + 1),
+        NrStatus::Invalid
+    );
+    // SAFETY: lease is still valid after the failed commits.
+    unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), lease.ptr, data.len()) };
+    let committed = commit_result_buffer(sid, NrStatus::Ok, lease.token, data.len() as u64);
+    assert_eq!(committed, NrStatus::Ok);
+    // The lease is consumed: committing again must fail.
+    assert_eq!(
+        commit_result_buffer(sid, NrStatus::Ok, lease.token, data.len() as u64),
+        NrStatus::Invalid
+    );
+    NrStatus::Ok
+}
+
+/// Acquires a lease and never commits it, so the host's abandoned-lease
+/// reclamation (timeout/cancel cleanup) is observable from tests.
+unsafe fn handle_lease_abandon(sid: u64, _payload: NrBytes) -> NrStatus {
+    let lease = acquire_result_buffer(sid, 64);
+    assert!(!lease.is_failed(), "lease acquire failed for a unary sid");
+    NrStatus::Ok
+}
+
 /// Data frames per benchmark stream; the host-side harness reads the same
 /// environment variable so its frame-count assertion stays in sync.
 fn benchmark_stream_data_frames() -> u32 {
@@ -236,5 +327,8 @@ define_plugin! {
         "benchmark_owned" => handle_benchmark_owned,
         "echo_owned" => handle_echo_owned,
         "owned_release_count" => handle_owned_release_count,
+        "echo_lease" => handle_echo_lease,
+        "lease_misuse" => handle_lease_misuse,
+        "lease_abandon" => handle_lease_abandon,
     }
 }

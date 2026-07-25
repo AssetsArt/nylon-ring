@@ -2,7 +2,7 @@
 
 use crate::context::{CURRENT_UNARY_RESULT, HostContext};
 use crate::types::{ForeignBytes, ResponsePayload, UnaryResultSlot};
-use nylon_ring::{NrBytes, NrOwnedBytesV2, NrStatus, NrStr, NrVec};
+use nylon_ring::{NrBufferLeaseV2, NrBytes, NrOwnedBytesV2, NrStatus, NrStr, NrVec};
 use std::ffi::c_void;
 
 /// Callback invoked by the plugin to send results back to the host.
@@ -101,6 +101,114 @@ pub(crate) unsafe extern "C" fn send_result_owned_callback(
 
     let payload = payload.take().expect("fast path did not consume payload");
     crate::context::dispatch_pending(ctx, sid, status, payload)
+}
+
+/// v2 callback: lease a host-owned buffer for the response to `sid`.
+///
+/// Serves the fast-path TLS slot first (same-thread synchronous calls),
+/// then the pending-request map. Fails with a null lease for unknown sids,
+/// streaming sids, and sids that already hold an outstanding lease.
+///
+/// # Safety
+///
+/// Must be called with a valid `host_ctx` pointer created by this host.
+pub(crate) unsafe extern "C" fn acquire_result_buffer_callback(
+    host_ctx: *mut c_void,
+    sid: u64,
+    capacity: u64,
+) -> NrBufferLeaseV2 {
+    if host_ctx.is_null() {
+        return NrBufferLeaseV2::failed();
+    }
+    let ctx = unsafe { &*host_ctx.cast::<HostContext>() };
+
+    let mut fast_lease = None;
+    CURRENT_UNARY_RESULT.with(|cell| {
+        let ptr = cell.get();
+        if !ptr.is_null() {
+            let slot: &mut UnaryResultSlot = unsafe { &mut *ptr };
+            if slot.sid == sid {
+                if slot.lease.is_none() && slot.result.is_none() {
+                    let Ok(capacity) = usize::try_from(capacity) else {
+                        fast_lease = Some(NrBufferLeaseV2::failed());
+                        return;
+                    };
+                    let mut buffer: Vec<u8> = Vec::with_capacity(capacity);
+                    fast_lease = Some(NrBufferLeaseV2 {
+                        ptr: buffer.as_mut_ptr(),
+                        cap: buffer.capacity() as u64,
+                        token: buffer.as_ptr() as u64,
+                    });
+                    slot.lease = Some(buffer);
+                } else {
+                    fast_lease = Some(NrBufferLeaseV2::failed());
+                }
+            }
+        }
+    });
+    if let Some(lease) = fast_lease {
+        return lease;
+    }
+
+    crate::context::acquire_pending_lease(ctx, sid, capacity)
+}
+
+/// v2 callback: commit a leased buffer as the response to `sid`.
+///
+/// # Safety
+///
+/// Must be called with a valid `host_ctx` pointer created by this host, and
+/// the plugin must have initialized the first `initialized_len` bytes of the
+/// leased buffer (v2 ABI contract).
+pub(crate) unsafe extern "C" fn commit_result_buffer_callback(
+    host_ctx: *mut c_void,
+    sid: u64,
+    status: NrStatus,
+    token: u64,
+    initialized_len: u64,
+) -> NrStatus {
+    if host_ctx.is_null() {
+        return NrStatus::Invalid;
+    }
+    let ctx = unsafe { &*host_ctx.cast::<HostContext>() };
+
+    let mut fast_status = None;
+    CURRENT_UNARY_RESULT.with(|cell| {
+        let ptr = cell.get();
+        if !ptr.is_null() {
+            let slot: &mut UnaryResultSlot = unsafe { &mut *ptr };
+            if slot.sid == sid {
+                let Some(mut buffer) = slot.lease.take() else {
+                    fast_status = Some(NrStatus::Invalid);
+                    return;
+                };
+                if buffer.as_ptr() as u64 != token || initialized_len > buffer.capacity() as u64 {
+                    slot.lease = Some(buffer);
+                    fast_status = Some(NrStatus::Invalid);
+                    return;
+                }
+                if slot.result.is_some() {
+                    // The plugin already responded another way; its commit
+                    // promises no further writes, so the lease can be freed.
+                    fast_status = Some(NrStatus::Invalid);
+                    return;
+                }
+                // SAFETY: length is within capacity and the plugin's commit
+                // asserts it wrote that prefix (v2 ABI contract).
+                unsafe { buffer.set_len(initialized_len as usize) };
+                slot.result = Some((status, buffer));
+                fast_status = Some(NrStatus::Ok);
+            }
+        }
+    });
+    if let Some(status) = fast_status {
+        if status == NrStatus::Ok {
+            ctx.remove_state(sid);
+        }
+        return status;
+    }
+
+    crate::context::commit_pending_lease(ctx, sid, status, token, initialized_len)
 }
 
 /// Callback for setting per-SID state in the host.

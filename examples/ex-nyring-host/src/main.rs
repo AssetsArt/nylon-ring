@@ -171,6 +171,11 @@ async fn run(
         benchmark::run_owned_response_benchmark(plugin.clone(), benchmark_config).await;
     }
 
+    // Lease-Response Benchmark (ABI v2 host-owned output buffers)
+    if benchmark_config.runs_lease() {
+        benchmark::run_lease_response_benchmark(plugin.clone(), benchmark_config).await;
+    }
+
     // Streaming Benchmark
     if benchmark_config.runs_stream() {
         benchmark::run_stream_benchmark(plugin.clone(), benchmark_config).await;

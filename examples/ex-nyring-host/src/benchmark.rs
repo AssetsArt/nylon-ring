@@ -288,6 +288,8 @@ pub async fn run_fire_and_forget_benchmark(
             let bench_duration = Duration::from_secs(config.duration_secs);
             let mut cpu_samples = CpuSamples::default();
             let mut completed_batches = 0;
+            let mut local_requests = 0u64;
+            let mut local_latency_nanos = 0u64;
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
@@ -312,13 +314,17 @@ pub async fn run_fire_and_forget_benchmark(
                 }
                 let batch_elapsed = batch_start.elapsed();
 
-                counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);
-                latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);
+                local_requests += config.batch_size as u64;
+                local_latency_nanos += batch_elapsed.as_nanos() as u64;
                 if config.sample_cpus && completed_batches % CPU_SAMPLE_BATCH_INTERVAL == 0 {
                     cpu_samples.record_current();
                 }
                 completed_batches += 1;
             }
+            // Flush once per worker: per-batch RMWs on the shared counters
+            // serialize workers once batches drop below a microsecond.
+            counter.fetch_add(local_requests, Ordering::Relaxed);
+            latency_counter.fetch_add(local_latency_nanos, Ordering::Relaxed);
             cpu_samples
         });
         handles.push(handle);
@@ -395,6 +401,8 @@ pub async fn run_request_response_benchmark(
             let bench_duration = Duration::from_secs(config.duration_secs);
             let mut cpu_samples = CpuSamples::default();
             let mut completed_batches = 0;
+            let mut local_requests = 0u64;
+            let mut local_latency_nanos = 0u64;
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
@@ -418,13 +426,17 @@ pub async fn run_request_response_benchmark(
                 }
                 let batch_elapsed = batch_start.elapsed();
 
-                counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);
-                latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);
+                local_requests += config.batch_size as u64;
+                local_latency_nanos += batch_elapsed.as_nanos() as u64;
                 if config.sample_cpus && completed_batches % CPU_SAMPLE_BATCH_INTERVAL == 0 {
                     cpu_samples.record_current();
                 }
                 completed_batches += 1;
             }
+            // Flush once per worker: per-batch RMWs on the shared counters
+            // serialize workers once batches drop below a microsecond.
+            counter.fetch_add(local_requests, Ordering::Relaxed);
+            latency_counter.fetch_add(local_latency_nanos, Ordering::Relaxed);
             cpu_samples
         });
         handles.push(handle);
@@ -501,6 +513,8 @@ pub async fn run_request_response_fast_benchmark(
             let bench_duration = Duration::from_secs(config.duration_secs);
             let mut cpu_samples = CpuSamples::default();
             let mut completed_batches = 0;
+            let mut local_requests = 0u64;
+            let mut local_latency_nanos = 0u64;
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
@@ -524,13 +538,17 @@ pub async fn run_request_response_fast_benchmark(
                 }
                 let batch_elapsed = batch_start.elapsed();
 
-                counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);
-                latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);
+                local_requests += config.batch_size as u64;
+                local_latency_nanos += batch_elapsed.as_nanos() as u64;
                 if config.sample_cpus && completed_batches % CPU_SAMPLE_BATCH_INTERVAL == 0 {
                     cpu_samples.record_current();
                 }
                 completed_batches += 1;
             }
+            // Flush once per worker: per-batch RMWs on the shared counters
+            // serialize workers once batches drop below a microsecond.
+            counter.fetch_add(local_requests, Ordering::Relaxed);
+            latency_counter.fetch_add(local_latency_nanos, Ordering::Relaxed);
             cpu_samples
         });
         handles.push(handle);
@@ -596,6 +614,8 @@ pub async fn run_owned_response_benchmark(plugin: PluginHandle, config: Benchmar
             let bench_duration = Duration::from_secs(config.duration_secs);
             let mut cpu_samples = CpuSamples::default();
             let mut completed_batches = 0;
+            let mut local_requests = 0u64;
+            let mut local_latency_nanos = 0u64;
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
@@ -610,13 +630,17 @@ pub async fn run_owned_response_benchmark(plugin: PluginHandle, config: Benchmar
                 }
                 let batch_elapsed = batch_start.elapsed();
 
-                counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);
-                latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);
+                local_requests += config.batch_size as u64;
+                local_latency_nanos += batch_elapsed.as_nanos() as u64;
                 if config.sample_cpus && completed_batches % CPU_SAMPLE_BATCH_INTERVAL == 0 {
                     cpu_samples.record_current();
                 }
                 completed_batches += 1;
             }
+            // Flush once per worker: per-batch RMWs on the shared counters
+            // serialize workers once batches drop below a microsecond.
+            counter.fetch_add(local_requests, Ordering::Relaxed);
+            latency_counter.fetch_add(local_latency_nanos, Ordering::Relaxed);
             cpu_samples
         });
         handles.push(handle);
@@ -681,6 +705,8 @@ pub async fn run_lease_response_benchmark(plugin: PluginHandle, config: Benchmar
             let bench_duration = Duration::from_secs(config.duration_secs);
             let mut cpu_samples = CpuSamples::default();
             let mut completed_batches = 0;
+            let mut local_requests = 0u64;
+            let mut local_latency_nanos = 0u64;
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
@@ -695,13 +721,17 @@ pub async fn run_lease_response_benchmark(plugin: PluginHandle, config: Benchmar
                 }
                 let batch_elapsed = batch_start.elapsed();
 
-                counter.fetch_add(config.batch_size as u64, Ordering::Relaxed);
-                latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);
+                local_requests += config.batch_size as u64;
+                local_latency_nanos += batch_elapsed.as_nanos() as u64;
                 if config.sample_cpus && completed_batches % CPU_SAMPLE_BATCH_INTERVAL == 0 {
                     cpu_samples.record_current();
                 }
                 completed_batches += 1;
             }
+            // Flush once per worker: per-batch RMWs on the shared counters
+            // serialize workers once batches drop below a microsecond.
+            counter.fetch_add(local_requests, Ordering::Relaxed);
+            latency_counter.fetch_add(local_latency_nanos, Ordering::Relaxed);
             cpu_samples
         });
         handles.push(handle);
@@ -777,6 +807,8 @@ pub async fn run_stream_benchmark(plugin: PluginHandle, config: BenchmarkConfig)
             let bench_duration = Duration::from_secs(config.duration_secs);
             let mut cpu_samples = CpuSamples::default();
             let mut completed_batches = 0;
+            let mut local_requests = 0u64;
+            let mut local_latency_nanos = 0u64;
 
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
@@ -797,16 +829,17 @@ pub async fn run_stream_benchmark(plugin: PluginHandle, config: BenchmarkConfig)
                 }
                 let batch_elapsed = batch_start.elapsed();
 
-                counter.fetch_add(
-                    config.batch_size as u64 * frames_per_stream,
-                    Ordering::Relaxed,
-                );
-                latency_counter.fetch_add(batch_elapsed.as_nanos() as u64, Ordering::Relaxed);
+                local_requests += config.batch_size as u64 * frames_per_stream;
+                local_latency_nanos += batch_elapsed.as_nanos() as u64;
                 if config.sample_cpus && completed_batches % CPU_SAMPLE_BATCH_INTERVAL == 0 {
                     cpu_samples.record_current();
                 }
                 completed_batches += 1;
             }
+            // Flush once per worker: per-batch RMWs on the shared counters
+            // serialize workers once batches drop below a microsecond.
+            counter.fetch_add(local_requests, Ordering::Relaxed);
+            latency_counter.fetch_add(local_latency_nanos, Ordering::Relaxed);
             cpu_samples
         });
         handles.push(handle);

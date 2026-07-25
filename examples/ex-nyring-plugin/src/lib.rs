@@ -1,14 +1,11 @@
 use nylon_ring::{
-    NrBufferLeaseV2, NrBytes, NrHostVTable, NrHostVTableV2, NrOwnedBytesV2, NrStatus, NrVec,
-    define_plugin,
+    NrBufferLease, NrBytes, NrHostVTable, NrOwnedBytes, NrStatus, NrVec, define_plugin,
 };
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 static HOST_CTX: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static HOST_VTABLE: AtomicPtr<NrHostVTable> = AtomicPtr::new(std::ptr::null_mut());
-/// Set only when the host loaded us through the v2 entry point.
-static HOST_VTABLE_V2: AtomicPtr<NrHostVTableV2> = AtomicPtr::new(std::ptr::null_mut());
 
 #[inline(always)]
 pub fn send_result(sid: u64, status: NrStatus, data: nylon_ring::NrVec<u8>) -> NrStatus {
@@ -20,31 +17,29 @@ pub fn send_result(sid: u64, status: NrStatus, data: nylon_ring::NrVec<u8>) -> N
     unsafe { send_result(host_ctx, sid, status, data) }
 }
 
-/// Sends a response the host consumes without copying (ABI v2 only).
+/// Sends a response the host consumes without copying.
 #[inline(always)]
-pub fn send_result_owned(sid: u64, status: NrStatus, data: NrOwnedBytesV2) -> NrStatus {
+pub fn send_result_owned(sid: u64, status: NrStatus, data: NrOwnedBytes) -> NrStatus {
     let host_ctx = HOST_CTX.load(Ordering::Acquire);
-    let host_vtable = HOST_VTABLE_V2.load(Ordering::Acquire);
+    let host_vtable = HOST_VTABLE.load(Ordering::Acquire);
     assert!(!host_ctx.is_null(), "plugin is not initialized");
-    assert!(!host_vtable.is_null(), "host does not speak ABI v2");
+    assert!(!host_vtable.is_null(), "plugin is not initialized");
     let send_result_owned = unsafe { (*host_vtable).send_result_owned };
     unsafe { send_result_owned(host_ctx, sid, status, data) }
 }
 
-/// Leases a host-owned response buffer (ABI v2 only); check `is_failed()`.
+/// Leases a host-owned response buffer; check `is_failed()`.
 #[inline(always)]
-pub fn acquire_result_buffer(sid: u64, capacity: u64) -> NrBufferLeaseV2 {
+pub fn acquire_result_buffer(sid: u64, capacity: u64) -> NrBufferLease {
     let host_ctx = HOST_CTX.load(Ordering::Acquire);
-    let host_vtable = HOST_VTABLE_V2.load(Ordering::Acquire);
+    let host_vtable = HOST_VTABLE.load(Ordering::Acquire);
     assert!(!host_ctx.is_null(), "plugin is not initialized");
-    if host_vtable.is_null() {
-        return NrBufferLeaseV2::failed();
-    }
+    assert!(!host_vtable.is_null(), "plugin is not initialized");
     let acquire = unsafe { (*host_vtable).acquire_result_buffer };
     unsafe { acquire(host_ctx, sid, capacity) }
 }
 
-/// Commits a leased buffer as the response for `sid` (ABI v2 only).
+/// Commits a leased buffer as the response for `sid`.
 #[inline(always)]
 pub fn commit_result_buffer(
     sid: u64,
@@ -53,9 +48,9 @@ pub fn commit_result_buffer(
     initialized_len: u64,
 ) -> NrStatus {
     let host_ctx = HOST_CTX.load(Ordering::Acquire);
-    let host_vtable = HOST_VTABLE_V2.load(Ordering::Acquire);
+    let host_vtable = HOST_VTABLE.load(Ordering::Acquire);
     assert!(!host_ctx.is_null(), "plugin is not initialized");
-    assert!(!host_vtable.is_null(), "host does not speak ABI v2");
+    assert!(!host_vtable.is_null(), "plugin is not initialized");
     let commit = unsafe { (*host_vtable).commit_result_buffer };
     unsafe { commit(host_ctx, sid, status, token, initialized_len) }
 }
@@ -70,22 +65,8 @@ unsafe fn init(host_ctx: *mut c_void, host_vtable: *const NrHostVTable) -> NrSta
     NrStatus::Ok
 }
 
-// v2 initialization: remember the owned-response callback and reuse the
-// embedded v1 table for everything else.
-unsafe fn init_v2(host_ctx: *mut c_void, host_vtable: *const NrHostVTableV2) -> NrStatus {
-    if host_vtable.is_null() {
-        return NrStatus::Invalid;
-    }
-    let status = unsafe { init(host_ctx, std::ptr::addr_of!((*host_vtable).v1)) };
-    if status == NrStatus::Ok {
-        HOST_VTABLE_V2.store(host_vtable.cast_mut(), Ordering::Release);
-    }
-    status
-}
-
 // Shutdown the plugin
 fn shutdown() {
-    HOST_VTABLE_V2.store(std::ptr::null_mut(), Ordering::Release);
     HOST_VTABLE.store(std::ptr::null_mut(), Ordering::Release);
     HOST_CTX.store(std::ptr::null_mut(), Ordering::Release);
 }
@@ -172,7 +153,7 @@ unsafe fn handle_benchmark_without_response(_sid: u64, _payload: NrBytes) -> NrS
 }
 
 // Silent stream handler for benchmarks: 8 empty data frames + StreamEnd.
-// ABI v2 handlers: responses the host consumes without copying.
+// Zero-copy handlers: responses the host consumes without copying.
 
 /// Static response slab for the owned-response benchmark: models a plugin
 /// that answers from its own long-lived buffers (cache, arena, mmap).
@@ -185,7 +166,7 @@ unsafe fn handle_benchmark_owned(sid: u64, payload: NrBytes) -> NrStatus {
     send_result_owned(
         sid,
         NrStatus::Ok,
-        NrOwnedBytesV2::from_static(&RESPONSE_SLAB[..len]),
+        NrOwnedBytes::from_static(&RESPONSE_SLAB[..len]),
     )
 }
 
@@ -209,7 +190,7 @@ unsafe fn handle_echo_owned(sid: u64, payload: NrBytes) -> NrStatus {
         Err(_) => return NrStatus::Invalid,
     };
     let mut vec = std::mem::ManuallyDrop::new(data.to_vec());
-    let owned = NrOwnedBytesV2 {
+    let owned = NrOwnedBytes {
         ptr: vec.as_mut_ptr(),
         len: vec.len() as u64,
         owner_ctx: vec.capacity() as *mut c_void,
@@ -228,7 +209,7 @@ unsafe fn handle_owned_release_count(sid: u64, _payload: NrBytes) -> NrStatus {
     )
 }
 
-/// Echoes the payload through a host-owned buffer lease (ABI v2 P2): the
+/// Echoes the payload through a host-owned buffer lease: the
 /// response bytes are written straight into memory the host allocated, so
 /// neither side copies again afterwards. Falls back to the v1 send_result
 /// path when the host declines the lease (v1 host or streaming sid).
@@ -314,7 +295,6 @@ unsafe fn handle_benchmark_stream(sid: u64, _payload: NrBytes) -> NrStatus {
 // Define the plugin with its entry points
 define_plugin! {
     init: init,
-    init_v2: init_v2,
     shutdown: shutdown,
     entries: {
         "echo" => handle_echo,

@@ -53,4 +53,10 @@ pub enum NylonRingHostError {
 
     #[error("the synchronous fast path is already active on this thread")]
     FastPathReentrant,
+
+    #[error("plugin does not support integer entry dispatch")]
+    EntryDispatchUnsupported,
+
+    #[error("plugin has no entry named: {0}")]
+    EntryNotFound(String),
 }

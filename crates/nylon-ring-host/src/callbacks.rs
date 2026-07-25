@@ -2,7 +2,7 @@
 
 use crate::context::{CURRENT_UNARY_RESULT, HostContext};
 use crate::types::{ForeignBytes, ResponsePayload, UnaryResultSlot};
-use nylon_ring::{NrBufferLeaseV2, NrBytes, NrOwnedBytesV2, NrStatus, NrStr, NrVec};
+use nylon_ring::{NrBufferLease, NrBytes, NrOwnedBytes, NrStatus, NrStr, NrVec};
 use std::ffi::c_void;
 
 /// Callback invoked by the plugin to send results back to the host.
@@ -54,7 +54,7 @@ pub(crate) unsafe extern "C" fn send_result_vec_callback(
     crate::context::dispatch_pending(ctx, sid, status, ResponsePayload::Owned(data))
 }
 
-/// v2 callback: delivers a plugin-owned response without a host-side copy.
+/// Delivers a plugin-owned response without a host-side copy.
 ///
 /// The host takes ownership of `payload` and calls its release exactly once
 /// (on delivery-path drop, or when the eventual consumer drops the response
@@ -69,7 +69,7 @@ pub(crate) unsafe extern "C" fn send_result_owned_callback(
     host_ctx: *mut c_void,
     sid: u64,
     status: NrStatus,
-    payload: NrOwnedBytesV2,
+    payload: NrOwnedBytes,
 ) -> NrStatus {
     let foreign = ForeignBytes::from_abi(payload);
     if host_ctx.is_null() {
@@ -103,7 +103,7 @@ pub(crate) unsafe extern "C" fn send_result_owned_callback(
     crate::context::dispatch_pending(ctx, sid, status, payload)
 }
 
-/// v2 callback: lease a host-owned buffer for the response to `sid`.
+/// Leases a host-owned buffer for the response to `sid`.
 ///
 /// Serves the fast-path TLS slot first (same-thread synchronous calls),
 /// then the pending-request map. Fails with a null lease for unknown sids,
@@ -116,9 +116,9 @@ pub(crate) unsafe extern "C" fn acquire_result_buffer_callback(
     host_ctx: *mut c_void,
     sid: u64,
     capacity: u64,
-) -> NrBufferLeaseV2 {
+) -> NrBufferLease {
     if host_ctx.is_null() {
-        return NrBufferLeaseV2::failed();
+        return NrBufferLease::failed();
     }
     let ctx = unsafe { &*host_ctx.cast::<HostContext>() };
 
@@ -130,18 +130,18 @@ pub(crate) unsafe extern "C" fn acquire_result_buffer_callback(
             if slot.sid == sid {
                 if slot.lease.is_none() && slot.result.is_none() {
                     let Ok(capacity) = usize::try_from(capacity) else {
-                        fast_lease = Some(NrBufferLeaseV2::failed());
+                        fast_lease = Some(NrBufferLease::failed());
                         return;
                     };
                     let mut buffer: Vec<u8> = Vec::with_capacity(capacity);
-                    fast_lease = Some(NrBufferLeaseV2 {
+                    fast_lease = Some(NrBufferLease {
                         ptr: buffer.as_mut_ptr(),
                         cap: buffer.capacity() as u64,
                         token: buffer.as_ptr() as u64,
                     });
                     slot.lease = Some(buffer);
                 } else {
-                    fast_lease = Some(NrBufferLeaseV2::failed());
+                    fast_lease = Some(NrBufferLease::failed());
                 }
             }
         }
@@ -153,13 +153,13 @@ pub(crate) unsafe extern "C" fn acquire_result_buffer_callback(
     crate::context::acquire_pending_lease(ctx, sid, capacity)
 }
 
-/// v2 callback: commit a leased buffer as the response to `sid`.
+/// Commits a leased buffer as the response to `sid`.
 ///
 /// # Safety
 ///
 /// Must be called with a valid `host_ctx` pointer created by this host, and
 /// the plugin must have initialized the first `initialized_len` bytes of the
-/// leased buffer (v2 ABI contract).
+/// leased buffer (ABI contract).
 pub(crate) unsafe extern "C" fn commit_result_buffer_callback(
     host_ctx: *mut c_void,
     sid: u64,
@@ -194,7 +194,7 @@ pub(crate) unsafe extern "C" fn commit_result_buffer_callback(
                     return;
                 }
                 // SAFETY: length is within capacity and the plugin's commit
-                // asserts it wrote that prefix (v2 ABI contract).
+                // asserts it wrote that prefix (ABI contract).
                 unsafe { buffer.set_len(initialized_len as usize) };
                 slot.result = Some((status, buffer));
                 fast_status = Some(NrStatus::Ok);

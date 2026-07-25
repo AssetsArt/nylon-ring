@@ -23,10 +23,7 @@ use callbacks::{
 };
 use context::{CURRENT_UNARY_RESULT, HostContext};
 use libloading::{Library, Symbol};
-use nylon_ring::{
-    ABI_VERSION, ABI_VERSION_V2, NrBytes, NrHostExt, NrHostVTable, NrHostVTableV2, NrPluginInfo,
-    NrPluginInfoV2, NrPluginVTable, NrPluginVTableV2, NrStr,
-};
+use nylon_ring::{ABI_VERSION, NrBytes, NrHostExt, NrHostVTable, NrPluginInfo, NrStr};
 use sid::next_sid;
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -103,32 +100,27 @@ impl Drop for FastSlotBinding {
     }
 }
 
-/// Version-independent plugin dispatch surface: v1 and v2 vtables share
-/// every function signature except `init`, which is only used during load.
+/// The plugin's dispatch surface, copied out of its vtable at load time
+/// (`init` is only used during load and not retained).
 #[derive(Copy, Clone)]
 struct PluginDispatch {
     handle: Option<unsafe extern "C" fn(NrStr, u64, NrBytes) -> NrStatus>,
     shutdown: Option<unsafe extern "C" fn()>,
     stream_data: Option<unsafe extern "C" fn(u64, NrBytes) -> NrStatus>,
     stream_close: Option<unsafe extern "C" fn(u64) -> NrStatus>,
+    resolve_entry: Option<unsafe extern "C" fn(NrStr) -> u32>,
+    handle_by_id: Option<unsafe extern "C" fn(u32, u64, NrBytes) -> NrStatus>,
 }
 
 impl PluginDispatch {
-    fn from_v1(vtable: &NrPluginVTable) -> Self {
+    fn from_vtable(vtable: &nylon_ring::NrPluginVTable) -> Self {
         Self {
             handle: vtable.handle,
             shutdown: vtable.shutdown,
             stream_data: vtable.stream_data,
             stream_close: vtable.stream_close,
-        }
-    }
-
-    fn from_v2(vtable: &NrPluginVTableV2) -> Self {
-        Self {
-            handle: vtable.handle,
-            shutdown: vtable.shutdown,
-            stream_data: vtable.stream_data,
-            stream_close: vtable.stream_close,
+            resolve_entry: vtable.resolve_entry,
+            handle_by_id: vtable.handle_by_id,
         }
     }
 }
@@ -332,7 +324,7 @@ impl PluginHandle {
     /// Like [`PluginHandle::call_response`], but returns the response as a
     /// [`ResponseBytes`] view instead of a `Vec<u8>`.
     ///
-    /// For an ABI v2 plugin that responds with plugin-owned bytes this is
+    /// For a plugin that responds with plugin-owned bytes this is
     /// zero-copy: the buffer is only released back to the plugin when the
     /// view drops, and the view holds an in-flight call guard so the plugin
     /// cannot be unloaded from under it.
@@ -539,6 +531,152 @@ impl PluginHandle {
         };
         Ok(unsafe { stream_close_fn(sid) })
     }
+
+    /// Resolve an entry name to a [`PluginEntry`] that dispatches by
+    /// integer id, skipping the per-call name comparison.
+    ///
+    /// The id stays valid for this loaded plugin instance; a handle created
+    /// before a reload keeps calling the instance it resolved against, the
+    /// same snapshot semantics as `PluginHandle` itself. Fails with
+    /// [`NylonRingHostError::EntryDispatchUnsupported`] for v1 plugins and
+    /// [`NylonRingHostError::EntryNotFound`] for names the plugin does not
+    /// export.
+    pub fn entry(&self, entry: &str) -> Result<PluginEntry> {
+        let (Some(resolve_fn), Some(_)) = (
+            self.plugin.dispatch.resolve_entry,
+            self.plugin.dispatch.handle_by_id,
+        ) else {
+            return Err(NylonRingHostError::EntryDispatchUnsupported);
+        };
+        // Resolution runs plugin code, so it counts as an in-flight call.
+        let _call_guard = self.plugin.begin_call()?;
+        let id = unsafe { resolve_fn(NrStr::new(entry)) };
+        if id == nylon_ring::NR_ENTRY_UNKNOWN {
+            return Err(NylonRingHostError::EntryNotFound(entry.to_string()));
+        }
+        Ok(PluginEntry {
+            plugin: self.plugin.clone(),
+            id,
+        })
+    }
+}
+
+/// A pre-resolved plugin entry point that dispatches by integer id
+///: the per-call entry-name comparison and `NrStr` construction
+/// are paid once, in [`PluginHandle::entry`], instead of on every call.
+#[derive(Clone)]
+pub struct PluginEntry {
+    plugin: Arc<LoadedPlugin>,
+    id: u32,
+}
+
+impl PluginEntry {
+    fn handle_by_id_fn(&self) -> Result<unsafe extern "C" fn(u32, u64, NrBytes) -> NrStatus> {
+        self.plugin
+            .dispatch
+            .handle_by_id
+            .ok_or(NylonRingHostError::EntryDispatchUnsupported)
+    }
+
+    /// Fire-and-forget call; see [`PluginHandle::call`].
+    pub async fn call(&self, payload: &[u8]) -> Result<NrStatus> {
+        let _call_guard = self.plugin.begin_call()?;
+        let sid = next_sid();
+
+        let handle_by_id_fn = self.handle_by_id_fn()?;
+        let status = unsafe { handle_by_id_fn(self.id, sid, NrBytes::from_slice(payload)) };
+
+        self.plugin.host_ctx.remove_state(sid);
+
+        if status != NrStatus::Ok {
+            return Err(PluginHandle::status_error(status));
+        }
+        Ok(status)
+    }
+
+    /// Request-response call; see [`PluginHandle::call_response`].
+    pub async fn call_response(&self, payload: &[u8]) -> Result<(NrStatus, Vec<u8>)> {
+        let _call_guard = self.plugin.begin_call()?;
+        let sid = next_sid();
+
+        context::insert_pending(
+            &self.plugin.host_ctx,
+            sid,
+            types::Pending::Unary(types::UnaryPending::waiting()),
+        );
+        let mut pending_guard = PendingGuard::new(&self.plugin.host_ctx, sid);
+
+        let handle_by_id_fn = self.handle_by_id_fn()?;
+        let status = unsafe { handle_by_id_fn(self.id, sid, NrBytes::from_slice(payload)) };
+
+        if status != NrStatus::Ok {
+            return Err(PluginHandle::status_error(status));
+        }
+
+        match context::wait_for_unary(&self.plugin.host_ctx, sid).await {
+            Some((status, payload)) => {
+                pending_guard.disarm();
+                Ok((status, payload.into_vec()))
+            }
+            None => Err(NylonRingHostError::PluginUnloaded),
+        }
+    }
+
+    /// Synchronous fast-path call; see [`PluginHandle::call_response_fast`].
+    pub async fn call_response_fast(&self, payload: &[u8]) -> Result<(NrStatus, Vec<u8>)> {
+        let _call_guard = self.plugin.begin_call()?;
+        let sid = next_sid();
+        let mut slot = types::UnaryResultSlot {
+            sid,
+            result: None,
+            lease: None,
+        };
+
+        let binding = FastSlotBinding::bind(&mut slot)?;
+
+        let handle_by_id_fn = self.handle_by_id_fn()?;
+        let status = unsafe { handle_by_id_fn(self.id, sid, NrBytes::from_slice(payload)) };
+
+        drop(binding);
+        if let Some(lease) = slot.lease.take() {
+            self.plugin.host_ctx.park_orphan_lease(lease);
+        }
+        self.plugin.host_ctx.remove_state(sid);
+
+        if status != NrStatus::Ok {
+            return Err(PluginHandle::status_error(status));
+        }
+
+        match slot.result {
+            Some((st, data)) => Ok((st, data)),
+            None => Err(NylonRingHostError::MissingSynchronousResponse),
+        }
+    }
+
+    /// Streaming call; see [`PluginHandle::call_stream`].
+    pub async fn call_stream(&self, payload: &[u8]) -> Result<(u64, StreamReceiver)> {
+        let call_guard = self.plugin.begin_owned_call()?;
+        let sid = next_sid();
+
+        let (tx, rx) = stream_channel::acquire(self.plugin.host_ctx.stream_capacity());
+        context::insert_pending(&self.plugin.host_ctx, sid, types::Pending::Stream(tx));
+
+        let handle_by_id_fn = match self.handle_by_id_fn() {
+            Ok(f) => f,
+            Err(error) => {
+                context::cleanup_sid(&self.plugin.host_ctx, sid);
+                return Err(error);
+            }
+        };
+        let status = unsafe { handle_by_id_fn(self.id, sid, NrBytes::from_slice(payload)) };
+
+        if status != NrStatus::Ok {
+            context::cleanup_sid(&self.plugin.host_ctx, sid);
+            return Err(PluginHandle::status_error(status));
+        }
+
+        Ok((sid, StreamReceiver::new(rx, None, sid, Some(call_guard))))
+    }
 }
 
 /// The main host for loading and managing nylon-ring plugins.
@@ -546,7 +684,6 @@ pub struct NylonRingHost {
     plugins: HashMap<String, Arc<LoadedPlugin>>,
     host_ctx: Arc<HostContext>,
     host_vtable: Box<NrHostVTable>,
-    host_vtable_v2: Box<NrHostVTableV2>,
 }
 
 impl Default for NylonRingHost {
@@ -588,9 +725,6 @@ impl NylonRingHost {
 
         let host_vtable = Box::new(NrHostVTable {
             send_result: send_result_vec_callback,
-        });
-        let host_vtable_v2 = Box::new(NrHostVTableV2 {
-            v1: *host_vtable,
             send_result_owned: send_result_owned_callback,
             acquire_result_buffer: acquire_result_buffer_callback,
             commit_result_buffer: commit_result_buffer_callback,
@@ -600,68 +734,41 @@ impl NylonRingHost {
             plugins: HashMap::new(),
             host_ctx,
             host_vtable,
-            host_vtable_v2,
         }
     }
 
     /// Load a plugin from the specified path with a given name.
     ///
-    /// Probes the v2 entry point (`nylon_ring_get_plugin_v2`, zero-copy
-    /// owned responses) first and falls back to v1.
+    /// The plugin must export `nylon_ring_get_plugin` and match this host's
+    /// `ABI_VERSION` exactly.
     pub fn load(&mut self, name: &str, path: &str) -> Result<()> {
         unsafe {
             let lib = Library::new(path).map_err(NylonRingHostError::FailedToLoadLibrary)?;
 
-            let dispatch = if let Ok(get_plugin_v2) =
-                lib.get::<Symbol<extern "C" fn() -> *const NrPluginInfoV2>>(
-                    b"nylon_ring_get_plugin_v2\0",
-                ) {
-                let info_ptr = get_plugin_v2();
-                Self::validate_plugin_info::<NrPluginInfoV2>(info_ptr.cast(), ABI_VERSION_V2)?;
-                let info = &*info_ptr;
-                if info.vtable.is_null() {
-                    return Err(NylonRingHostError::NullPluginVTable);
+            let get_plugin: Symbol<extern "C" fn() -> *const NrPluginInfo> =
+                lib.get(b"nylon_ring_get_plugin\0").map_err(|_| {
+                    NylonRingHostError::MissingSymbol("nylon_ring_get_plugin".to_string())
+                })?;
+            let info_ptr = get_plugin();
+            Self::validate_plugin_info::<NrPluginInfo>(info_ptr.cast(), ABI_VERSION)?;
+            let info = &*info_ptr;
+            if info.vtable.is_null() {
+                return Err(NylonRingHostError::NullPluginVTable);
+            }
+            let plugin_vtable = &*info.vtable;
+            if plugin_vtable.init.is_none() || plugin_vtable.handle.is_none() {
+                return Err(NylonRingHostError::MissingRequiredFunctions);
+            }
+            if let Some(init_fn) = plugin_vtable.init {
+                let status = init_fn(
+                    Arc::as_ptr(&self.host_ctx) as *mut c_void,
+                    &*self.host_vtable,
+                );
+                if status != NrStatus::Ok {
+                    return Err(NylonRingHostError::PluginInitFailed(status));
                 }
-                let plugin_vtable = &*info.vtable;
-                if plugin_vtable.init.is_none() || plugin_vtable.handle.is_none() {
-                    return Err(NylonRingHostError::MissingRequiredFunctions);
-                }
-                if let Some(init_fn) = plugin_vtable.init {
-                    let status = init_fn(
-                        Arc::as_ptr(&self.host_ctx) as *mut c_void,
-                        &*self.host_vtable_v2,
-                    );
-                    if status != NrStatus::Ok {
-                        return Err(NylonRingHostError::PluginInitFailed(status));
-                    }
-                }
-                PluginDispatch::from_v2(plugin_vtable)
-            } else {
-                let get_plugin: Symbol<extern "C" fn() -> *const NrPluginInfo> =
-                    lib.get(b"nylon_ring_get_plugin_v1\0").map_err(|_| {
-                        NylonRingHostError::MissingSymbol("nylon_ring_get_plugin_v1".to_string())
-                    })?;
-                let info_ptr = get_plugin();
-                Self::validate_plugin_info::<NrPluginInfo>(info_ptr.cast(), ABI_VERSION)?;
-                let info = &*info_ptr;
-                if info.vtable.is_null() {
-                    return Err(NylonRingHostError::NullPluginVTable);
-                }
-                let plugin_vtable = &*info.vtable;
-                if plugin_vtable.init.is_none() || plugin_vtable.handle.is_none() {
-                    return Err(NylonRingHostError::MissingRequiredFunctions);
-                }
-                if let Some(init_fn) = plugin_vtable.init {
-                    let status = init_fn(
-                        Arc::as_ptr(&self.host_ctx) as *mut c_void,
-                        &*self.host_vtable,
-                    );
-                    if status != NrStatus::Ok {
-                        return Err(NylonRingHostError::PluginInitFailed(status));
-                    }
-                }
-                PluginDispatch::from_v1(plugin_vtable)
-            };
+            }
+            let dispatch = PluginDispatch::from_vtable(plugin_vtable);
 
             let loaded = LoadedPlugin {
                 _lib: lib,
@@ -1302,7 +1409,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_owned_response_round_trips_and_releases_exactly_once() {
+    fn owned_response_round_trips_and_releases_exactly_once() {
         let _plugin_lock = plugin_test_lock();
         let Some(path) = example_plugin_path() else {
             return;
@@ -1370,7 +1477,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_owned_response_keeps_plugin_alive_after_unload() {
+    fn owned_response_keeps_plugin_alive_after_unload() {
         let _plugin_lock = plugin_test_lock();
         let Some(path) = example_plugin_path() else {
             return;
@@ -1396,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_lease_round_trips_and_rejects_misuse() {
+    fn lease_round_trips_and_rejects_misuse() {
         let _plugin_lock = plugin_test_lock();
         let Some(path) = example_plugin_path() else {
             return;
@@ -1445,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_abandoned_leases_are_parked_not_freed() {
+    fn abandoned_leases_are_parked_not_freed() {
         let _plugin_lock = plugin_test_lock();
         let Some(path) = example_plugin_path() else {
             return;
@@ -1508,5 +1615,52 @@ mod tests {
             .unwrap();
         assert_eq!(status, NrStatus::Ok);
         assert_eq!(response, b"from-c");
+
+        // Integer entry dispatch is optional; this plugin leaves both
+        // fields NULL, which must surface as a typed error.
+        assert!(matches!(
+            handle.entry("echo"),
+            Err(NylonRingHostError::EntryDispatchUnsupported)
+        ));
+    }
+
+    #[test]
+    fn entry_id_dispatch_round_trips_all_call_shapes() {
+        let _plugin_lock = plugin_test_lock();
+        let Some(path) = example_plugin_path() else {
+            return;
+        };
+        let mut host = NylonRingHost::new();
+        host.load("example", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("example").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        assert!(matches!(
+            handle.entry("no_such_entry"),
+            Err(NylonRingHostError::EntryNotFound(_))
+        ));
+
+        let echo = handle.entry("benchmark").unwrap();
+        let notify = handle.entry("benchmark_without_response").unwrap();
+        let stream = handle.entry("benchmark_stream").unwrap();
+
+        runtime.block_on(async {
+            let (status, data) = echo.call_response(b"by-id").await.unwrap();
+            assert_eq!(status, NrStatus::Ok);
+            assert_eq!(data, b"by-id");
+
+            let (status, data) = echo.call_response_fast(b"fast-by-id").await.unwrap();
+            assert_eq!(status, NrStatus::Ok);
+            assert_eq!(data, b"fast-by-id");
+
+            assert_eq!(notify.call(b"").await.unwrap(), NrStatus::Ok);
+
+            let (_sid, mut receiver) = stream.call_stream(b"").await.unwrap();
+            let mut frames = 0u32;
+            while receiver.recv().await.is_some() {
+                frames += 1;
+            }
+            assert_eq!(frames, 9);
+        });
     }
 }

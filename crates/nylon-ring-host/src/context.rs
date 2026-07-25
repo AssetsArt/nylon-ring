@@ -299,7 +299,7 @@ pub(crate) fn dispatch_pending(
     dispatch_status
 }
 
-/// Lease a host-owned response buffer for a pending unary request (ABI v2).
+/// Lease a host-owned response buffer for a pending unary request.
 ///
 /// The buffer is allocated before the shard lock is taken and stored inside
 /// the pending entry, so the same cleanup that removes the entry also
@@ -309,12 +309,12 @@ pub(crate) fn acquire_pending_lease(
     ctx: &HostContext,
     sid: u64,
     capacity: u64,
-) -> nylon_ring::NrBufferLeaseV2 {
+) -> nylon_ring::NrBufferLease {
     let Ok(capacity) = usize::try_from(capacity) else {
-        return nylon_ring::NrBufferLeaseV2::failed();
+        return nylon_ring::NrBufferLease::failed();
     };
     let mut buffer: Vec<u8> = Vec::with_capacity(capacity);
-    let granted = nylon_ring::NrBufferLeaseV2 {
+    let granted = nylon_ring::NrBufferLease {
         ptr: buffer.as_mut_ptr(),
         cap: buffer.capacity() as u64,
         token: buffer.as_ptr() as u64,
@@ -328,9 +328,9 @@ pub(crate) fn acquire_pending_lease(
                 *lease = Some(buffer);
                 granted
             }
-            _ => nylon_ring::NrBufferLeaseV2::failed(),
+            _ => nylon_ring::NrBufferLease::failed(),
         },
-        DashEntry::Vacant(_) => nylon_ring::NrBufferLeaseV2::failed(),
+        DashEntry::Vacant(_) => nylon_ring::NrBufferLease::failed(),
     }
 }
 
@@ -367,7 +367,7 @@ pub(crate) fn commit_pending_lease(
                 return NrStatus::Invalid;
             }
             // SAFETY: initialized_len is within the buffer's capacity and
-            // the plugin's commit asserts it wrote that prefix (v2 ABI
+            // the plugin's commit asserts it wrote that prefix (ABI
             // contract; u8 needs no validity beyond initialization).
             unsafe { buffer.set_len(initialized_len as usize) };
             let waker = waker.take();

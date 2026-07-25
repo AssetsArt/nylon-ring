@@ -19,8 +19,9 @@
 
 ## 🌟 Features
 
-- **Stable ABI v1** — C-compatible types, fixed status values, version and
-  structure-size validation.
+- **Single stable ABI** — C-compatible types, fixed status values, version and
+  structure-size validation; zero-copy responses, host-leased output buffers,
+  and integer entry dispatch are all part of the one vtable.
 - **Flexible calls** — fire-and-forget, async unary, synchronous fast path, and
   bounded streaming with backpressure.
 - **Safe lifecycle** — in-flight call guards, graceful unload/reload, timeouts,
@@ -128,10 +129,11 @@ scaling is currently bounded by per-stream channel setup.
 | 1 KiB | 141.8 ns | 7.05M calls/s |
 | 4 KiB | 217.4 ns | 4.60M calls/s |
 
-Non-empty payloads pay two alloc/free pairs and two copies under ABI v1: the
-response crosses the boundary as a foreign allocation and is copied into
-host-owned memory because allocator provenance cannot be proven across
-images.
+Non-empty payloads pay two alloc/free pairs and two copies on the copying
+`send_result` path: the response crosses the boundary as a foreign
+allocation and is copied into host-owned memory because allocator
+provenance cannot be proven across images. The `send_result_owned` and
+buffer-lease paths avoid this; see `docs/ABI_EVOLUTION.md`.
 
 These are reference measurements, not cross-platform guarantees; absolute
 numbers shift a few percent with thermal and scheduling state. Numbers
@@ -162,7 +164,7 @@ cargo bench --package nylon-ring --bench abi_types   # ABI type microbenches
 |       ├─ sharded unary router + inline completion    |
 |       └─ bounded stream queues                       |
 +-------------------------+----------------------------+
-                          | C ABI v1
+                          | C ABI
                           | NrPluginVTable / NrHostVTable
 +-------------------------+----------------------------+
 | Plugin                                               |

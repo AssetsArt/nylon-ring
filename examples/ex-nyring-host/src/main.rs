@@ -153,25 +153,36 @@ async fn run(
 
     // Fire-and-Forget Benchmark
     if benchmark_config.runs_fire_and_forget() {
-        benchmark::run_fire_and_forget_benchmark(plugin.clone(), benchmark_config).await;
+        benchmark::run_fire_and_forget_benchmark(plugin.clone(), benchmark_config, false).await;
+    }
+    if benchmark_config.runs_fire_by_id() {
+        benchmark::run_fire_and_forget_benchmark(plugin.clone(), benchmark_config, true).await;
     }
 
     // Request-Response Fast Benchmark
     if benchmark_config.runs_fast() {
-        benchmark::run_request_response_fast_benchmark(plugin.clone(), benchmark_config).await;
+        benchmark::run_request_response_fast_benchmark(plugin.clone(), benchmark_config, false)
+            .await;
+    }
+    if benchmark_config.runs_fast_by_id() {
+        benchmark::run_request_response_fast_benchmark(plugin.clone(), benchmark_config, true)
+            .await;
     }
 
     // Request-Response Benchmark
     if benchmark_config.runs_unary() {
-        benchmark::run_request_response_benchmark(plugin.clone(), benchmark_config).await;
+        benchmark::run_request_response_benchmark(plugin.clone(), benchmark_config, false).await;
+    }
+    if benchmark_config.runs_unary_by_id() {
+        benchmark::run_request_response_benchmark(plugin.clone(), benchmark_config, true).await;
     }
 
-    // Owned-Response Benchmark (ABI v2 zero-copy)
+    // Owned-Response Benchmark (zero-copy)
     if benchmark_config.runs_owned() {
         benchmark::run_owned_response_benchmark(plugin.clone(), benchmark_config).await;
     }
 
-    // Lease-Response Benchmark (ABI v2 host-owned output buffers)
+    // Lease-Response Benchmark (host-owned output buffers)
     if benchmark_config.runs_lease() {
         benchmark::run_lease_response_benchmark(plugin.clone(), benchmark_config).await;
     }

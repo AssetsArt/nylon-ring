@@ -8,12 +8,9 @@
 use std::ffi::c_void;
 use std::fmt;
 
-/// ABI version implemented by this crate.
-pub const ABI_VERSION: u32 = 1;
-
-/// Second-generation ABI version, exported alongside v1 through the
-/// `nylon_ring_get_plugin_v2` symbol. See `docs/ABI_EVOLUTION.md`.
-pub const ABI_VERSION_V2: u32 = 2;
+/// The single ABI version implemented by this crate, negotiated through the
+/// `nylon_ring_get_plugin` export. See `docs/ABI_EVOLUTION.md`.
+pub const ABI_VERSION: u32 = 2;
 
 /// Status code passed across the Nylon Ring ABI.
 ///
@@ -233,19 +230,7 @@ pub struct NrTuple<A, B> {
     pub b: B,
 }
 
-/// Host callback table.
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct NrHostVTable {
-    pub send_result: unsafe extern "C" fn(
-        host_ctx: *mut c_void,
-        sid: u64,
-        status: NrStatus,
-        payload: NrVec<u8>,
-    ) -> NrStatus,
-}
-
-/// A callee-owned byte buffer handed across the v2 ABI without a copy.
+/// A callee-owned byte buffer handed across the ABI without a copy.
 ///
 /// Contract: the consumer calls `release` exactly once when it is done with
 /// the bytes (possibly from a different thread than the producer), and the
@@ -253,14 +238,14 @@ pub struct NrHostVTable {
 /// release means there is nothing to free (static or arena-backed data).
 #[repr(C)]
 #[derive(Debug)]
-pub struct NrOwnedBytesV2 {
+pub struct NrOwnedBytes {
     pub ptr: *const u8,
     pub len: u64,
     pub owner_ctx: *mut c_void,
     pub release: Option<unsafe extern "C" fn(owner_ctx: *mut c_void, ptr: *const u8, len: u64)>,
 }
 
-impl NrOwnedBytesV2 {
+impl NrOwnedBytes {
     /// An empty payload with nothing to release.
     pub const fn empty() -> Self {
         Self {
@@ -303,7 +288,7 @@ impl NrOwnedBytesV2 {
     }
 }
 
-/// A host-owned output buffer leased to the plugin (ABI v2).
+/// A host-owned output buffer leased to the plugin.
 ///
 /// Contract: the plugin may write `ptr..ptr+cap` until it either commits the
 /// lease (passing `token` back) or responds through any other channel for
@@ -313,13 +298,13 @@ impl NrOwnedBytesV2 {
 /// `sid` is outstanding at a time.
 #[repr(C)]
 #[derive(Debug)]
-pub struct NrBufferLeaseV2 {
+pub struct NrBufferLease {
     pub ptr: *mut u8,
     pub cap: u64,
     pub token: u64,
 }
 
-impl NrBufferLeaseV2 {
+impl NrBufferLease {
     /// The lease returned when the host cannot grant one.
     pub const fn failed() -> Self {
         Self {
@@ -335,25 +320,32 @@ impl NrBufferLeaseV2 {
     }
 }
 
-/// v2 host callback table. The v1 table is embedded first, so v2-aware
-/// plugin code can hand `&table.v1` to v1-style helpers unchanged.
+/// Host callback table.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct NrHostVTableV2 {
-    pub v1: NrHostVTable,
+pub struct NrHostVTable {
+    /// Delivers a response the host copies into its own memory. The payload
+    /// may be borrowed (`owned = 0`); an owned payload is freed through its
+    /// `drop_fn` after the copy.
+    pub send_result: unsafe extern "C" fn(
+        host_ctx: *mut c_void,
+        sid: u64,
+        status: NrStatus,
+        payload: NrVec<u8>,
+    ) -> NrStatus,
     /// Delivers a response without a host-side copy; the host takes
     /// ownership of the payload and calls its release exactly once.
     pub send_result_owned: unsafe extern "C" fn(
         host_ctx: *mut c_void,
         sid: u64,
         status: NrStatus,
-        payload: NrOwnedBytesV2,
+        payload: NrOwnedBytes,
     ) -> NrStatus,
     /// Leases a host-owned buffer of at least `capacity` bytes for the
     /// response to `sid`. Fails (null `ptr`) for unknown sids, streaming
     /// sids, and sids that already hold an outstanding lease.
     pub acquire_result_buffer:
-        unsafe extern "C" fn(host_ctx: *mut c_void, sid: u64, capacity: u64) -> NrBufferLeaseV2,
+        unsafe extern "C" fn(host_ctx: *mut c_void, sid: u64, capacity: u64) -> NrBufferLease,
     /// Commits the leased buffer as the response to `sid`:
     /// `initialized_len` bytes (at most the leased capacity) must have been
     /// written. On `Ok` the buffer now belongs to the host; on `Invalid`
@@ -368,13 +360,15 @@ pub struct NrHostVTableV2 {
     ) -> NrStatus,
 }
 
-/// v2 plugin function table: identical to [`NrPluginVTable`] except `init`
-/// receives the v2 host vtable.
+/// Returned by `resolve_entry` for a name the plugin does not export.
+pub const NR_ENTRY_UNKNOWN: u32 = u32::MAX;
+
+/// Plugin function table.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct NrPluginVTableV2 {
+pub struct NrPluginVTable {
     pub init: Option<
-        unsafe extern "C" fn(host_ctx: *mut c_void, host_vtable: *const NrHostVTableV2) -> NrStatus,
+        unsafe extern "C" fn(host_ctx: *mut c_void, host_vtable: *const NrHostVTable) -> NrStatus,
     >,
 
     pub handle: Option<unsafe extern "C" fn(entry: NrStr, sid: u64, payload: NrBytes) -> NrStatus>,
@@ -384,12 +378,22 @@ pub struct NrPluginVTableV2 {
     pub stream_data: Option<unsafe extern "C" fn(sid: u64, data: NrBytes) -> NrStatus>,
 
     pub stream_close: Option<unsafe extern "C" fn(sid: u64) -> NrStatus>,
+
+    /// Maps an entry name to a stable dispatch id, or [`NR_ENTRY_UNKNOWN`].
+    /// The id stays valid for the lifetime of the loaded plugin instance;
+    /// hosts resolve once and then call through `handle_by_id`, skipping
+    /// the per-call name comparison.
+    pub resolve_entry: Option<unsafe extern "C" fn(entry: NrStr) -> u32>,
+
+    /// Dispatches by an id from `resolve_entry`; an id the plugin never
+    /// issued reports `Invalid`. Both fields must be present together.
+    pub handle_by_id: Option<unsafe extern "C" fn(id: u32, sid: u64, payload: NrBytes) -> NrStatus>,
 }
 
-/// Metadata exported by the plugin through `nylon_ring_get_plugin_v2`.
+/// Metadata exported by the plugin through `nylon_ring_get_plugin`.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct NrPluginInfoV2 {
+pub struct NrPluginInfo {
     pub abi_version: u32,
     pub struct_size: u32,
 
@@ -397,7 +401,7 @@ pub struct NrPluginInfoV2 {
     pub version: NrStr,
 
     pub plugin_ctx: *mut c_void,
-    pub vtable: *const NrPluginVTableV2,
+    pub vtable: *const NrPluginVTable,
 }
 
 /// Host extension table for state management.
@@ -423,28 +427,10 @@ pub struct NrHostExt {
 unsafe impl Send for NrHostExt {}
 unsafe impl Sync for NrHostExt {}
 
-/// Plugin function table.
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct NrPluginVTable {
-    pub init: Option<
-        unsafe extern "C" fn(host_ctx: *mut c_void, host_vtable: *const NrHostVTable) -> NrStatus,
-    >,
-
-    pub handle: Option<unsafe extern "C" fn(entry: NrStr, sid: u64, payload: NrBytes) -> NrStatus>,
-
-    pub shutdown: Option<unsafe extern "C" fn()>,
-
-    pub stream_data: Option<unsafe extern "C" fn(sid: u64, data: NrBytes) -> NrStatus>,
-
-    pub stream_close: Option<unsafe extern "C" fn(sid: u64) -> NrStatus>,
-}
-
 #[macro_export]
 macro_rules! define_plugin {
     (
         init: $init_fn:path,
-        $(init_v2: $init_v2_fn:path,)?
         shutdown: $shutdown_fn:path,
         entries: {
             $($entry_name:literal => $handler_fn:path),* $(,)?
@@ -461,6 +447,8 @@ macro_rules! define_plugin {
             shutdown: Some(plugin_shutdown_wrapper),
             stream_data: Some(plugin_stream_data_wrapper),
             stream_close: Some(plugin_stream_close_wrapper),
+            resolve_entry: Some(plugin_resolve_entry_wrapper),
+            handle_by_id: Some(plugin_handle_by_id_wrapper),
         };
 
         // Static Plugin Info
@@ -475,48 +463,8 @@ macro_rules! define_plugin {
 
         // Exported Entry Point
         #[unsafe(no_mangle)]
-        pub extern "C" fn nylon_ring_get_plugin_v1() -> *const $crate::NrPluginInfo {
+        pub extern "C" fn nylon_ring_get_plugin() -> *const $crate::NrPluginInfo {
             &PLUGIN_INFO
-        }
-
-        // v2: same dispatch surface, but init receives the v2 host vtable
-        // (owned zero-copy responses). One binary serves both host versions.
-        static PLUGIN_VTABLE_V2: $crate::NrPluginVTableV2 = $crate::NrPluginVTableV2 {
-            init: Some(plugin_init_v2_wrapper),
-            handle: Some(plugin_handle_wrapper),
-            shutdown: Some(plugin_shutdown_wrapper),
-            stream_data: Some(plugin_stream_data_wrapper),
-            stream_close: Some(plugin_stream_close_wrapper),
-        };
-
-        static PLUGIN_INFO_V2: $crate::NrPluginInfoV2 = $crate::NrPluginInfoV2 {
-            abi_version: $crate::ABI_VERSION_V2,
-            struct_size: std::mem::size_of::<$crate::NrPluginInfoV2>() as u32,
-            name: $crate::NrStr::from_static(env!("CARGO_PKG_NAME")),
-            version: $crate::NrStr::from_static(env!("CARGO_PKG_VERSION")),
-            plugin_ctx: std::ptr::null_mut(),
-            vtable: &PLUGIN_VTABLE_V2,
-        };
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn nylon_ring_get_plugin_v2() -> *const $crate::NrPluginInfoV2 {
-            &PLUGIN_INFO_V2
-        }
-
-        unsafe extern "C" fn plugin_init_v2_wrapper(
-            host_ctx: *mut std::ffi::c_void,
-            host_vtable: *const $crate::NrHostVTableV2,
-        ) -> $crate::NrStatus {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                $(
-                    return $init_v2_fn(host_ctx, host_vtable);
-                )?
-                // Without a dedicated v2 init, reuse the v1 init with the
-                // embedded prefix-compatible v1 table.
-                #[allow(unreachable_code)]
-                $init_fn(host_ctx, std::ptr::addr_of!((*host_vtable).v1))
-            }))
-            .unwrap_or($crate::NrStatus::Panic)
         }
 
         // Wrappers
@@ -559,6 +507,42 @@ macro_rules! define_plugin {
             .unwrap_or($crate::NrStatus::Panic)
         }
 
+        // Integer entry dispatch: the dispatch id is the entry's
+        // index in the `entries` list, resolved once by the host.
+        static PLUGIN_ENTRY_NAMES: &[&[u8]] = &[$($entry_name.as_bytes()),*];
+        static PLUGIN_ENTRY_HANDLERS: &[unsafe fn(u64, $crate::NrBytes) -> $crate::NrStatus] =
+            &[$($handler_fn as unsafe fn(u64, $crate::NrBytes) -> $crate::NrStatus),*];
+
+        unsafe extern "C" fn plugin_resolve_entry_wrapper(entry: $crate::NrStr) -> u32 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let entry_bytes = match unsafe { entry.as_bytes() } {
+                    Ok(entry) => entry,
+                    Err(_) => return $crate::NR_ENTRY_UNKNOWN,
+                };
+                for (id, name) in PLUGIN_ENTRY_NAMES.iter().enumerate() {
+                    if entry_bytes == *name {
+                        return id as u32;
+                    }
+                }
+                $crate::NR_ENTRY_UNKNOWN
+            }))
+            .unwrap_or($crate::NR_ENTRY_UNKNOWN)
+        }
+
+        unsafe extern "C" fn plugin_handle_by_id_wrapper(
+            id: u32,
+            sid: u64,
+            payload: $crate::NrBytes,
+        ) -> $crate::NrStatus {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match PLUGIN_ENTRY_HANDLERS.get(id as usize) {
+                    Some(handler) => unsafe { handler(sid, payload) },
+                    None => $crate::NrStatus::Invalid,
+                }
+            }))
+            .unwrap_or($crate::NrStatus::Panic)
+        }
+
         unsafe extern "C" fn plugin_stream_data_wrapper(
             sid: u64,
             data: $crate::NrBytes,
@@ -588,20 +572,6 @@ macro_rules! define_plugin {
             .unwrap_or($crate::NrStatus::Panic)
         }
     };
-}
-
-/// Metadata exported by the plugin.
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct NrPluginInfo {
-    pub abi_version: u32,
-    pub struct_size: u32,
-
-    pub name: NrStr,
-    pub version: NrStr,
-
-    pub plugin_ctx: *mut c_void,
-    pub vtable: *const NrPluginVTable,
 }
 
 impl NrStr {
@@ -1486,15 +1456,6 @@ unsafe impl Sync for NrPluginVTable {}
 
 unsafe impl Send for NrPluginInfo {}
 unsafe impl Sync for NrPluginInfo {}
-
-unsafe impl Send for NrHostVTableV2 {}
-unsafe impl Sync for NrHostVTableV2 {}
-
-unsafe impl Send for NrPluginVTableV2 {}
-unsafe impl Sync for NrPluginVTableV2 {}
-
-unsafe impl Send for NrPluginInfoV2 {}
-unsafe impl Sync for NrPluginInfoV2 {}
 
 unsafe impl<T: Send> Send for NrVec<T> {}
 unsafe impl<T: Sync> Sync for NrVec<T> {}

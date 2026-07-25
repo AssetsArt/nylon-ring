@@ -42,10 +42,12 @@ static const NrPluginVTable VTABLE = {
     .shutdown = plugin_shutdown,
     .stream_data = NULL,
     .stream_close = NULL,
+    .resolve_entry = NULL,
+    .handle_by_id = NULL,
 };
 
 static const NrPluginInfo INFO = {
-    .abi_version = 1,
+    .abi_version = NR_ABI_VERSION,
     .struct_size = sizeof(NrPluginInfo),
     .name = {(const uint8_t *)"nylon-ring-c-example", 20, 0},
     .version = {(const uint8_t *)"0.1.0", 5, 0},
@@ -57,7 +59,11 @@ _Static_assert(sizeof(NrStatus) == 4, "NrStatus layout mismatch");
 _Static_assert(sizeof(NrStr) == 16, "NrStr layout mismatch");
 _Static_assert(sizeof(NrBytes) == 16, "NrBytes layout mismatch");
 _Static_assert(sizeof(NrVecU8) == 40, "NrVecU8 layout mismatch");
+_Static_assert(sizeof(NrOwnedBytes) == 32, "NrOwnedBytes layout mismatch");
+_Static_assert(sizeof(NrBufferLease) == 24, "NrBufferLease layout mismatch");
+_Static_assert(sizeof(NrHostVTable) == 32, "NrHostVTable layout mismatch");
+_Static_assert(sizeof(NrPluginVTable) == 56, "NrPluginVTable layout mismatch");
 
-NYR_EXPORT const NrPluginInfo *nylon_ring_get_plugin_v1(void) {
+NYR_EXPORT const NrPluginInfo *nylon_ring_get_plugin(void) {
     return &INFO;
 }

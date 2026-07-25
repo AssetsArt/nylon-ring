@@ -90,8 +90,11 @@ pub struct BenchmarkConfig {
 enum BenchmarkOperation {
     All,
     FireAndForget,
+    FireById,
     Fast,
+    FastById,
     Unary,
+    UnaryById,
     OwnedUnary,
     LeaseUnary,
     Stream,
@@ -124,6 +127,13 @@ impl BenchmarkConfig {
         )
     }
 
+    pub fn runs_fire_by_id(self) -> bool {
+        matches!(
+            self.operation,
+            BenchmarkOperation::All | BenchmarkOperation::FireById
+        )
+    }
+
     pub fn runs_fast(self) -> bool {
         matches!(
             self.operation,
@@ -131,10 +141,24 @@ impl BenchmarkConfig {
         )
     }
 
+    pub fn runs_fast_by_id(self) -> bool {
+        matches!(
+            self.operation,
+            BenchmarkOperation::All | BenchmarkOperation::FastById
+        )
+    }
+
     pub fn runs_unary(self) -> bool {
         matches!(
             self.operation,
             BenchmarkOperation::All | BenchmarkOperation::Unary
+        )
+    }
+
+    pub fn runs_unary_by_id(self) -> bool {
+        matches!(
+            self.operation,
+            BenchmarkOperation::All | BenchmarkOperation::UnaryById
         )
     }
 
@@ -167,13 +191,17 @@ fn parse_operation_env() -> Result<BenchmarkOperation, Box<dyn std::error::Error
     match value.to_string_lossy().as_ref() {
         "all" => Ok(BenchmarkOperation::All),
         "fire" => Ok(BenchmarkOperation::FireAndForget),
+        "fireid" => Ok(BenchmarkOperation::FireById),
         "fast" => Ok(BenchmarkOperation::Fast),
+        "fastid" => Ok(BenchmarkOperation::FastById),
         "unary" => Ok(BenchmarkOperation::Unary),
+        "unaryid" => Ok(BenchmarkOperation::UnaryById),
         "owned" => Ok(BenchmarkOperation::OwnedUnary),
         "lease" => Ok(BenchmarkOperation::LeaseUnary),
         "stream" => Ok(BenchmarkOperation::Stream),
         _ => Err(
-            "NYRING_BENCH_OPERATION must be one of: all, fire, fast, unary, owned, lease, stream"
+            "NYRING_BENCH_OPERATION must be one of: all, fire, fireid, fast, fastid, \
+                  unary, unaryid, owned, lease, stream"
                 .into(),
         ),
     }
@@ -213,9 +241,18 @@ where
     Ok(value)
 }
 
-/// Run a fire-and-forget benchmark (calls without waiting for response)
-pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle, config: BenchmarkConfig) {
-    println!("\n--- Benchmark: Fire-and-Forget ---");
+/// Run a fire-and-forget benchmark (calls without waiting for response).
+/// With `by_id`, calls dispatch through a pre-resolved integer entry id.
+pub async fn run_fire_and_forget_benchmark(
+    plugin: PluginHandle,
+    config: BenchmarkConfig,
+    by_id: bool,
+) {
+    if by_id {
+        println!("\n--- Benchmark: Fire-and-Forget (by entry id) ---");
+    } else {
+        println!("\n--- Benchmark: Fire-and-Forget ---");
+    }
 
     let mut handles = Vec::with_capacity(config.workers);
     let total_requests = Arc::new(AtomicU64::new(0));
@@ -229,8 +266,15 @@ pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle, config: Benchma
     let payload = config.payload();
     println!("  -> Payload Size: {}", payload.len());
 
+    let entry = by_id.then(|| {
+        plugin
+            .entry("benchmark_without_response")
+            .expect("entry resolution failed")
+    });
+
     for _ in 0..config.workers {
         let plugin = plugin.clone();
+        let entry = entry.clone();
         let payload = payload.clone();
         let counter = total_requests.clone();
         let latency_counter = total_latency_nanos.clone();
@@ -252,12 +296,19 @@ pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle, config: Benchma
                 // added a large per-batch allocation to the measurement.
                 // Sequential awaits also pin the in-flight depth per worker
                 // to exactly one, and every counted call must have succeeded.
-                for _ in 0..config.batch_size {
-                    let status = plugin
-                        .call("benchmark_without_response", &payload)
-                        .await
-                        .expect("benchmarked call failed");
-                    assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
+                if let Some(entry) = &entry {
+                    for _ in 0..config.batch_size {
+                        let status = entry.call(&payload).await.expect("benchmarked call failed");
+                        assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
+                    }
+                } else {
+                    for _ in 0..config.batch_size {
+                        let status = plugin
+                            .call("benchmark_without_response", &payload)
+                            .await
+                            .expect("benchmarked call failed");
+                        assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
+                    }
                 }
                 let batch_elapsed = batch_start.elapsed();
 
@@ -301,9 +352,18 @@ pub async fn run_fire_and_forget_benchmark(plugin: PluginHandle, config: Benchma
     }
 }
 
-/// Run a request-response benchmark
-pub async fn run_request_response_benchmark(plugin: PluginHandle, config: BenchmarkConfig) {
-    println!("\n--- Benchmark: Request-Response ---");
+/// Run a request-response benchmark.
+/// With `by_id`, calls dispatch through a pre-resolved integer entry id.
+pub async fn run_request_response_benchmark(
+    plugin: PluginHandle,
+    config: BenchmarkConfig,
+    by_id: bool,
+) {
+    if by_id {
+        println!("\n--- Benchmark: Request-Response (by entry id) ---");
+    } else {
+        println!("\n--- Benchmark: Request-Response ---");
+    }
 
     let mut handles = Vec::with_capacity(config.workers);
     let total_requests = Arc::new(AtomicU64::new(0));
@@ -317,8 +377,11 @@ pub async fn run_request_response_benchmark(plugin: PluginHandle, config: Benchm
     let payload = config.payload();
     println!("  -> Payload Size: {}", payload.len());
 
+    let entry = by_id.then(|| plugin.entry("benchmark").expect("entry resolution failed"));
+
     for _ in 0..config.workers {
         let plugin = plugin.clone();
+        let entry = entry.clone();
         let payload = payload.clone();
         let counter = total_requests.clone();
         let latency_counter = total_latency_nanos.clone();
@@ -336,12 +399,22 @@ pub async fn run_request_response_benchmark(plugin: PluginHandle, config: Benchm
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
                 // Await each call directly; see run_fire_and_forget_benchmark.
-                for _ in 0..config.batch_size {
-                    let (status, _data) = plugin
-                        .call_response("benchmark", &payload)
-                        .await
-                        .expect("benchmarked call failed");
-                    assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
+                if let Some(entry) = &entry {
+                    for _ in 0..config.batch_size {
+                        let (status, _data) = entry
+                            .call_response(&payload)
+                            .await
+                            .expect("benchmarked call failed");
+                        assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
+                    }
+                } else {
+                    for _ in 0..config.batch_size {
+                        let (status, _data) = plugin
+                            .call_response("benchmark", &payload)
+                            .await
+                            .expect("benchmarked call failed");
+                        assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
+                    }
                 }
                 let batch_elapsed = batch_start.elapsed();
 
@@ -385,9 +458,18 @@ pub async fn run_request_response_benchmark(plugin: PluginHandle, config: Benchm
     }
 }
 
-/// Run a request-response fast benchmark
-pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: BenchmarkConfig) {
-    println!("\n--- Benchmark: Request-Response Fast ---");
+/// Run a request-response fast benchmark.
+/// With `by_id`, calls dispatch through a pre-resolved integer entry id.
+pub async fn run_request_response_fast_benchmark(
+    plugin: PluginHandle,
+    config: BenchmarkConfig,
+    by_id: bool,
+) {
+    if by_id {
+        println!("\n--- Benchmark: Request-Response Fast (by entry id) ---");
+    } else {
+        println!("\n--- Benchmark: Request-Response Fast ---");
+    }
 
     let mut handles = Vec::with_capacity(config.workers);
     let total_requests = Arc::new(AtomicU64::new(0));
@@ -401,8 +483,11 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: B
     let payload = config.payload();
     println!("  -> Payload Size: {}", payload.len());
 
+    let entry = by_id.then(|| plugin.entry("benchmark").expect("entry resolution failed"));
+
     for _ in 0..config.workers {
         let plugin = plugin.clone();
+        let entry = entry.clone();
         let payload = payload.clone();
         let counter = total_requests.clone();
         let latency_counter = total_latency_nanos.clone();
@@ -420,12 +505,22 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: B
             while start_time.elapsed() < bench_duration {
                 let batch_start = Instant::now();
                 // Await each call directly; see run_fire_and_forget_benchmark.
-                for _ in 0..config.batch_size {
-                    let (status, _data) = plugin
-                        .call_response_fast("benchmark", &payload)
-                        .await
-                        .expect("benchmarked call failed");
-                    assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
+                if let Some(entry) = &entry {
+                    for _ in 0..config.batch_size {
+                        let (status, _data) = entry
+                            .call_response_fast(&payload)
+                            .await
+                            .expect("benchmarked call failed");
+                        assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
+                    }
+                } else {
+                    for _ in 0..config.batch_size {
+                        let (status, _data) = plugin
+                            .call_response_fast("benchmark", &payload)
+                            .await
+                            .expect("benchmarked call failed");
+                        assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
+                    }
                 }
                 let batch_elapsed = batch_start.elapsed();
 
@@ -469,11 +564,11 @@ pub async fn run_request_response_fast_benchmark(plugin: PluginHandle, config: B
     }
 }
 
-/// Run an ABI v2 owned-response benchmark: the plugin answers with
+/// Run an owned-response benchmark: the plugin answers with
 /// `payload.len()` bytes borrowed from a static slab and the host consumes
 /// them zero-copy through `call_response_bytes`.
 pub async fn run_owned_response_benchmark(plugin: PluginHandle, config: BenchmarkConfig) {
-    println!("\n--- Benchmark: Request-Response Owned (ABI v2) ---");
+    println!("\n--- Benchmark: Request-Response Owned ---");
 
     let mut handles = Vec::with_capacity(config.workers);
     let total_requests = Arc::new(AtomicU64::new(0));
@@ -554,11 +649,11 @@ pub async fn run_owned_response_benchmark(plugin: PluginHandle, config: Benchmar
     }
 }
 
-/// Run an ABI v2 lease benchmark: the plugin echoes the payload by writing
+/// Run a lease benchmark: the plugin echoes the payload by writing
 /// straight into a host-leased buffer, so the response reaches the plain
 /// `call_response` Vec API with no extra alloc/copy pair.
 pub async fn run_lease_response_benchmark(plugin: PluginHandle, config: BenchmarkConfig) {
-    println!("\n--- Benchmark: Request-Response Lease (ABI v2) ---");
+    println!("\n--- Benchmark: Request-Response Lease ---");
 
     let mut handles = Vec::with_capacity(config.workers);
     let total_requests = Arc::new(AtomicU64::new(0));

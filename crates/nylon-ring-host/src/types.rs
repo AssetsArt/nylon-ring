@@ -25,7 +25,7 @@ pub(crate) enum Pending {
 pub(crate) enum UnaryPending {
     Waiting {
         waker: Option<Waker>,
-        /// Host-owned buffer leased to the plugin (ABI v2); the plugin may
+        /// Host-owned buffer leased to the plugin; the plugin may
         /// write into it until the call completes, so removal paths must
         /// park it in the orphan list instead of freeing it.
         lease: Option<Vec<u8>>,
@@ -33,9 +33,9 @@ pub(crate) enum UnaryPending {
     Ready(NrStatus, ResponsePayload),
 }
 
-/// A plugin-owned buffer received over ABI v2; releases it on drop.
+/// A plugin-owned buffer received over the ABI; releases it on drop.
 ///
-/// v2 contract (`NrOwnedBytesV2`): the bytes stay valid and immutable until
+/// Contract (`NrOwnedBytes`): the bytes stay valid and immutable until
 /// the consumer calls `release` exactly once, from any thread — which is
 /// what makes this Send + Sync. Dropping it runs plugin code, so the holder
 /// must guarantee the plugin library is still loaded (via a call guard or by
@@ -49,13 +49,13 @@ pub(crate) struct ForeignBytes {
 }
 
 // SAFETY: see the type documentation — immutability until release plus a
-// thread-agnostic release callback are part of the v2 ABI contract.
+// thread-agnostic release callback are part of the ABI contract.
 unsafe impl Send for ForeignBytes {}
 unsafe impl Sync for ForeignBytes {}
 
 impl ForeignBytes {
     /// Takes ownership of a payload received from a plugin.
-    pub(crate) fn from_abi(payload: nylon_ring::NrOwnedBytesV2) -> Self {
+    pub(crate) fn from_abi(payload: nylon_ring::NrOwnedBytes) -> Self {
         Self {
             ptr: payload.ptr,
             len: payload.len as usize,
@@ -69,7 +69,7 @@ impl ForeignBytes {
             return &[];
         }
         // SAFETY: the producer guarantees ptr..ptr+len stays valid and
-        // immutable until release (v2 ABI contract).
+        // immutable until release (ABI contract).
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 }
@@ -111,7 +111,7 @@ impl ResponsePayload {
 
 /// A unary response as returned by [`crate::PluginHandle::call_response_bytes`].
 ///
-/// For a v2 plugin that responded with plugin-owned bytes this is a
+/// For a plugin that responded with plugin-owned bytes this is a
 /// zero-copy view: the buffer is released back to the plugin when the value
 /// drops, and an in-flight call guard held inside keeps the plugin library
 /// loaded until then.
@@ -249,6 +249,6 @@ pub(crate) type FastStateMap = DashMap<u64, HashMap<String, Vec<u8>>, FxBuildHas
 pub(crate) struct UnaryResultSlot {
     pub(crate) sid: u64,
     pub(crate) result: Option<(NrStatus, Vec<u8>)>,
-    /// Host-owned buffer leased to the plugin (ABI v2) for this call.
+    /// Host-owned buffer leased to the plugin for this call.
     pub(crate) lease: Option<Vec<u8>>,
 }

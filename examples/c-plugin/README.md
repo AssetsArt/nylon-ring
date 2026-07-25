@@ -1,6 +1,6 @@
 # C plugin example
 
-This example is the reference C layout for ABI v1. Build it on Linux with:
+This example is the reference C layout for the nylon-ring ABI. Build it on Linux with:
 
 ```bash
 cc -std=c11 -Wall -Wextra -Werror -shared -fPIC \

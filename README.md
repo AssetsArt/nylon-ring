@@ -115,11 +115,11 @@ against older snapshots.
 | Host operation | 1 worker | 10 workers | Scaling |
 |---|---:|---:|---:|
 | Fire-and-forget | 85.92M calls/s (11.6 ns) | 690.98M calls/s | 8.0× |
-| Fire-and-forget (entry id) | 93.32M calls/s (10.7 ns) | 757.89M calls/s | 8.1× |
-| Synchronous fast path | 40.51M calls/s (24.7 ns) | 319.99M calls/s | 7.9× |
-| Synchronous fast path (entry id) | 58.40M calls/s (17.1 ns) | 462.01M calls/s | 7.9× |
-| Standard unary | 17.07M calls/s (58.6 ns) | 132.15M calls/s | 7.7× |
-| Streaming | 32.41M frames/s (30.9 ns) | 202.41M frames/s | 6.2× |
+| Fire-and-forget (entry id) | 93.32M calls/s (10.7 ns) | 772.72M calls/s | 8.3× |
+| Synchronous fast path | 40.90M calls/s (24.4 ns) | 334.65M calls/s | 8.2× |
+| Synchronous fast path (entry id) | 58.97M calls/s (17.0 ns) | 481.37M calls/s | 8.2× |
+| Standard unary | 17.09M calls/s (58.5 ns) | 137.97M calls/s | 8.1× |
+| Streaming | 32.73M frames/s (30.6 ns) | 202.41M frames/s | 6.2× |
 
 "Entry id" rows dispatch through a pre-resolved `PluginEntry`
 (`handle.entry(name)` once, then id-only calls) instead of comparing the
@@ -130,8 +130,8 @@ frames + `StreamEnd`) through pooled per-stream channels.
 
 | Payload | `send_result` (copying) | `send_result_owned` | buffer lease |
 |---|---:|---:|---:|
-| empty | 58.6 ns | 57.1 ns | 64.2 ns |
-| 128 B | 93.9 ns | 56.6 ns | 80.7 ns |
+| empty | 58.5 ns | 56.7 ns | 64.0 ns |
+| 128 B | 93.3 ns | 56.6 ns | 80.1 ns |
 | 1 KiB | 153.3 ns | 56.2 ns | 108.4 ns |
 | 4 KiB | 218.9 ns | 56.1 ns | 149.6 ns |
 

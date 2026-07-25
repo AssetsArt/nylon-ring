@@ -47,11 +47,11 @@ MSRV: Rust 1.88.
 ```toml
 # Plugin
 [dependencies]
-nylon-ring = "0.1.4"
+nylon-ring = "0.2.0"
 
 # Host
 [dependencies]
-nylon-ring-host = "0.1.4"
+nylon-ring-host = "0.2.0"
 ```
 
 Plugin crates must also build as a dynamic library:

@@ -373,14 +373,14 @@ dependencies = [
 
 [[package]]
 name = "nylon-ring"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "criterion",
 ]
 
 [[package]]
 name = "nylon-ring-host"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "dashmap",
  "libloading",

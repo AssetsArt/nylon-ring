@@ -198,6 +198,11 @@ async fn run(
         benchmark::run_stream_benchmark(plugin.clone(), benchmark_config).await;
     }
 
+    // Async Unary Benchmark (loads the trait example plugin on demand)
+    if benchmark_config.runs_async_unary() {
+        benchmark::run_async_echo_benchmark(&mut host, benchmark_config).await;
+    }
+
     println!("\n=== Demo Complete ===");
     println!("\nExecution Path Summary:");
     println!("  1. call_response_fast() → ULTRA-FAST DIRECT SLOT (TLS)");

@@ -66,6 +66,37 @@ Plugin crates must also build as a dynamic library:
 crate-type = ["cdylib"]
 ```
 
+### Plugin
+
+```rust,ignore
+use nylon_ring::{export_plugin, Plugin, Reply, Session};
+
+struct Echo;
+
+impl Plugin for Echo {
+    type Ctx = (); // per-call state (Pingora-style CTX); () = none
+    const ENTRIES: &'static [&'static str] = &["echo"];
+
+    fn new() -> Self {
+        Echo
+    }
+
+    fn new_ctx(&self) -> Self::Ctx {}
+
+    fn on_call(&self, session: &mut Session<'_>, _ctx: &mut Self::Ctx) -> Reply {
+        Reply::Bytes(session.payload().to_vec())
+    }
+}
+
+export_plugin!(Echo);
+```
+
+Cross-call state lives on the plugin struct; per-call state lives in `Ctx`.
+Entries in `ASYNC_ENTRIES` dispatch to a plain `async fn on_async_call`
+(no `async_trait` crate) with the reply delivered when the future
+completes. The lower-level `define_plugin!` macro remains for handlers
+that drive the ABI directly.
+
 ### Host
 
 ```rust,no_run
@@ -93,7 +124,8 @@ plugin.call_response_timeout("echo", b"hello", timeout).await?;
 let (sid, stream) = plugin.call_stream("events", b"start").await?;
 ```
 
-See the complete [Rust plugin example](https://github.com/AssetsArt/nylon-ring/tree/main/examples/ex-nyring-plugin)
+See the complete [trait plugin example](https://github.com/AssetsArt/nylon-ring/tree/main/examples/ex-nyring-trait-plugin),
+[raw plugin example](https://github.com/AssetsArt/nylon-ring/tree/main/examples/ex-nyring-plugin),
 and [Rust host example](https://github.com/AssetsArt/nylon-ring/tree/main/examples/ex-nyring-host).
 
 Run the workspace demo:

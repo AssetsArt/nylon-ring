@@ -226,6 +226,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ex-nyring-trait-plugin"
+version = "0.1.0"
+dependencies = [
+ "nylon-ring",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

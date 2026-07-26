@@ -4,6 +4,7 @@ members = [
     "crates/nylon-ring-host",
     "examples/ex-nyring-host",
     "examples/ex-nyring-plugin",
+    "examples/ex-nyring-trait-plugin",
 ]
 resolver = "2"
 

@@ -8,6 +8,10 @@
 use std::ffi::c_void;
 use std::fmt;
 
+pub mod plugin;
+
+pub use plugin::{AsyncSession, AsyncTask, Plugin, Reply, Session};
+
 /// The single ABI version implemented by this crate, negotiated through the
 /// `nylon_ring_get_plugin` export. See `docs/ABI_EVOLUTION.md`.
 pub const ABI_VERSION: u32 = 2;

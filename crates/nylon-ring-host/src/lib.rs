@@ -1333,6 +1333,26 @@ mod tests {
         )
     }
 
+    fn trait_plugin_path() -> Option<std::path::PathBuf> {
+        let workspace_root = workspace_root()?;
+        let manifest = workspace_root.join("examples/ex-nyring-trait-plugin/Cargo.toml");
+        if !manifest.is_file() {
+            return None;
+        }
+        let status = std::process::Command::new("cargo")
+            .args(["build", "--release", "--manifest-path"])
+            .arg(&manifest)
+            .status()
+            .ok()?;
+        assert!(status.success(), "trait example plugin failed to compile");
+        let filename = if cfg!(target_os = "windows") {
+            "ex_nyring_trait_plugin.dll".to_string()
+        } else {
+            format!("libex_nyring_trait_plugin.{}", dynlib_extension())
+        };
+        Some(workspace_root.join("target/release").join(filename))
+    }
+
     #[test]
     fn dropping_pending_guard_unregisters_unary_request() {
         let host = NylonRingHost::new();
@@ -1938,6 +1958,94 @@ mod tests {
             .unwrap();
         assert_eq!(status, NrStatus::Ok);
         assert_eq!(response, b"from-zig");
+    }
+
+    #[test]
+    fn trait_plugin_round_trips_through_host() {
+        let _plugin_lock = plugin_test_lock();
+        let Some(path) = trait_plugin_path() else {
+            return;
+        };
+        let mut host = NylonRingHost::new();
+        host.load("trait-example", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("trait-example").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        // Unary echo through the trait glue.
+        let (status, response) = runtime
+            .block_on(handle.call_response("echo", b"hi"))
+            .unwrap();
+        assert_eq!(status, NrStatus::Ok);
+        assert_eq!(response, b"hi");
+
+        // Per-call ctx drives the shout transformation.
+        let (status, response) = runtime
+            .block_on(handle.call_response("shout", b"hello"))
+            .unwrap();
+        assert_eq!(status, NrStatus::Ok);
+        assert_eq!(response, b"HELLO");
+
+        // Fire-and-forget entry answers Ok without a payload.
+        let status = runtime.block_on(handle.call("notify", b"ping")).unwrap();
+        assert_eq!(status, NrStatus::Ok);
+
+        // Shared state on the plugin struct counts every call so far,
+        // including this one: echo + shout + notify + count = 4.
+        let (status, response) = runtime
+            .block_on(handle.call_response("count", b""))
+            .unwrap();
+        assert_eq!(status, NrStatus::Ok);
+        assert_eq!(response, 4u64.to_le_bytes());
+
+        // Integer entry dispatch comes from Plugin::ENTRIES.
+        let echo = handle.entry("echo").unwrap();
+        let (status, response) = runtime.block_on(echo.call_response(b"by-id")).unwrap();
+        assert_eq!(status, NrStatus::Ok);
+        assert_eq!(response, b"by-id");
+        assert!(matches!(
+            handle.entry("missing"),
+            Err(NylonRingHostError::EntryNotFound(_))
+        ));
+
+        // Async entries defer the reply: handle() returns Ok immediately
+        // and the future answers through the cross-thread async path.
+        let (status, response) = runtime
+            .block_on(handle.call_response("async_echo", b"later"))
+            .unwrap();
+        assert_eq!(status, NrStatus::Ok);
+        assert_eq!(response, b"later");
+
+        let (status, response) = runtime
+            .block_on(handle.call_response("async_delay", b"after-sleep"))
+            .unwrap();
+        assert_eq!(status, NrStatus::Ok);
+        assert_eq!(response, b"after-sleep");
+
+        // Async entries resolve to ids after the sync ones.
+        let async_echo = handle.entry("async_echo").unwrap();
+        let (status, response) = runtime
+            .block_on(async_echo.call_response(b"by-id"))
+            .unwrap();
+        assert_eq!(status, NrStatus::Ok);
+        assert_eq!(response, b"by-id");
+
+        // Streaming through Session::send_frame / end_stream.
+        let (_sid, mut rx) = runtime
+            .block_on(handle.call_stream("stream", b"start"))
+            .unwrap();
+        let mut frames = Vec::new();
+        runtime.block_on(async {
+            while let Some(frame) = rx.recv().await {
+                let terminal = frame.status == NrStatus::StreamEnd;
+                frames.push((frame.status, frame.data));
+                if terminal {
+                    break;
+                }
+            }
+        });
+        assert_eq!(frames.len(), 4);
+        assert_eq!(frames[0], (NrStatus::Ok, b"frame 1".to_vec()));
+        assert_eq!(frames[3], (NrStatus::StreamEnd, b"done".to_vec()));
     }
 
     #[test]

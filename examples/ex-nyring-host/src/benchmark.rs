@@ -1,4 +1,4 @@
-use nylon_ring_host::{NrStatus, PluginHandle};
+use nylon_ring_host::{NrStatus, NylonRingHost, PluginHandle};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -98,6 +98,7 @@ enum BenchmarkOperation {
     OwnedUnary,
     LeaseUnary,
     Stream,
+    AsyncUnary,
 }
 
 impl BenchmarkConfig {
@@ -182,6 +183,13 @@ impl BenchmarkConfig {
             BenchmarkOperation::All | BenchmarkOperation::Stream
         )
     }
+
+    pub fn runs_async_unary(self) -> bool {
+        matches!(
+            self.operation,
+            BenchmarkOperation::All | BenchmarkOperation::AsyncUnary
+        )
+    }
 }
 
 fn parse_operation_env() -> Result<BenchmarkOperation, Box<dyn std::error::Error>> {
@@ -199,9 +207,10 @@ fn parse_operation_env() -> Result<BenchmarkOperation, Box<dyn std::error::Error
         "owned" => Ok(BenchmarkOperation::OwnedUnary),
         "lease" => Ok(BenchmarkOperation::LeaseUnary),
         "stream" => Ok(BenchmarkOperation::Stream),
+        "async" => Ok(BenchmarkOperation::AsyncUnary),
         _ => Err(
             "NYRING_BENCH_OPERATION must be one of: all, fire, fireid, fast, fastid, \
-                  unary, unaryid, owned, lease, stream"
+                  unary, unaryid, owned, lease, stream, async"
                 .into(),
         ),
     }
@@ -871,4 +880,118 @@ pub async fn run_stream_benchmark(plugin: PluginHandle, config: BenchmarkConfig)
     if config.sample_cpus {
         cpu_samples.print();
     }
+}
+
+/// Builds the trait example plugin and returns its dylib path (relative to
+/// the workspace root, like the paths in `main.rs`).
+fn trait_plugin_path() -> Option<&'static str> {
+    let status = std::process::Command::new("cargo")
+        .args([
+            "build",
+            "--manifest-path",
+            "examples/ex-nyring-trait-plugin/Cargo.toml",
+            "-r",
+        ])
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    Some(if cfg!(target_os = "macos") {
+        "target/release/libex_nyring_trait_plugin.dylib"
+    } else if cfg!(target_os = "windows") {
+        "target/release/ex_nyring_trait_plugin.dll"
+    } else {
+        "target/release/libex_nyring_trait_plugin.so"
+    })
+}
+
+/// Async-unary benchmark: drives the trait example's `async_echo` entry.
+/// The handler is an `async fn`; its future is ready on the first poll, so
+/// this measures the async machinery itself (session payload copy, future
+/// allocation, one poll, inline delivery) on top of the standard unary
+/// path — not the executor. Loads the trait plugin on demand, honoring
+/// `NYRING_BENCH_PINNED` like the main plugin.
+pub async fn run_async_echo_benchmark(host: &mut NylonRingHost, config: BenchmarkConfig) {
+    println!("\n--- Benchmark: Async Unary (trait plugin async_echo) ---");
+
+    let Some(path) = trait_plugin_path() else {
+        println!("  -> skipped: ex-nyring-trait-plugin failed to build");
+        return;
+    };
+    let name = "async-bench";
+    if host.plugin(name).is_none() {
+        let loaded = if std::env::var("NYRING_BENCH_PINNED").is_ok_and(|value| value == "1") {
+            host.load_pinned(name, path)
+        } else {
+            host.load(name, path)
+        };
+        if let Err(error) = loaded {
+            println!("  -> skipped: load failed ({error})");
+            return;
+        }
+    }
+    let plugin = host.plugin(name).expect("trait plugin was loaded");
+
+    let mut handles = Vec::with_capacity(config.workers);
+    let total_requests = Arc::new(AtomicU64::new(0));
+    let total_latency_nanos = Arc::new(AtomicU64::new(0));
+    let start_signal = Arc::new(tokio::sync::Notify::new());
+
+    println!("  -> Using {} threads", config.workers);
+    println!("  -> Using {} requests per batch", config.batch_size);
+    println!("  -> Using {} seconds for benchmark", config.duration_secs);
+
+    let payload = config.payload();
+    println!("  -> Payload Size: {}", payload.len());
+
+    for _ in 0..config.workers {
+        let plugin = plugin.clone();
+        let payload = payload.clone();
+        let counter = total_requests.clone();
+        let latency_counter = total_latency_nanos.clone();
+        let start_signal = start_signal.clone();
+
+        let handle = tokio::spawn(async move {
+            start_signal.notified().await;
+
+            let start_time = Instant::now();
+            let bench_duration = Duration::from_secs(config.duration_secs);
+            let mut local_requests = 0u64;
+            let mut local_latency_nanos = 0u64;
+
+            while start_time.elapsed() < bench_duration {
+                let batch_start = Instant::now();
+                for _ in 0..config.batch_size {
+                    let (status, _data) = plugin
+                        .call_response("async_echo", &payload)
+                        .await
+                        .expect("benchmarked call failed");
+                    assert_eq!(status, NrStatus::Ok, "benchmarked call was not Ok");
+                }
+                local_requests += config.batch_size as u64;
+                local_latency_nanos += batch_start.elapsed().as_nanos() as u64;
+            }
+            counter.fetch_add(local_requests, Ordering::Relaxed);
+            latency_counter.fetch_add(local_latency_nanos, Ordering::Relaxed);
+        });
+        handles.push(handle);
+    }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let start_time = Instant::now();
+    start_signal.notify_waiters();
+    for handle in handles {
+        let _ = handle.await;
+    }
+
+    let elapsed = start_time.elapsed();
+    let total = total_requests.load(Ordering::Relaxed);
+    let total_lat_nanos = total_latency_nanos.load(Ordering::Relaxed);
+    let rps = total as f64 / elapsed.as_secs_f64();
+    let avg_latency_nanos = total_lat_nanos.checked_div(total).unwrap_or(0);
+
+    println!("  -> Processed {} requests in {:.2?}", total, elapsed);
+    println!("  -> RPS: {:.2}/sec", rps);
+    println!("  -> Average latency: {} ns/request", avg_latency_nanos);
 }

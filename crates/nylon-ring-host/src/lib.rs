@@ -1231,34 +1231,106 @@ mod tests {
         Some(workspace_root.join("target/release").join(filename))
     }
 
-    fn c_plugin_path() -> Option<std::path::PathBuf> {
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    fn workspace_root() -> Option<&'static std::path::Path> {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()?
-            .parent()?;
-        let source = workspace_root.join("examples/c-plugin/plugin.c");
-        if !source.is_file() {
-            return None;
-        }
-        let extension = if cfg!(target_os = "macos") {
+            .parent()
+    }
+
+    fn dynlib_extension() -> &'static str {
+        if cfg!(target_os = "macos") {
             "dylib"
         } else if cfg!(target_os = "windows") {
             "dll"
         } else {
             "so"
-        };
+        }
+    }
+
+    /// Prepares the output path for a foreign-language example plugin and
+    /// runs its build command. A missing toolchain (spawn error) skips the
+    /// test by returning `None`; a failing compile is a real regression and
+    /// panics.
+    fn build_foreign_plugin(
+        out_dir: &str,
+        lib_stem: &str,
+        build: impl FnOnce(&std::path::Path, &std::path::Path) -> std::process::Command,
+    ) -> Option<std::path::PathBuf> {
+        let workspace_root = workspace_root()?;
         let output = workspace_root
-            .join("target/c-example")
-            .join(format!("libnylon_ring_c_example.{extension}"));
+            .join(out_dir)
+            .join(format!("lib{lib_stem}.{}", dynlib_extension()));
         std::fs::create_dir_all(output.parent()?).ok()?;
-        let status = std::process::Command::new("cc")
-            .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-shared"])
-            .args((!cfg!(target_os = "windows")).then_some("-fPIC"))
-            .arg(&source)
-            .arg("-o")
-            .arg(&output)
-            .status()
-            .ok()?;
-        status.success().then_some(output)
+        let Ok(status) = build(workspace_root, &output).status() else {
+            return None; // toolchain not installed on this machine
+        };
+        assert!(status.success(), "{lib_stem} failed to compile");
+        Some(output)
+    }
+
+    fn c_plugin_path() -> Option<std::path::PathBuf> {
+        build_foreign_plugin(
+            "target/c-example",
+            "nylon_ring_c_example",
+            |root, output| {
+                let mut command = std::process::Command::new("cc");
+                command
+                    .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-shared"])
+                    .args((!cfg!(target_os = "windows")).then_some("-fPIC"))
+                    .arg(root.join("examples/c-plugin/plugin.c"))
+                    .arg("-o")
+                    .arg(output);
+                command
+            },
+        )
+    }
+
+    fn cpp_plugin_path() -> Option<std::path::PathBuf> {
+        build_foreign_plugin(
+            "target/cpp-example",
+            "nylon_ring_cpp_example",
+            |root, output| {
+                let mut command = std::process::Command::new("c++");
+                command
+                    .args(["-std=c++17", "-Wall", "-Wextra", "-Werror", "-shared"])
+                    .args((!cfg!(target_os = "windows")).then_some("-fPIC"))
+                    .arg(root.join("examples/cpp-plugin/plugin.cpp"))
+                    .arg("-o")
+                    .arg(output);
+                command
+            },
+        )
+    }
+
+    fn go_plugin_path() -> Option<std::path::PathBuf> {
+        build_foreign_plugin(
+            "target/go-example",
+            "nylon_ring_go_example",
+            |root, output| {
+                let mut command = std::process::Command::new("go");
+                command
+                    .args(["build", "-buildmode=c-shared", "-o"])
+                    .arg(output)
+                    .arg(".")
+                    .current_dir(root.join("examples/go-plugin"));
+                command
+            },
+        )
+    }
+
+    fn zig_plugin_path() -> Option<std::path::PathBuf> {
+        build_foreign_plugin(
+            "target/zig-example",
+            "nylon_ring_zig_example",
+            |root, output| {
+                let mut command = std::process::Command::new("zig");
+                command
+                    .args(["build-lib", "-dynamic", "-O", "ReleaseFast"])
+                    .arg(format!("-femit-bin={}", output.display()))
+                    .arg(root.join("examples/zig-plugin/plugin.zig"));
+                command
+            },
+        )
     }
 
     #[test]
@@ -1811,6 +1883,61 @@ mod tests {
             handle.entry("echo"),
             Err(NylonRingHostError::EntryDispatchUnsupported)
         ));
+    }
+
+    #[test]
+    fn cpp_plugin_layout_round_trips_through_host() {
+        let _plugin_lock = plugin_test_lock();
+        let Some(path) = cpp_plugin_path() else {
+            return;
+        };
+        let mut host = NylonRingHost::new();
+        host.load("cpp-example", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("cpp-example").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (status, response) = runtime
+            .block_on(handle.call_response("echo", b"from-cpp"))
+            .unwrap();
+        assert_eq!(status, NrStatus::Ok);
+        assert_eq!(response, b"from-cpp");
+    }
+
+    #[test]
+    fn go_plugin_round_trips_through_pinned_host() {
+        let _plugin_lock = plugin_test_lock();
+        let Some(path) = go_plugin_path() else {
+            return;
+        };
+        // The Go runtime cannot be dlclosed, so a regular load would crash
+        // at unload or host drop; load_pinned never unloads and leaks the
+        // library handle instead, which is the only safe lifecycle here.
+        let mut host = NylonRingHost::new();
+        host.load_pinned("go-example", path.to_str().unwrap())
+            .unwrap();
+        let handle = host.plugin("go-example").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (status, response) = runtime
+            .block_on(handle.call_response("echo", b"from-go"))
+            .unwrap();
+        assert_eq!(status, NrStatus::Ok);
+        assert_eq!(response, b"from-go");
+    }
+
+    #[test]
+    fn zig_plugin_layout_round_trips_through_host() {
+        let _plugin_lock = plugin_test_lock();
+        let Some(path) = zig_plugin_path() else {
+            return;
+        };
+        let mut host = NylonRingHost::new();
+        host.load("zig-example", path.to_str().unwrap()).unwrap();
+        let handle = host.plugin("zig-example").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (status, response) = runtime
+            .block_on(handle.call_response("echo", b"from-zig"))
+            .unwrap();
+        assert_eq!(status, NrStatus::Ok);
+        assert_eq!(response, b"from-zig");
     }
 
     #[test]

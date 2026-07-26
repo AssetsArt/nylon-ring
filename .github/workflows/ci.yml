@@ -37,6 +37,9 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint
@@ -51,5 +54,9 @@ jobs:
         run: cargo package --package nylon-ring
       - name: Package host crate
         run: cargo package --package nylon-ring-host --config 'patch.crates-io.nylon-ring.path="crates/nylon-ring"'
-      - name: Validate C ABI example
-        run: cc -std=c11 -Wall -Wextra -Werror -shared -fPIC examples/c-plugin/plugin.c -o /tmp/libnylon_ring_c_example.so
+      - name: Validate foreign ABI examples
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -shared -fPIC examples/c-plugin/plugin.c -o /tmp/libnylon_ring_c_example.so
+          c++ -std=c++17 -Wall -Wextra -Werror -shared -fPIC examples/cpp-plugin/plugin.cpp -o /tmp/libnylon_ring_cpp_example.so
+          go build -C examples/go-plugin -buildmode=c-shared -o /tmp/libnylon_ring_go_example.so
+          zig build-lib -dynamic -O ReleaseFast -femit-bin=/tmp/libnylon_ring_zig_example.so examples/zig-plugin/plugin.zig

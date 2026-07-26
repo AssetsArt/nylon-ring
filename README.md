@@ -26,8 +26,13 @@
   bounded streaming with backpressure.
 - **Safe lifecycle** — in-flight call guards, graceful unload/reload, timeouts,
   and automatic request cleanup.
-- **Cross-language validation** — Rust examples plus a buildable
-  [C plugin](https://github.com/AssetsArt/nylon-ring/tree/main/examples/c-plugin).
+- **Cross-language validation** — Rust examples plus buildable
+  [C](https://github.com/AssetsArt/nylon-ring/tree/main/examples/c-plugin),
+  [C++](https://github.com/AssetsArt/nylon-ring/tree/main/examples/cpp-plugin),
+  [Go](https://github.com/AssetsArt/nylon-ring/tree/main/examples/go-plugin), and
+  [Zig](https://github.com/AssetsArt/nylon-ring/tree/main/examples/zig-plugin)
+  plugins, all round-trip tested against the canonical header in
+  [`c/`](https://github.com/AssetsArt/nylon-ring/tree/main/c).
 
 The workspace provides:
 

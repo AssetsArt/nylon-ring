@@ -1466,7 +1466,7 @@ unsafe impl<A: Sync, B: Sync> Sync for NrTuple<A, B> {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::mem::{align_of, size_of};
+    use std::mem::{align_of, offset_of, size_of};
 
     unsafe fn test_plugin_init(_: *mut c_void, _: *const NrHostVTable) -> NrStatus {
         NrStatus::Ok
@@ -1511,6 +1511,64 @@ mod tests {
         // 16 + 16 = 32 bytes
         assert_eq!(size_of::<NrKV>(), 32);
         assert_eq!(align_of::<NrKV>(), 8);
+    }
+
+    /// Mirror of the `_Static_assert` block in `c/nylon_ring.h` — the two
+    /// must stay identical so drift in either direction fails a build.
+    #[test]
+    fn test_layout_matches_c_header() {
+        assert_eq!(size_of::<NrStatus>(), 4);
+
+        assert_eq!(size_of::<NrStr>(), 16);
+        assert_eq!(offset_of!(NrStr, ptr), 0);
+        assert_eq!(offset_of!(NrStr, len), 8);
+        assert_eq!(offset_of!(NrStr, _reserved), 12);
+
+        assert_eq!(size_of::<NrBytes>(), 16);
+        assert_eq!(offset_of!(NrBytes, ptr), 0);
+        assert_eq!(offset_of!(NrBytes, len), 8);
+
+        assert_eq!(size_of::<NrVec<u8>>(), 40);
+        assert_eq!(offset_of!(NrVec<u8>, ptr), 0);
+        assert_eq!(offset_of!(NrVec<u8>, len), 8);
+        assert_eq!(offset_of!(NrVec<u8>, cap), 16);
+        assert_eq!(offset_of!(NrVec<u8>, owned), 24);
+        assert_eq!(offset_of!(NrVec<u8>, _reserved), 25);
+        assert_eq!(offset_of!(NrVec<u8>, drop_fn), 32);
+
+        assert_eq!(size_of::<NrOwnedBytes>(), 32);
+        assert_eq!(offset_of!(NrOwnedBytes, ptr), 0);
+        assert_eq!(offset_of!(NrOwnedBytes, len), 8);
+        assert_eq!(offset_of!(NrOwnedBytes, owner_ctx), 16);
+        assert_eq!(offset_of!(NrOwnedBytes, release), 24);
+
+        assert_eq!(size_of::<NrBufferLease>(), 24);
+        assert_eq!(offset_of!(NrBufferLease, ptr), 0);
+        assert_eq!(offset_of!(NrBufferLease, cap), 8);
+        assert_eq!(offset_of!(NrBufferLease, token), 16);
+
+        assert_eq!(size_of::<NrHostVTable>(), 32);
+        assert_eq!(offset_of!(NrHostVTable, send_result), 0);
+        assert_eq!(offset_of!(NrHostVTable, send_result_owned), 8);
+        assert_eq!(offset_of!(NrHostVTable, acquire_result_buffer), 16);
+        assert_eq!(offset_of!(NrHostVTable, commit_result_buffer), 24);
+
+        assert_eq!(size_of::<NrPluginVTable>(), 56);
+        assert_eq!(offset_of!(NrPluginVTable, init), 0);
+        assert_eq!(offset_of!(NrPluginVTable, handle), 8);
+        assert_eq!(offset_of!(NrPluginVTable, shutdown), 16);
+        assert_eq!(offset_of!(NrPluginVTable, stream_data), 24);
+        assert_eq!(offset_of!(NrPluginVTable, stream_close), 32);
+        assert_eq!(offset_of!(NrPluginVTable, resolve_entry), 40);
+        assert_eq!(offset_of!(NrPluginVTable, handle_by_id), 48);
+
+        assert_eq!(size_of::<NrPluginInfo>(), 56);
+        assert_eq!(offset_of!(NrPluginInfo, abi_version), 0);
+        assert_eq!(offset_of!(NrPluginInfo, struct_size), 4);
+        assert_eq!(offset_of!(NrPluginInfo, name), 8);
+        assert_eq!(offset_of!(NrPluginInfo, version), 24);
+        assert_eq!(offset_of!(NrPluginInfo, plugin_ctx), 40);
+        assert_eq!(offset_of!(NrPluginInfo, vtable), 48);
     }
 
     #[test]
